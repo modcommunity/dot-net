@@ -1,0 +1,26 @@
+; dot-net — multiplayer netcode for Godot.
+;
+; The distributable is `addons/dot_net/`. This project exists so the addon can be
+; opened and validated standalone.
+;
+; `addons/dot_core/` is a LOCAL SYMLINK to ../dot-core/addons/dot_core and is
+; gitignored — dot-core is a separate repository. See CLAUDE.md.
+
+config_version=5
+
+[application]
+
+config/name="dot-net"
+config/description="Multiplayer netcode: tick synchronisation, bit-packed wire format, state replication, snapshot interpolation, client-side prediction, lag compensation and interest management."
+config/version="0.1.0"
+run/main_scene="res://examples/netcode_demo.tscn"
+config/features=PackedStringArray("4.4", "GL Compatibility")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/dot_core/plugin.cfg", "res://addons/dot_net/plugin.cfg")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
