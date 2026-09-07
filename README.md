@@ -16,15 +16,15 @@ Multiplayer netcode for Godot 4. Tick synchronisation, a bit-packed wire format,
 declarative state replication, snapshot interpolation, client-side prediction with
 server reconciliation, lag-compensated hit detection, and interest management.
 
-Part of the `dot-*` family alongside [dot-core](../dot-core),
-[dot-server](../dot-server), [dot-auth](../dot-auth) and [dot-cloud](../dot-cloud).
+Part of the `dot-*` family alongside [dot-core](https://github.com/modcommunity/dot-core),
+[dot-server](https://github.com/modcommunity/dot-server), [dot-auth](https://github.com/modcommunity/dot-auth) and [dot-cloud](https://github.com/modcommunity/dot-cloud).
 It needs only dot-core — use it with dot-server, with Godot's raw multiplayer, or
 with your own transport.
 
 ## Install
 
 Copy `addons/dot_core/` and `addons/dot_net/` into your project and enable both in
-*Project → Project Settings → Plugins*. Requires Godot 4.4+.
+*Project → Project Settings → Plugins*. Requires Godot 4.7+.
 
 ## Use
 
