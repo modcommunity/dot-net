@@ -442,11 +442,32 @@ func client_tick(tick: int) -> void:
 ##
 ## Rendering runs at frame rate and simulation at tick rate; interpolating on the
 ## tick would quantise remote motion to the tick rate and undo the point of it.
-func interpolate_frame() -> void:
+##
+## [b]Which is what it did, because the tick asked for was a whole one.[/b]
+## [method DotNetClock.server_tick] returns an int and only moves inside
+## [method DotNetClock.advance], which a host calls from its physics loop — so every
+## frame in the same physics step sampled the same instant, and consecutive steps
+## sampled instants a whole tick apart. The interpolator did all its work correctly
+## between two snapshots and was then asked for the answer at a quantised time, so
+## remote players stepped at the tick rate no matter how smoothly they were
+## interpolated. Calling this once a frame was necessary and never sufficient.
+##
+## [param alpha] is how far this frame sits into the current physics step. Left
+## negative it comes from the engine, which is the right answer whenever the host
+## advances the clock once per physics frame — [b]and only while the engine's physics
+## rate equals the tick rate[/b], because otherwise a fraction through a physics frame
+## is not a fraction through a tick. A client puts itself on the server's rate when it
+## learns it; see `G2GNetBridge._adopt_tick_rate`.
+##
+## A suite that steps by hand and wants the old behaviour passes 0.0.
+func interpolate_frame(alpha: float = -1.0) -> void:
 	if is_server or interpolator == null or not clock.is_synced():
 		return
 
-	var server_tick_now := clock.server_tick()
+	if alpha < 0.0:
+		alpha = Engine.get_physics_interpolation_fraction()
+
+	var server_tick_now := float(clock.server_tick()) + clampf(alpha, 0.0, 1.0)
 
 	for identity in registry.all():
 		interpolator.apply(identity, server_tick_now)

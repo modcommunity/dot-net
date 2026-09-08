@@ -167,7 +167,11 @@ func _adapt() -> void:
 ## Returns an empty dictionary when there is nothing to show yet — a newly-spawned
 ## entity with one sample cannot be interpolated, and showing it at a guessed
 ## position is worse than showing it at its only known one.
-func sample(net_id: int, server_tick: int) -> Dictionary:
+## [param server_tick] is deliberately a float. A renderer runs between ticks and the
+## whole point of this class is to answer for the moment it is drawing, not for the
+## last whole tick that happened to have passed — see
+## [method DotNetManager.interpolate_frame], which is where the fraction comes from.
+func sample(net_id: int, server_tick: float) -> Dictionary:
 	if not _tracks.has(net_id):
 		return {}
 
@@ -316,7 +320,7 @@ static func _blend_value(from_value: Variant, to_value: Variant, alpha: float) -
 ## Only properties declared [member DotNetVar.interpolate] are written here; the rest
 ## were applied directly when the snapshot arrived. Splitting them is what lets a
 ## health bar slide while a weapon index snaps.
-func apply(identity: DotNetIdentity, server_tick: int) -> void:
+func apply(identity: DotNetIdentity, server_tick: float) -> void:
 	if identity == null or identity.is_predicted():
 		# A predicted entity is driven by prediction, not by interpolation. Writing
 		# interpolated state over it would fight the predictor every frame.
@@ -343,8 +347,10 @@ func apply(identity: DotNetIdentity, server_tick: int) -> void:
 		# simulation from a hook; if the only hook it has is the one a snapshot fires,
 		# every remote entity moves at the snapshot rate and everything computed here is
 		# thrown away — which looks exactly like an interpolator that does not work.
+		# Truncated for the hook, which is a tick number a game may index with; the
+		# fraction did its work above, inside the blend.
 		if wrote:
-			behaviour._net_interpolated(server_tick)
+			behaviour._net_interpolated(int(server_tick))
 
 
 # --- Housekeeping ----------------------------------------------------------

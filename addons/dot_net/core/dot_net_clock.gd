@@ -162,8 +162,19 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 
 ## Interpolation factor between the previous tick and the current one, 0..1.
 ##
-## What a renderer multiplies by to draw between two simulation states, so motion is
-## smooth at any frame rate above or below the tick rate.
+## [b]Not the number a renderer wants, despite how this reads.[/b] It is the leftover
+## in [member _accumulator], which only changes inside [method advance] — and a host
+## calls that from its physics loop. So it is constant across every frame drawn within
+## one physics step, which is precisely the stepping a renderer is trying to remove; on
+## a machine drawing faster than it steps physics, using this would quantise motion to
+## the physics rate instead of the tick rate and look no better.
+##
+## A renderer wants [code]Engine.get_physics_interpolation_fraction()[/code], which is
+## measured at render time. [method DotNetManager.interpolate_frame] and
+## [code]DotFpsController.render_state[/code] both use that.
+##
+## Kept because it is the honest answer to "how far through the current tick is the
+## simulation", which a diagnostic or a fixed-step consumer may still want.
 func alpha() -> float:
 	return clampf(_accumulator / tick_duration(), 0.0, 1.0)
 
