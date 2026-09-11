@@ -14,7 +14,7 @@ I intend on reviewing code, testing, and editing documentation regularly. If you
 ## Multiplayer Netcode
 Multiplayer netcode for Godot 4. Tick synchronisation, a bit-packed wire format, declarative state replication, snapshot interpolation, client-side prediction with server reconciliation, lag-compensated hit detection, and interest management.
 
-Part of the `dot-*` family alongside [dot-core](https://github.com/modcommunity/dot-core), [dot-server](https://github.com/modcommunity/dot-server), [dot-auth](https://github.com/modcommunity/dot-auth) and [dot-cloud](https://github.com/modcommunity/dot-cloud). It needs only dot-core — use it with dot-server, with Godot's raw multiplayer, or with your own transport.
+Part of the `dot-*` family alongside [dot-core](https://github.com/modcommunity/dot-core), [dot-server](https://github.com/modcommunity/dot-server), [dot-auth](https://github.com/modcommunity/dot-auth) and [dot-cloud](https://github.com/modcommunity/dot-cloud). It needs only dot-core, so you can use it with dot-server, with Godot's raw multiplayer, or with your own transport.
 
 ## Install
 
@@ -63,11 +63,11 @@ Dirty tracking, quantisation, audience filtering, rate limiting, interpolation a
 
 **Interpolation that hides jitter.** Remote entities render slightly in the past, far enough that the bracketing snapshots have arrived. The buffer grows quickly under jitter and shrinks slowly, so a good connection sees less delay than a bad one.
 
-**Lag compensation.** The server rewinds every other entity to where the shooter saw them — accounting for both their latency and their interpolation buffer — tests the shot, and restores. Bounded, so a client cannot claim an arbitrary rewind.
+**Lag compensation.** The server rewinds every other entity to where the shooter saw them, accounting for both their latency and their interpolation buffer, then tests the shot and restores. Bounded, so a client cannot claim an arbitrary rewind.
 
-**Interest management you can replace.** Distance, spatial grid, or everything — or subclass `DotNetInterest` and implement one method for teams, rooms, line of sight or fog of war. It is the biggest lever on bandwidth and the only anti-cheat that actually works: data never sent cannot be drawn on a wallhack.
+**Interest management you can replace.** Distance, spatial grid, or everything. You can also subclass `DotNetInterest` and implement one method for teams, rooms, line of sight or fog of war. It is the biggest lever on bandwidth and the only anti-cheat that actually works: data never sent cannot be drawn on a wallhack.
 
-**Bandwidth budgeting.** A per-client byte budget with a priority accumulator, so important entities update often, unimportant ones update eventually, and nothing is starved — with an explicit bound on how long "eventually" can be.
+**Bandwidth budgeting.** A per-client byte budget with a priority accumulator, so important entities update often, unimportant ones update eventually, and nothing is starved, with an explicit bound on how long "eventually" can be.
 
 **Stats that name the cause.** Netcode fails quietly, and players call every failure "lag". A high correction rate is a determinism bug; high starvation is bandwidth; high late-input counts are the clock. Different fixes.
 
@@ -85,8 +85,8 @@ godot --headless --path . res://examples/netcode_demo.tscn
 
 ## Honest limits
 
-`_net_simulate` must be deterministic across machines or reconciliation will not converge — which rules out Godot's physics for anything needing exact agreement. See [CLAUDE.md](CLAUDE.md#determinism-is-a-requirement-not-an-aspiration). Rollback netcode, matchmaking and voice are out of scope.
+`_net_simulate` must be deterministic across machines or reconciliation will not converge, which rules out Godot's physics for anything needing exact agreement. See [CLAUDE.md](CLAUDE.md#determinism-is-a-requirement-not-an-aspiration). Rollback netcode, matchmaking and voice are out of scope.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
