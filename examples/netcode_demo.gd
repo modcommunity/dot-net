@@ -566,6 +566,45 @@ func _test_clock() -> void:
 	follower.sync_from_server(50000, 100.0)
 	_check("large error snaps", follower.tick > 49000)
 
+	# [b]The threshold is a DURATION, and every check above runs at the rate it was
+	# written as a tick count for.[/b] 60 ticks is one second at 60 Hz and 0.47 s at 128,
+	# so a 128-tick server -- the rate this genre runs and the rate g2gfast ships --
+	# snapped on any half-second hitch: a map change, a stalled frame, a browser tab
+	# doing layout. A snap discards everything predicted, so the world jumps, and it
+	# jumped only on the one game nothing was tested at.
+	var fast := DotNetClock.new(128, false)
+	fast.sync_from_server(10000, 0.0)
+	fast.sync_from_server(10000, 20.0)
+
+	var fast_before := fast.tick
+	# Half a second behind: 64 ticks at 128, which is what a real client logged.
+	fast.sync_from_server(fast.server_tick() + 64, 20.0)
+	_check(
+		"a half-second hitch at 128 ticks is drift, not a snap",
+		absi(fast.tick - fast_before) < 5
+	)
+
+	# Two seconds is a different session, at any rate.
+	fast.sync_from_server(fast.server_tick() + 256, 20.0)
+	_check("and two seconds still snaps", absi(fast.tick - fast_before) > 200)
+
+	# The same hitch, at the rate the constant was written for. It was never wrong here,
+	# which is exactly why it went unnoticed.
+	var slow := DotNetClock.new(60, false)
+	slow.sync_from_server(10000, 0.0)
+	slow.sync_from_server(10000, 20.0)
+	var slow_before := slow.tick
+	slow.sync_from_server(slow.server_tick() + 30, 20.0)
+	_check(
+		"a half-second hitch at 60 ticks is drift too, as it always was",
+		absi(slow.tick - slow_before) < 5
+	)
+
+	_check(
+		"the threshold is one second whatever the rate",
+		fast.snap_threshold_ticks() == 128 and slow.snap_threshold_ticks() == 60
+	)
+
 	# Jitter must widen the margin, or a jittery connection loses inputs.
 	var jittery := DotNetClock.new(60, false)
 	for i in range(20):

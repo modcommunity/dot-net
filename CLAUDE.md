@@ -30,9 +30,7 @@ read. At any instant a client is dealing with three tick numbers:
   arrived.
 - **Server tick is estimated**, never known.
 
-Drift is corrected by **scaling tick duration**, not by jumping the tick number —
-snapping teleports every predicted object and re-runs applied inputs. Past
-`SNAP_THRESHOLD_TICKS` it does snap, because a suspended tab is not drift.
+Drift is corrected by **scaling tick duration**, not by jumping the tick number — snapping teleports every predicted object and re-runs applied inputs. Past `SNAP_THRESHOLD_SECONDS` it does snap, because a suspended tab is not drift. That threshold is a **duration**, and it was a tick count: 60 ticks is one second only at the default rate, so a 128-tick server snapped at 0.47 s and threw a predicted state away for every half-second hitch — which is what a player calls jumpy.
 
 ## The extension points
 

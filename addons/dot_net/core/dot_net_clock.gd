@@ -40,12 +40,25 @@ const CHANNEL := "net.clock"
 ## with a drifting clock.
 const MAX_DRIFT_RATE := 0.05
 
-## Error beyond which the clock gives up on smoothing and snaps.
+## Error beyond which the clock gives up on smoothing and snaps, in SECONDS.
 ##
 ## A client that was suspended (an alt-tabbed browser tab, a phone that slept) can be
 ## minutes out, and smoothing that at 5% would take hours. Past this it is not drift,
 ## it is a different session.
-const SNAP_THRESHOLD_TICKS := 60
+##
+## [b]In seconds because it is a duration, and it was a tick count.[/b] The reasoning has
+## always been about time -- "suspended", "a different session" -- but the number was 60
+## ticks, which is one second only on a server running the default rate. A 128-tick
+## server snapped at 0.47 s, and a map change or a stalled frame is comfortably that
+## long: g2gfast logged `error_ticks=62` and `error_ticks=64` on a browser client, both
+## of them a half-second hitch that a one-second threshold would have SMOOTHED and this
+## one threw a whole predicted state away for.
+##
+## That is the difference a player feels. Drift correction is invisible by design; a snap
+## discards everything predicted, so the world jumps -- and it jumped on the one game
+## here that runs 128, which is the rate the genre runs and the rate this was never
+## tried at.
+const SNAP_THRESHOLD_SECONDS := 1.0
 
 ## Round-trip samples kept for the estimate.
 var _rtt_samples: Array[float] = []
@@ -212,7 +225,7 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		)
 		return
 
-	if absi(error) > SNAP_THRESHOLD_TICKS:
+	if absi(error) > snap_threshold_ticks():
 		# Not drift — a suspended process, or a reconnect. Smoothing would take
 		# hours, and everything predicted is stale regardless.
 		_snap_count += 1
@@ -231,6 +244,14 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		float(error) / float(maxi(1, tick_rate)), -MAX_DRIFT_RATE, MAX_DRIFT_RATE
 	)
 	_drift_scale = 1.0 - correction
+
+
+## [constant SNAP_THRESHOLD_SECONDS] in ticks, at this clock's rate.
+##
+## At least one tick, so a clock configured with an absurdly low rate still snaps on a
+## genuinely different session rather than trying to smooth it.
+func snap_threshold_ticks() -> int:
+	return maxi(1, int(roundf(SNAP_THRESHOLD_SECONDS * float(tick_rate))))
 
 
 ## Ticks a packet spends in flight, one way. Half the measured round trip.
