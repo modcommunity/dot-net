@@ -19,8 +19,14 @@ extends RefCounted
 ## unreliable payload means losing one fragment discards the whole thing, so the loss
 ## rate multiplies by the fragment count. Unreliable messages that do not fit are
 ## refused rather than fragmented, and the sender is told to send less.
-
-const CHANNEL := "net.packet"
+##
+## [b]Nothing here logs, and it used to declare a channel promising that it would.[/b]
+## Every method on this class is static, takes bytes and returns bytes or a
+## [DotResult], and knows nothing about a peer, a connection or a tick. A codec that
+## decided on its own that a malformed packet was worth a line would write one per
+## hostile datagram from a context with nothing to name; the caller holds the peer and
+## the address and is the only one that can say anything useful about a refusal. The
+## constant was the leftover, not the silence.
 
 ## Bytes of payload per packet before fragmenting.
 ##

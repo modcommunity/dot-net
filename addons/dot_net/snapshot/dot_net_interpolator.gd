@@ -154,10 +154,30 @@ func _adapt() -> void:
 	var needed := 1.0 + (_arrival_jitter_ms * 2.0) / maxf(1.0, interval_ms)
 	needed = clampf(needed, 1.0, 10.0)
 
+	var before := _delay_ticks
+
 	if needed > _delay_ticks:
 		_delay_ticks = needed
 	else:
 		_delay_ticks = lerpf(_delay_ticks, needed, 0.01)
+
+	# [b]Reported on whole snapshots crossed, not on every adjustment.[/b] This runs on
+	# every arrival and the shrink is a 1% lerp, so a line per change is a line twenty
+	# times a second that never says anything. A whole snapshot of buffer is the unit
+	# that matters: it is what the player pays in latency, and it is what lag
+	# compensation on the server has to rewind by.
+	#
+	# DEBUG, and a state transition rather than a fault -- the buffer growing is this
+	# class absorbing a connection's jitter, which is its whole job. It is also the
+	# answer to "everything remote feels delayed", which nothing else in the process
+	# reports.
+	if floori(_delay_ticks) != floori(before):
+		DotLog.debug(CHANNEL, "the interpolation buffer moved", {
+			"from": "%.2f ticks" % before,
+			"to": "%.2f ticks" % _delay_ticks,
+			"jitter": "%.1f ms" % _arrival_jitter_ms,
+			"interval": "%.1f ms" % _arrival_interval_ms,
+		})
 
 
 # --- Sampling --------------------------------------------------------------

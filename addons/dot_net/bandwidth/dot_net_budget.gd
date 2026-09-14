@@ -44,6 +44,10 @@ class PeerBudget extends RefCounted:
 	var starved_this_tick: int = 0
 	var total_starved: int = 0
 
+	## Whether the tick that just ended starved anything, so the log can report the
+	## edges rather than the condition. See [method DotNetBudget.begin_tick].
+	var was_starving: bool = false
+
 	func _init(p_peer_id: int) -> void:
 		peer_id = p_peer_id
 		window_started_ms = Time.get_ticks_msec()
@@ -212,8 +216,39 @@ func _roll_window(budget: PeerBudget) -> void:
 
 
 ## Clears the per-tick starvation counter. Call at the start of each snapshot.
+##
+## [b]And the only tick boundary this class has, which is why the log line is here.[/b]
+## A peer whose budget has run out is worth knowing about -- it is the difference
+## between "the server is fine" and "this player is seeing a world that updates in
+## lumps" -- but [method note_starved] is called once per entity per tick, so
+## reporting it there is twenty lines a second per peer. What is logged instead is the
+## EDGE: the tick a peer started starving, and the tick it stopped.
+##
+## DEBUG both ways, because neither is a fault. Interest management and this
+## accumulator exist precisely so that a connection too small for the scene degrades
+## into slower updates rather than into a backed-up socket, and starvation is that
+## design working. It is still the first thing to look for when somebody reports that
+## the other players are stuttering.
 func begin_tick(peer_id: int) -> void:
-	for_peer(peer_id).starved_this_tick = 0
+	var budget := for_peer(peer_id)
+	var starving := budget.starved_this_tick > 0
+
+	if starving != budget.was_starving:
+		if starving:
+			DotLog.debug(CHANNEL, "a peer's budget ran out", {
+				"peer": peer_id,
+				"starved": budget.starved_this_tick,
+				"bytes_this_second": budget.bytes_this_second,
+				"budget": config.per_client_budget,
+			})
+		else:
+			DotLog.debug(CHANNEL, "a peer's budget is keeping up again", {
+				"peer": peer_id, "total_starved": budget.total_starved
+			})
+
+		budget.was_starving = starving
+
+	budget.starved_this_tick = 0
 
 
 # --- Reporting -------------------------------------------------------------
