@@ -222,12 +222,40 @@ func has(net_id: int) -> bool:
 	return get_identity(net_id) != null
 
 
+## Every identity still worth walking, and the freed ones dropped as they are found.
+##
+## [b]The validity test has to come BEFORE the typed assignment, and for a while it did
+## not.[/b] `var identity: DotNetIdentity = _by_id[net_id]` on a freed object is itself the
+## error — "Trying to assign invalid previously freed instance" — so the `is_instance_valid`
+## guard on the next line could never run and never protected anything. Every caller that
+## walks this got one error per stale entry per tick, for ever, and the guard that was meant
+## to make an entity freed without unregistering harmless instead made it very loud.
+##
+## The entry is also dropped rather than merely skipped. A registry that reports a stale id
+## every frame is a registry that will report it every frame until the process ends;
+## something has already gone wrong upstream, and the honest thing is to say so once and let
+## go. Games do free a replicated node without telling us — a round re-laying a map does it
+## by design — and dot-props' `is_alive()` makes the same distinction for the same reason.
 func all() -> Array[DotNetIdentity]:
 	var out: Array[DotNetIdentity] = []
+	var stale: Array[int] = []
+
 	for net_id in _by_id:
-		var identity: DotNetIdentity = _by_id[net_id]
-		if is_instance_valid(identity):
-			out.append(identity)
+		# Untyped, so the assignment itself cannot be the error being guarded against.
+		var found: Variant = _by_id[net_id]
+
+		if not is_instance_valid(found):
+			stale.append(int(net_id))
+			continue
+
+		out.append(found as DotNetIdentity)
+
+	for net_id in stale:
+		_by_id.erase(net_id)
+		DotLog.debug(CHANNEL, "dropped an entity that was freed without being unregistered", {
+			"net_id": net_id,
+		})
+
 	return out
 
 

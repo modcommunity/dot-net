@@ -290,7 +290,19 @@ func is_predicted() -> bool:
 ## Reads whichever transform the entity actually has, so a 2D game works without a
 ## separate code path.
 func world_position() -> Vector3:
-	if entity == null:
+	if entity == null or not is_instance_valid(entity):
+		return Vector3.ZERO
+
+	# [b]In the tree as well as valid, and the second is not enough.[/b] A game is allowed to
+	# take a replicated node out of the tree between ticks — a round re-laying its map does
+	# exactly that, and it does it from inside this addon's own loop over identities — and a
+	# [Node3D] that is not in the tree answers `global_position` with
+	# `Condition "!is_inside_tree()" is true` and a full backtrace, once per entity per tick.
+	# To an operator reading a server log that is indistinguishable from a crash, for a state
+	# that is entirely expected. dot-entity guards its own `position()` for the same reason
+	# and writes down the same finding: [Node2D] does not even error, it quietly returns the
+	# LOCAL position instead, so the two dimensions disagree without saying so.
+	if not (entity as Node).is_inside_tree():
 		return Vector3.ZERO
 
 	if entity is Node3D:
