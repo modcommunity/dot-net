@@ -508,7 +508,9 @@ func _send_snapshots(tick: int, identities: Array[DotNetIdentity]) -> void:
 		# was documented from the first version and enforced by nothing; it is applied
 		# HERE rather than by a score sort of our own, because prioritise is what pins
 		# always_relevant and a plain sort would cut the observer's own entity.
-		relevant = interest.prioritise(observer, relevant, config.entity_cap(), context)
+		relevant = interest.prioritise(
+			observer, relevant, config.entity_cap(), context, peer_id
+		)
 		relevant = budget.accumulate(peer_id, relevant, scores)
 
 		if _send_to_peer(peer_id, tick, relevant):

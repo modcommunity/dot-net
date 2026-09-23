@@ -51,6 +51,12 @@ var _cache: Dictionary = {}
 ## the boundary from flickering in and out.
 var _lingering: Dictionary = {}
 
+## observer peer_id -> {capped: bool, warned: bool, since_tick: int}
+##
+## Whether [method prioritise] is currently cutting this peer's relevant set, so the
+## log reports the EDGES of that condition rather than every snapshot it holds.
+var _cap_state: Dictionary = {}
+
 
 # --- Subclass interface ----------------------------------------------------
 
@@ -245,8 +251,11 @@ func prioritise(
 	observer: DotNetIdentity,
 	entities: Array[DotNetIdentity],
 	limit: int,
-	context: Dictionary
+	context: Dictionary,
+	peer_id: int = 0
 ) -> Array[DotNetIdentity]:
+	_note_cap(peer_id, entities.size(), limit, context)
+
 	if limit <= 0 or entities.size() <= limit:
 		return entities
 
@@ -270,6 +279,53 @@ func prioritise(
 	return out
 
 
+## Reports the edges of "the cap is cutting what this peer should see".
+##
+## [b]This is the one thing in this class an operator can act on.[/b] Everything else
+## here is a per-observer per-tick decision, and a line per decision is twenty a
+## second per peer that never says anything. But when the entity cap cuts a set that
+## interest management already chose, the dropped entities are ones this client
+## SHOULD be seeing — a player standing in plain sight who is not drawn — and the
+## remedy is a setting: raise [member DotNetConfig.max_entities_per_snapshot] or
+## [member DotNetConfig.max_tracked_entities], or tighten the strategy. Nothing in
+## the process said so before.
+##
+## WARN the first time a peer is capped, because that is a configuration somebody
+## should look at eventually; DEBUG for every later crossing, both ways, because a peer
+## on the boundary of a crowded room crosses it repeatedly and a WARN per crossing
+## would bury the one that matters. The "clear" edge wants the set back under 90% of
+## the cap, for the same reason: a set hovering at the cap would otherwise flap once
+## a snapshot. [param peer_id] 0 is a caller outside the snapshot loop — a test or
+## a tool asking directly — and is not reported.
+func _note_cap(peer_id: int, count: int, limit: int, context: Dictionary) -> void:
+	if peer_id == 0 or limit <= 0:
+		return
+
+	var state: Dictionary = _cap_state.get(peer_id, {"capped": false, "warned": false})
+	var tick := int(context.get("tick", 0))
+
+	if not state["capped"] and count > limit:
+		state["capped"] = true
+		state["since_tick"] = tick
+		var fields := {
+			"peer": peer_id, "relevant": count, "cap": limit,
+			"dropped": count - limit, "strategy": strategy_name,
+		}
+		if state["warned"]:
+			DotLog.debug(CHANNEL, "the entity cap is cutting a peer's view again", fields)
+		else:
+			state["warned"] = true
+			DotLog.warn(CHANNEL, "the entity cap is cutting entities a peer should see", fields)
+	elif state["capped"] and count * 10 <= limit * 9:
+		state["capped"] = false
+		DotLog.debug(CHANNEL, "a peer's view fits under the entity cap again", {
+			"peer": peer_id, "relevant": count, "cap": limit,
+			"ticks": tick - int(state.get("since_tick", tick)),
+		})
+
+	_cap_state[peer_id] = state
+
+
 static func _find(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 	for identity in all:
 		if identity.net_id == net_id:
@@ -289,6 +345,7 @@ func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array[DotNetIdenti
 func forget_peer(peer_id: int) -> void:
 	_cache.erase(peer_id)
 	_lingering.erase(peer_id)
+	_cap_state.erase(peer_id)
 
 
 ## Drops every cached answer, forcing re-evaluation.
@@ -305,4 +362,7 @@ func describe() -> Dictionary:
 		"strategy": strategy_name,
 		"interval": evaluation_interval_sec,
 		"cached_observers": _cache.size(),
+		"capped_observers": _cap_state.values().filter(
+			func(state: Dictionary) -> bool: return state["capped"]
+		).size(),
 	}
