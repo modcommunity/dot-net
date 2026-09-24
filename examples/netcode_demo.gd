@@ -56,6 +56,32 @@ class Movement extends DotNetBehaviour:
 ## whether anything is ever told about it. A game copies replicated state into a node from
 ## a hook, and if the only hook it has is the one a snapshot fires, every remote entity
 ## moves at the snapshot rate while the interpolated value sits in a property nobody read.
+## Counts the engine's own errors while installed. The only way a suite can assert that
+## something produced NO `Condition "!is_inside_tree()"` line: those go to stderr, change no
+## exit code, and a green run that prints ten of them is the shape this family keeps
+## finding in its logs.
+class EngineErrors extends Logger:
+	var _lock := Mutex.new()
+	var _seen := PackedStringArray()
+
+	func _log_error(
+		_function: String, _file: String, _line: int, code: String, _rationale: String,
+		_editor_notify: bool, _error_type: int, _script_backtraces: Array[ScriptBacktrace]
+	) -> void:
+		_lock.lock()
+		_seen.append(code)
+		_lock.unlock()
+
+	func _log_message(_message: String, _error: bool) -> void:
+		pass
+
+	func count() -> int:
+		_lock.lock()
+		var n := _seen.size()
+		_lock.unlock()
+		return n
+
+
 class Interpolated extends DotNetBehaviour:
 	var position: Vector3 = Vector3.ZERO
 	var health: int = 100
@@ -1172,6 +1198,25 @@ func _test_lag_compensation() -> void:
 	_check("with_rewind returns the body's value", str(result) == "tested")
 	_check("with_rewind restored", not history.is_rewound())
 
+	# A replicated node taken out of the tree between ticks — a round re-laying its map
+	# does this, before the identity is unregistered. Recording it read its global basis
+	# and printed an engine error per entity per tick; recording it at all would put a
+	# sample at the origin for a rewind to drag a hitbox through.
+	var gone := _make_entity(&"player", 4)
+	gone.net_id = 21
+	var errors := EngineErrors.new()
+	OS.add_logger(errors)
+	history.record([target, gone], 40)
+	var guarded := history.rewind([target, gone], 38, 40, 0)
+	history.restore()
+	OS.remove_logger(errors)
+	_check("an entity out of the tree is not recorded", history.position_at(21, 40.0) == null)
+	_check("and one in the tree still is", history.position_at(20, 40.0) != null)
+	_check("a rewind skips it and still moves the rest", guarded.ok
+		and int((guarded.value as Dictionary)["rewound"]) == 1)
+	_check("with no engine error from either (%d)" % errors.count(), errors.count() == 0)
+	gone.get_parent().free()
+
 	# The view tick must account for both latency and interpolation delay.
 	var view := history.client_view_tick(1000, 100.0, 2.0)
 	_check("client view tick is in the past (%d)" % view, view < 1000 and view > 990)
@@ -1188,6 +1233,29 @@ func _test_lag_compensation() -> void:
 ## input never changes. The zig-zag here is the entire point.
 func _test_prediction() -> void:
 	print("[prediction]")
+
+	# A client that learns its peer id after setup — from a handshake, as the lobby's does.
+	# The registry kept the id it was built with, so its own entity registered as somebody
+	# else's and was never predicted, on a real socket only: every loopback in the family
+	# set the id before setup.
+	var late := DotNetManager.new()
+	late.name = "LatePeer"
+	late.is_server = false
+	late.service_scope = &"late_peer"
+	late.local_peer_id = 0
+	late.auto_tick = false
+	late.config_file = ""
+	late.config = DotNetConfig.new()
+	add_child(late)
+	var _up := late.setup()
+	late.local_peer_id = 7
+	var mine := _make_entity(&"player", 7)
+	var _registered := late.registry.register(mine, 30, 0, late.config)
+	_check("a peer id set after setup reaches the registry", late.registry.local_peer_id() == 7)
+	_check("so the entity it owns is predicted", mine.is_predicted())
+	mine.get_parent().free()
+	remove_child(late)
+	late.free()
 
 	var config := DotNetConfig.new()
 	config.enable_prediction = true

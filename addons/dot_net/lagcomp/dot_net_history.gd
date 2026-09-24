@@ -143,7 +143,15 @@ func record(identities: Array[DotNetIdentity], tick: int) -> void:
 		return
 
 	for identity in identities:
-		if identity.entity == null:
+		# Not in the world, not recorded. A game may take a replicated node out of the
+		# tree between ticks — a round re-laying its map does, from inside the manager's
+		# own loop, before the identity is unregistered — and [method
+		# DotNetIdentity.world_position] already answers ZERO for one rather than erroring.
+		# This loop then read `global_basis` straight off it, which errors once per entity
+		# per tick with a backtrace an operator cannot tell from a crash (smash-copter's
+		# ten decks, every round). And a sample recorded at the origin would be worse than
+		# none: a rewind to that tick would drag a hitbox through the middle of the map.
+		if not _in_world(identity):
 			continue
 
 		var rotation := Quaternion.IDENTITY
@@ -222,7 +230,9 @@ func rewind(
 		)
 
 	for identity in identities:
-		if identity.net_id == exclude_net_id or identity.entity == null:
+		# Out of the world is out of the rewind: setting a global transform on a node
+		# outside the tree errors, and there is nothing there for a shot to hit.
+		if identity.net_id == exclude_net_id or not _in_world(identity):
 			continue
 
 		if not _tracks.has(identity.net_id):
@@ -260,7 +270,9 @@ func restore() -> int:
 		var entry: Dictionary = _rewound[net_id]
 		var identity: DotNetIdentity = entry["identity"]
 
-		if is_instance_valid(identity) and identity.entity != null:
+		# Taken out of the tree between the rewind and here — by the test itself, say
+		# a kill that despawns — is left where it is, for the same reason as above.
+		if is_instance_valid(identity) and _in_world(identity):
 			_apply(identity, entry["position"], entry["rotation"])
 
 	_rewound.clear()
@@ -288,6 +300,15 @@ func with_rewind(
 	var result: Variant = body.call()
 	restore()
 	return result
+
+
+## Whether an identity's entity is a live node in the scene tree — the only kind whose
+## global transform can be read or written without an engine error.
+static func _in_world(identity: DotNetIdentity) -> bool:
+	if identity == null or identity.entity == null or not is_instance_valid(identity.entity):
+		return false
+
+	return (identity.entity as Node).is_inside_tree()
 
 
 static func _current_rotation(identity: DotNetIdentity) -> Quaternion:

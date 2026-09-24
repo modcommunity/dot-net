@@ -210,6 +210,12 @@ Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
     that inserted the same ids in a different order walked them in a different
     order. Sorted now.
 
+15. **`DotNetHistory.record` read `global_basis` off entities that were not in the tree.** `DotNetIdentity.world_position` already answered ZERO for one, with the reason written down — a game may take a replicated node out between ticks, and a round re-laying its map does it from inside the manager's own loop — and the history's rotation read, one line away, did not. mg-smash-copter's dedicated server printed ten `Condition "!is_inside_tree()"` backtraces every round, one per deck of the boot field, on a green run. The history now skips an entity that is not in the world when it records, rewinds and restores: a sample at the origin would be worse than none, since a rewind to that tick would drag a hitbox through the middle of the map. The demo counts engine errors with a `Logger` to assert zero, which is the only way a suite can see a line that goes to stderr and changes no exit code.
+
+16. **A peer id set after `setup()` never reached the registry.** The registry takes its own copy of `local_peer_id` when it is built and decides `is_owner` — so `is_predicted` — from it at registration. game-simple-lobby's client learns its id from its hello, after setup, so over a real socket it registered its own occupant as somebody else's and predicted nothing at all; its loopback suite, which sets the id first, asserted the opposite and passed. `local_peer_id` has a setter that forwards it now. **Two copies of one value is the bug the second copy was guarding against.**
+
+17. **Not fixed, and worth knowing: a predicted entity whose server state stands still is never reconciled.** A snapshot carries an entity only when something changed against the acked baseline, and `DotNetPredictor.reconcile` returns early for an entity the snapshot did not carry ("it was not sent, not that it did not move"). So a client predicting movement the server refused — a server-only freeze is the clean case — walks away and is never pulled back: 113 units in game-hungario's `headless_net` naive control, 530 in the lobby's. Nothing shipped reaches it today (an admin freeze changes a replicated bit, so the entity is in the snapshot), but a server that stops somebody without changing anything it replicates will.
+
 ## The render timeline has to move between packets
 
 `DotNetClock.server_tick()` is what `render_tick()` is derived from, and therefore what
@@ -349,7 +355,7 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 186 checks: wire round-trips, quantisation accuracy, message direction and
+# 218 checks: wire round-trips, quantisation accuracy, message direction and
 # schema mismatch, batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
 # extrapolation bounds, rewind/restore, prediction replay against a server

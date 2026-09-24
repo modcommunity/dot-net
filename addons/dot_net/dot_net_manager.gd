@@ -53,7 +53,16 @@ signal entity_despawned(net_id: int)
 @export var is_server: bool = false
 
 ## This peer's id. 1 is the server in Godot's numbering.
-@export var local_peer_id: int = 1
+@export var local_peer_id: int = 1:
+	set(value):
+		local_peer_id = value
+		# The registry keeps its own copy, taken at setup, and decides `is_owner` — and so
+		# `is_predicted` — from it when an entity registers. A client that learns its peer
+		# id from a handshake after setup (game-simple-lobby's hello does) otherwise
+		# registers its own occupant as somebody else's, and walks a full round trip behind
+		# its own keyboard with every check on a loopback that set the id first passing.
+		if registry != null:
+			registry.set_local_peer(value)
 
 ## Run the tick loop in [method Node._physics_process].
 ##
