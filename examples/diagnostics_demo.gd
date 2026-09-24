@@ -22,6 +22,12 @@ var _checks: int = 0
 var _sections_started: int = 0
 var _sections_finished: int = 0
 
+## Every check this suite makes, the last one included. The section counter cannot see a
+## check that never ran inside a section that had already announced itself — a runtime
+## error aborts the rest of that function and the counter is satisfied — so the total is
+## compared with this. Raise it with every check added.
+const CHECKS := 68
+
 
 func _ready() -> void:
 	DotLog.set_level(DotLog.Level.INFO)
@@ -45,6 +51,11 @@ func _run() -> void:
 		"every section ran",
 		_sections_finished == _sections_started,
 		"%d/%d" % [_sections_finished, _sections_started]
+	)
+	_check(
+		"every check ran",
+		_checks + 1 == CHECKS,
+		"%d of %d" % [_checks + 1, CHECKS]
 	)
 	_line("")
 	_line("[b]%d checks, %d failed[/b]" % [_checks, _failures])

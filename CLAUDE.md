@@ -374,7 +374,7 @@ done
 # integration run with 20% simulated packet loss.
 godot --headless --path . res://examples/netcode_demo.tscn
 
-# 67 checks over DotNetStats and DotNetSnapshot on their own: inferred loss,
+# 68 checks over DotNetStats and DotNetSnapshot on their own: inferred loss,
 # reordering vs. duplication, rates on a connection that stopped, rtt
 # percentiles and the bounded sample window, delta/apply round-trips, and
 # baseline isolation.
