@@ -565,6 +565,13 @@ func _send_to_peer(
 
 		var before := writer.byte_length()
 
+		# The entity this peer predicts. Its client reads a property's absence as "the
+		# server's is unchanged" and rewinds to what it last received, so for this entity
+		# alone a property stays owed until the peer has confirmed it — see
+		# [method DotNetBehaviour.collect_dirty]. One entity per peer, usually.
+		var predicted_by_peer := identity.owner_peer_id == peer_id \
+			and identity.authority == DotNetIdentity.Authority.SHARED
+
 		writer.write_uint(identity.net_id, DotNetRegistry.ID_BITS)
 		writer.write_uint(identity.behaviours.size(), 6)
 
@@ -574,7 +581,7 @@ func _send_to_peer(
 			behaviour.sync_peer_acks(peer_id, acked_tick, strict)
 			behaviour.trim_pending(peer_id, oldest_pending)
 
-			var dirty := behaviour.collect_dirty(peer_id, false)
+			var dirty := behaviour.collect_dirty(peer_id, false, predicted_by_peer)
 			behaviour.write_state(writer, dirty, peer_id, tick)
 
 		var spent := writer.byte_length() - before
@@ -669,14 +676,24 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 
 			# A predicted entity's state goes to reconciliation rather than being
 			# applied: applying it directly would undo everything predicted since.
+			#
+			# [b]And what goes is the server's whole state, not the properties.[/b] A
+			# snapshot carries only what changed, and on the owning client the properties
+			# hold its own prediction between snapshots — so reading them back here, which
+			# is what this did, made "the server has nothing new to say" into "the server
+			# agrees with you", and the replay then ran the lead a second time on top of
+			# it. A client the server held still — a server-only freeze, a wall only the
+			# server has, any refusal that changes nothing replicated — walked away at
+			# twice its speed and was never pulled back: 113 units in game-hungario's
+			# naive admin control, 530 in the lobby's. `rewind` puts what the snapshot
+			# left out back to what the server last sent, before the game's
+			# `_net_state_applied` copies the properties into its simulation.
 			if identity.is_predicted():
-				var start := reader.bit_position()
-				var applied := behaviour.read_state(reader, tick)
+				var applied := behaviour.read_state(reader, tick, true)
 				if not applied.ok:
 					stats.note_decode_failure()
 					return applied
-				values.merge(behaviour.snapshot_values(), true)
-				var _unused := start
+				values.merge(behaviour.authoritative_values(), true)
 			else:
 				var applied2 := behaviour.read_state(reader, tick)
 				if not applied2.ok:

@@ -47,6 +47,10 @@ var net_vars: Array[DotNetVar] = []
 ## see [PeerView] for why one shared dictionary could not do both jobs.
 var _baseline: Dictionary = {}
 
+## property -> true, for what the most recent [method read_state] carried. The receive side
+## only; [method authoritative_values] needs to tell "sent now" from "sent earlier".
+var _read_now: Dictionary = {}
+
 ## peer_id -> [PeerView]. The send side, kept per destination.
 var _views: Dictionary = {}
 
@@ -242,9 +246,22 @@ func is_bound() -> bool:
 ## read and write the same [PeerView] and nothing can detect a mismatch: collecting
 ## for one peer and writing for another marks the wrong peer clean, so the right one
 ## is told nothing and the wrong one is never told again.
+##
+## [param until_acked] keeps a property dirty until the peer has [i]confirmed[/i] its
+## current value, not merely been sent it. [DotNetManager] sets it for the entity a peer
+## owns and predicts, and only that one, because that peer reads a property's absence as
+## the server's word that it is unchanged and rewinds its prediction to the value it last
+## received — see [method authoritative_values]. With the ordinary rule a send that is
+## lost leaves that value stale until the peer's acknowledgement of a LATER snapshot
+## reaches the server, a round trip at best, and every snapshot in between rewinds the
+## player to where they were before the lost one: a rubber band on exactly the moment a
+## player stops, which is when a stale position is most visible. For a property that
+## changes every snapshot it costs nothing, since it is sent anyway; for one that changes
+## once it is a round trip's worth of re-sends of one entity, per peer.
 func collect_dirty(
 	peer_id: int,
-	force: bool = false
+	force: bool = false,
+	until_acked: bool = false
 ) -> Array[DotNetVar]:
 	var out: Array[DotNetVar] = []
 	var view := _view_for(peer_id)
@@ -269,7 +286,8 @@ func collect_dirty(
 
 		var current: Variant = _net_read_property(declaration.property)
 
-		if not force and not _is_dirty(view, declaration, current):
+		if not force and not _is_dirty(view, declaration, current) \
+				and not (until_acked and _is_unconfirmed(view, declaration, current)):
 			continue
 
 		out.append(declaration)
@@ -285,6 +303,18 @@ func _is_dirty(
 	if not view.believed.has(declaration.property):
 		return true
 	return declaration.differs(view.believed[declaration.property], current)
+
+
+## Whether the peer has yet to confirm [param current]. Against [member PeerView.acked]
+## rather than [member PeerView.believed]; see [method collect_dirty]'s [param until_acked].
+func _is_unconfirmed(
+	view: PeerView,
+	declaration: DotNetVar,
+	current: Variant
+) -> bool:
+	if not view.acked.has(declaration.property):
+		return true
+	return declaration.differs(view.acked[declaration.property], current)
 
 
 ## Writes the given properties and records them as sent to [param peer_id].
@@ -482,11 +512,16 @@ func peer_view_state(peer_id: int) -> Dictionary:
 ## Every failure here is reachable from the network, so an out-of-range index is
 ## treated as a corrupt or mismatched stream and stops the read — continuing would
 ## decode the following bytes as the wrong type.
-func read_state(reader: DotNetReader, tick: int) -> DotResult:
+##
+## [param rewind] is for a predicted entity, and it is what makes reconciliation see the
+## server's answer rather than the client's own. See [method authoritative_values].
+func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotResult:
 	var count := reader.read_uint(6)
 
 	if not reader.ok():
 		return DotResult.fail(DotError.CODE_PARSE, "Truncated state header.")
+
+	_read_now.clear()
 
 	for _i in range(count):
 		var index := reader.read_uint(6)
@@ -516,12 +551,60 @@ func read_state(reader: DotNetReader, tick: int) -> DotResult:
 
 		_net_write_property(declaration.property, value)
 		_baseline[declaration.property] = value
+		_read_now[declaration.property] = true
 
 		if declaration.change_handler.is_valid():
 			declaration.change_handler.call(previous, value)
 
+	if rewind:
+		# Everything the snapshot left out goes back to what the server last said, BEFORE
+		# `_net_state_applied` — because that hook is where every game in the family
+		# rewinds its simulation, by copying these properties into it. On the owning
+		# client these properties do not hold the server's state between snapshots: the
+		# behaviour's own `_net_simulate` copies each predicted tick into them. So a
+		# snapshot that carried the entity with nothing changed handed the game its own
+		# prediction as the server's answer, and the replay then re-ran the lead on top of
+		# it — a client the server was holding still walked away at twice its speed.
+		for property: StringName in authoritative_values():
+			if not _read_now.has(property):
+				_net_write_property(property, _baseline[property])
+
 	_net_state_applied(tick)
 	return DotResult.success(count)
+
+
+## The server's whole state for this behaviour as of the snapshot just read, on a receiving
+## peer: what that snapshot carried, and for everything it did not, what the server last
+## sent.
+##
+## [b]Why "not sent" can be read as "unchanged".[/b] A property is left out of a snapshot
+## when it has not changed against what the peer is believed to have, and for the entity a
+## peer owns and predicts, the server also re-sends anything the peer has not yet
+## [i]confirmed[/i] — see [method collect_dirty]'s [param until_acked] — so a lost packet
+## cannot leave a stale value here that then reads as the server's word. The one exception
+## is a property with a [member DotNetVar.max_rate]: it is left out because its rate
+## limit was hit, not because it stood still, so its last received value is only a guess
+## and is left out of this answer rather than rewound to.
+##
+## [b]Not [method snapshot_values][/b], which reads the properties themselves — and on a
+## predicted entity those hold the client's own prediction, not anything the server said.
+## Treating that as authoritative is the bug this exists to fix.
+func authoritative_values() -> Dictionary:
+	var out := {}
+
+	for declaration in net_vars:
+		var property := declaration.property
+
+		if not _baseline.has(property):
+			# Never received: invisible to this peer, or not sent yet. Nothing to rewind to.
+			continue
+
+		if declaration.max_rate > 0.0 and not _read_now.has(property):
+			continue
+
+		out[property] = _baseline[property]
+
+	return out
 
 
 ## Forgets what a peer is known to have, so the next collection sends everything.
@@ -534,6 +617,7 @@ func read_state(reader: DotNetReader, tick: int) -> DotResult:
 func reset_baseline(peer_id: int = -1) -> void:
 	if peer_id < 0:
 		_baseline.clear()
+		_read_now.clear()
 		_views.clear()
 		return
 

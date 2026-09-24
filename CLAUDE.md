@@ -214,7 +214,15 @@ Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
 
 16. **A peer id set after `setup()` never reached the registry.** The registry takes its own copy of `local_peer_id` when it is built and decides `is_owner` — so `is_predicted` — from it at registration. game-simple-lobby's client learns its id from its hello, after setup, so over a real socket it registered its own occupant as somebody else's and predicted nothing at all; its loopback suite, which sets the id first, asserted the opposite and passed. `local_peer_id` has a setter that forwards it now. **Two copies of one value is the bug the second copy was guarding against.**
 
-17. **Not fixed, and worth knowing: a predicted entity whose server state stands still is never reconciled.** A snapshot carries an entity only when something changed against the acked baseline, and `DotNetPredictor.reconcile` returns early for an entity the snapshot did not carry ("it was not sent, not that it did not move"). So a client predicting movement the server refused — a server-only freeze is the clean case — walks away and is never pulled back: 113 units in game-hungario's `headless_net` naive control, 530 in the lobby's. Nothing shipped reaches it today (an admin freeze changes a replicated bit, so the entity is in the snapshot), but a server that stops somebody without changing anything it replicates will.
+17. **A predicted entity the server held still walked away from it.** A client predicting a move the server refused — a server-only freeze, a wall only the server has, any rule the client does not know — was never pulled back: 113 units in game-hungario's `headless_net` naive control, 530 in the lobby's, and growing. This was written down first as "a snapshot carries an entity only when something changed, and reconcile returns early for one it did not carry", and **that was the wrong mechanism**: the entity *is* in every snapshot it is relevant for, with an empty body, and reconcile ran for every one of them (40 of 40 in the demo). What went wrong was what it was handed. `receive_snapshot` filled the reconcile values from `snapshot_values()`, which reads the properties — and on the owning client those hold its own prediction, because every game's `_net_simulate` copies each predicted tick into them. So "the server has nothing new to say" became "the server agrees with you", and the replay then ran the lead a second time on top of it: the client did not merely stay away, it walked at twice its speed (38 m where 20 m was legitimate, in the demo). Every game rewinds inside `_net_state_applied` by copying those same properties into its simulation, so fixing only the values `reconcile` was handed would have reached none of them.
+
+    **What was done.** `read_state(reader, tick, rewind = true)` on a predicted entity puts every property the snapshot left out back to what the server last sent, *before* `_net_state_applied`, and `DotNetBehaviour.authoritative_values()` — the receive-side baseline overlaid with this snapshot — is what goes to `reconcile`. The protocol already said an absent property means unchanged; the client simply had not believed it. A property with a `max_rate` is the one exception and is left alone unless it arrived: its absence means the limit was hit, not that it stood still.
+
+    **And the send side had to make "absent means unchanged" true under loss.** A property is not re-sent while its first send is in flight (dirty tracking compares against `believed`), so a lost packet left the client's baseline stale until its acknowledgement of a *later* snapshot reached the server — and the rewind would then pull a player who had just stopped back to where they were before the lost packet, every snapshot for a round trip. So for the entity a peer owns and predicts (`owner_peer_id == peer` and `Authority.SHARED`), and only that one, `collect_dirty(..., until_acked = true)` keeps a property owed until the peer has *confirmed* its current value. A property that changes every snapshot costs nothing extra, since it is sent anyway; one that changes once is re-sent for a round trip's worth of snapshots, for one entity per peer. An entity held still costs its 10-byte header and nothing else, which the demo asserts. Without acks wired, `acked` fills as sends age out of `ack_window_snapshots`, so the same rule is a bounded blind re-send — the only recovery such a host has.
+
+    **Why not the alternatives.** (a) *Always send the owner's entity in full*: exact, but it pays a stationary player's full state every snapshot to fix something the protocol already expresses, and it would still have needed the client fix — the bug was never that the entity was missing. (b) *An explicit "unchanged since baseline" marker*: that marker already exists — it is the entity's presence with an empty body — so a new bit on the wire would say again what the client was failing to read. "Include it whenever the acked input tick advanced" is (a) with a condition and the same flaw.
+
+    `_test_standing_still` holds an entity still on the server while the client predicts it walking, with acks wired: clean, and lossy with the snapshot carrying the stop the one that is lost. Arming it: reverting the client half gives 38 m and 16 m; turning `until_acked` off gives one rewind to a stale position in thirty. The two games' naive freeze controls now assert the rubber band *and* that the floor the client is pulled back to does not climb (game-hungario 1.88 → 1.88, the lobby 39.24 → 39.24; unfixed, 35.72 → 73.32 and 108.56 → 411.89).
 
 ## The render timeline has to move between packets
 
@@ -331,6 +339,8 @@ on the server. Wire it and a lost property is re-sent; do not, and an unconfirme
 send is assumed delivered once it ages out of `ack_window_snapshots` — exactly what
 this addon did before, so nothing regresses by leaving it alone.
 
+**The entity a peer predicts is held to what that peer has confirmed.** For every other entity a property is sent once and then trusted to arrive, because a lost one is only late. For the owner's own predicted entity a lost one is worse than late: its client reads a property's absence as the server's word that it is unchanged and rewinds to the value it last received, so a stale value there is a correction toward the wrong place. `collect_dirty`'s `until_acked` keeps such a property owed until the peer confirms it. See #17.
+
 **A client acks only on the fully-applied path.** `receive_snapshot` abandons the
 rest of a packet when it meets an entity it has not been told to spawn — it cannot
 skip a variable-length body without the declarations — and acking that would strand
@@ -355,12 +365,13 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 218 checks: wire round-trips, quantisation accuracy, message direction and
+# 227 checks: wire round-trips, quantisation accuracy, message direction and
 # schema mismatch, batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
 # extrapolation bounds, rewind/restore, prediction replay against a server
-# simulating the same changing input, and a server+client integration run with
-# 20% simulated packet loss.
+# simulating the same changing input, a predicted entity the server holds still
+# (clean, and with the snapshot carrying the stop lost), and a server+client
+# integration run with 20% simulated packet loss.
 godot --headless --path . res://examples/netcode_demo.tscn
 
 # 67 checks over DotNetStats and DotNetSnapshot on their own: inferred loss,

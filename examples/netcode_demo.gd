@@ -160,6 +160,12 @@ class ServerNotice extends DotNetMessage:
 var _passed := 0
 var _failed := 0
 
+## Every check this suite makes, the last one included. The section counter below cannot
+## see a check that never ran inside a section that had already announced itself — a
+## runtime error aborts the rest of that function and the counter is satisfied — so the
+## total is compared with this. Raise it with every check added.
+const CHECKS := 227
+
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
 ## A section that suspends must be called with [code]await[/code]. Called without
@@ -214,6 +220,7 @@ func _run() -> void:
 	_test_prediction()
 	_test_spawning()
 	_test_acked_baselines()
+	_test_standing_still()
 	await _test_integration()
 
 	print("")
@@ -221,6 +228,11 @@ func _run() -> void:
 		"every suspending section ran to completion (%d/%d)"
 			% [_sections_completed, _sections_entered],
 		_sections_completed == _sections_entered
+	)
+
+	_check(
+		"every check ran (%d of %d)" % [_passed + _failed + 1, CHECKS],
+		_passed + _failed + 1 == CHECKS
 	)
 
 	print("")
@@ -1465,6 +1477,254 @@ func _test_acked_baselines() -> void:
 
 	for entity in [first, limited, lonely, untracked]:
 		_out_of_tree(entity)
+
+
+## A server that holds a predicted entity still, and a client that predicts it moving.
+##
+## [b]The case every other prediction check here cannot reach[/b], because in all of them
+## the server moves the entity and a moving position is a changed position: it is in every
+## snapshot, and reconciliation has something to rewind to. Here the server refuses the
+## move without changing anything it replicates — no input reaches it, the way a server-only
+## freeze, a wall only the server has, or any rule the client does not know about would
+## refuse one — so the snapshot carries the entity with nothing in it. The client has to
+## read that as "the server's state is the one you were last sent" and be pulled back.
+##
+## It read it as "the server's state is whatever you are predicting", adopted its own
+## prediction as authoritative, and replayed the unacknowledged inputs on top of it — so
+## the client did not merely fail to come back, it walked away at twice its own speed.
+## game-hungario and the lobby measured 113 and 530 units in their naive admin controls.
+##
+## [param lossy] drops one snapshot in four, with acknowledgements wired as every game in
+## the family wires them, because the send side's own shortcut — a property is not re-sent
+## while its first send is in flight — is exactly what a lost packet turns into a stale
+## baseline for the one entity that now rewinds to it.
+func _test_standing_still() -> void:
+	print("")
+	print("[a predicted entity the server holds still]")
+
+	# The client may be ahead of the server by its input lead plus the snapshot interval
+	# since the last one it applied — plus one more interval for every snapshot lost —
+	# at 10 m/s and 60 Hz. Anything beyond that is a prediction nothing corrected.
+	var per_tick := 10.0 / 60.0
+
+	var held := _standing_still_run(false, false, 0)
+	var held_bound := float(STILL_LEAD + STILL_INTERVAL) * per_tick + 0.01
+	_check(
+		"the client is pulled back (worst %.2f m, bound %.2f)" % [float(held["worst"]), held_bound],
+		float(held["worst"]) <= held_bound
+	)
+	_check(
+		"and every snapshot reconciled it (%d of %d)"
+			% [int(held["replays"]), int(held["snapshots"])],
+		int(held["replays"]) == int(held["snapshots"]) and int(held["snapshots"]) > 0
+	)
+	_check(
+		"to where the server holds it, every time (%d wrong)" % int(held["stale"]),
+		int(held["stale"]) == 0
+	)
+
+	# Bandwidth. The fix must not have bought this by sending the entity in full every
+	# snapshot: held still, the owner's entity costs its header and nothing else.
+	_check(
+		"an entity held still costs its header, not its state (%d B/snapshot)"
+			% int(held["tail_bytes"]),
+		int(held["tail_bytes"]) <= 12
+	)
+
+	# Moving, then stopped by the server — and the snapshot carrying the stop is lost. The
+	# next one has nothing new to say against what the server BELIEVES the client has, so
+	# without re-sending until confirmed the client rewinds to where it was before the lost
+	# one: a stale position read as the server's word, on every snapshot until the loss is
+	# discovered a round trip later.
+	var stopped := _standing_still_run(false, true, STILL_STOP_AT)
+	var lossy_bound := float(STILL_LEAD + 2 * STILL_INTERVAL) * per_tick + 0.01
+	_check(
+		"lossy: stopped by the server, and pulled back (worst %.2f m, bound %.2f)"
+			% [float(stopped["worst"]), lossy_bound],
+		float(stopped["worst"]) <= lossy_bound
+	)
+	_check(
+		"lossy: the snapshot carrying the stop was the one lost",
+		bool(stopped["stop_lost"])
+	)
+	_check(
+		"lossy: and no rewind was to a stale position (%d of %d)"
+			% [int(stopped["stale"]), int(stopped["snapshots"])],
+		int(stopped["stale"]) == 0
+	)
+
+	# The control. The same harness with the server taking every input must agree, or the
+	# harness is what disagrees and the checks above measure nothing.
+	var moving := _standing_still_run(true, false, 0)
+	_check(
+		"control: a server that moves it agrees with the client (worst %.3f m)"
+			% float(moving["worst"]),
+		float(moving["worst"]) < 0.05
+	)
+
+
+const STILL_LEAD := 3
+const STILL_INTERVAL := 3
+const STILL_STOP_AT := 60
+
+
+## One run of [method _test_standing_still]. [param server_moves] decides whether the
+## server is given the client's inputs; a non-zero [param stop_at] gives them until that
+## tick and then has the server stop the entity itself, as a freeze would. [param lossy]
+## drops every fourth snapshot, which with a snapshot every third tick is the one at
+## [constant STILL_STOP_AT]. Acknowledgements are wired, as every game in the family wires
+## them.
+##
+## Returns the worst and final gap between where the client predicted the entity at a
+## tick and where the server had it at that tick, and how many times the client rewound
+## to a position the server did not have at the snapshot's tick.
+func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int) -> Dictionary:
+	const TICKS := 120
+	var scope := "still_%d_%d_%d" % [int(server_moves), int(lossy), stop_at]
+
+	var host := DotNetManager.new()
+	host.name = "StillServer_" + scope
+	host.is_server = true
+	host.service_scope = StringName(scope + "_server")
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 60 / STILL_INTERVAL
+	add_child(host)
+
+	var guest := DotNetManager.new()
+	guest.name = "StillClient_" + scope
+	guest.is_server = false
+	guest.service_scope = StringName(scope + "_client")
+	guest.local_peer_id = 2
+	guest.auto_tick = false
+	guest.config_file = ""
+	guest.config = DotNetConfig.new()
+	guest.config.tick_rate = 60
+	guest.config.snapshot_rate = 60 / STILL_INTERVAL
+	# The first snapshot anchors the clock at the server's tick plus this lead, and
+	# reconciliation replays up to the clock's tick — so it has to be the harness's lead,
+	# or the first replay stops a tick short and the control reads that as disagreement.
+	guest.config.input_margin_ticks = STILL_LEAD
+	add_child(guest)
+
+	var _a := host.setup()
+	var _b := guest.setup()
+
+	# payload, and the server tick it was built on — so the rewind can be checked against
+	# what the server really had at that tick.
+	var wire: Array[Dictionary] = []
+	var sent := [0]
+	var bytes: Array[int] = []
+	var lost_ticks: Array[int] = []
+	var now := [0]
+	host.send_fn = func(_peer: int, payload: PackedByteArray, _d: int) -> void:
+		sent[0] += 1
+		bytes.append(payload.size())
+		if lossy and sent[0] % 4 == 0:
+			lost_ticks.append(now[0])
+			return
+		wire.append({"payload": payload, "tick": now[0]})
+
+	var _c := host.start()
+	var _d := guest.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	guest.spawner.register_factory(&"player", _build_player)
+
+	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
+	var on_client: DotNetIdentity = guest.spawner.spawn_remote(
+		&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
+	).value
+	var server_movement := on_server.behaviours[0] as Movement
+	var client_movement := on_client.behaviours[0] as Movement
+
+	var server_at := {}
+	var client_at := {}
+	var snapshots := 0
+	var stale := 0
+	var replays_before := int(guest.predictor.describe()["replays"])
+
+	for s in range(1, TICKS + 1):
+		var c := s + STILL_LEAD
+		now[0] = s
+
+		# The client samples, records and predicts tick c.
+		var input := DemoInput.new()
+		input.tick = c
+		input.delta = 1.0 / 60.0
+		input.move = Vector2(1.0, 0.0)
+		guest.local_inputs().push(input)
+		client_movement._net_apply_input(input, c)
+		guest.predictor.predict(guest.registry.predicted(), c, 1.0 / 60.0)
+		client_at[c] = client_movement.position
+
+		# The server either takes it, or never hears of it, or stops the entity itself.
+		var takes := server_moves or (stop_at > 0 and c < stop_at)
+		if takes:
+			var copy := DemoInput.new()
+			copy.tick = c
+			copy.delta = input.delta
+			copy.move = input.move
+			host.input_buffer_for(2).push(copy)
+
+		if stop_at > 0 and s == stop_at:
+			server_movement.current_input = null
+			server_movement.velocity = Vector3.ZERO
+
+		host.server_tick(s)
+		server_at[s] = server_movement.position
+
+		for entry in wire:
+			guest.clock.tick = c
+			var applied := guest.receive_snapshot(entry["payload"] as PackedByteArray)
+			if not applied.ok:
+				continue
+			snapshots += 1
+			var rewound: Variant = client_movement.authoritative_values().get(&"position")
+			var truth: Vector3 = server_at[int(entry["tick"])]
+			if rewound == null or (rewound as Vector3).distance_to(truth) > 0.05:
+				stale += 1
+		wire.clear()
+
+		# The acknowledgement rides in front of the next input packet, as every game's does.
+		var _ack := host.receive_ack_payload(2, guest.encode_ack())
+
+	var worst := 0.0
+	var last := 0.0
+	for tick: int in server_at:
+		if not client_at.has(tick):
+			continue
+		var gap := (client_at[tick] as Vector3).distance_to(server_at[tick] as Vector3)
+		worst = maxf(worst, gap)
+		last = gap
+
+	# The steady-state packet size, from the last quarter, when nothing has changed for a
+	# long time and there is nothing left in flight to resend.
+	var tail := bytes.slice(int(bytes.size() * 0.75))
+	var tail_bytes := 0
+	for b in tail:
+		tail_bytes = maxi(tail_bytes, b)
+
+	var out := {
+		"worst": worst,
+		"last": last,
+		"snapshots": snapshots,
+		"stale": stale,
+		"stop_lost": lost_ticks.has(stop_at),
+		"replays": int(guest.predictor.describe()["replays"]) - replays_before,
+		"tail_bytes": tail_bytes,
+	}
+
+	host.stop()
+	guest.stop()
+	remove_child(host)
+	remove_child(guest)
+	host.free()
+	guest.free()
+	return out
 
 
 func _test_integration() -> void:

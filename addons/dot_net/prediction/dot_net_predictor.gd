@@ -111,8 +111,14 @@ func reconcile(
 			applied += 1
 
 	if applied == 0:
-		# Nothing authoritative for this entity in this snapshot — it was not sent,
-		# not that it did not move. Leaving the prediction alone is correct.
+		# Nothing the server has ever said about this entity: no state has arrived for it
+		# yet, so there is nothing to rewind to and leaving the prediction alone is
+		# correct. [b]This is not "the snapshot changed nothing".[/b] The manager hands
+		# over [method DotNetBehaviour.authoritative_values], the server's whole state
+		# with what the snapshot left out filled from what it sent before — so an entity
+		# the server is holding still is rewound to where the server holds it. Reading an
+		# empty delta as "keep predicting" is what let a client walk away from a server
+		# that had stopped it.
 		return DotResult.success(0)
 
 	# 2. Replay every input the server has not confirmed yet.
