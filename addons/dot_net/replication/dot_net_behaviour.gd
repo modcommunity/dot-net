@@ -607,6 +607,24 @@ func authoritative_values() -> Dictionary:
 	return out
 
 
+## Every property's value as the server last sent it, on a receiving peer, whether or not
+## the snapshot just read carried it. Unlike [method authoritative_values] it keeps a
+## rate-limited property's last value: for drawing, the last thing the server said is the
+## best answer there is, where for a rewind it is only a guess.
+##
+## What the manager hands the interpolator for a remote entity. The properties themselves
+## are the wrong source there for the same reason they are on a predicted entity: between
+## snapshots they hold whatever the client last wrote into them — the interpolator's blend.
+func received_values() -> Dictionary:
+	var out := {}
+
+	for declaration in net_vars:
+		if _baseline.has(declaration.property):
+			out[declaration.property] = _baseline[declaration.property]
+
+	return out
+
+
 ## Forgets what a peer is known to have, so the next collection sends everything.
 ##
 ## Used when a client's connection is re-established: it has no prior state, so a

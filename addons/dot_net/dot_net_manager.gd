@@ -700,11 +700,21 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 					stats.note_decode_failure()
 					return applied2
 
+				# [b]What the server last SENT, not what the property holds.[/b] Between
+				# snapshots an interpolated property holds the interpolator's own output —
+				# `apply` writes the blend into it every frame — so reading it back here
+				# handed the interpolator its own half-way value as the server's word for
+				# every property this snapshot did not carry. Anything interpolated that
+				# changed once and then stood still froze part of the way there: a remote
+				# player who turned to 90 degrees was drawn at 82.5 for ever, and one who
+				# stopped was drawn short of where they stopped. The same shape as #17 on
+				# the other path. It hid while the render delay was in the wrong unit
+				# (#18), because a render time past the newest snapshot answers with the
+				# newest values and never a blend.
+				var received := behaviour.received_values()
 				for declaration in behaviour.net_vars:
-					if declaration.interpolate:
-						values[declaration.property] = behaviour._net_read_property(
-							declaration.property
-						)
+					if declaration.interpolate and received.has(declaration.property):
+						values[declaration.property] = received[declaration.property]
 
 		if identity.is_predicted():
 			predictor.reconcile(

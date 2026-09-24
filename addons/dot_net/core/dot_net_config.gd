@@ -39,10 +39,13 @@ extends DotConfig
 
 @export_group("Interpolation")
 
-## Snapshots of delay before rendering, on top of the snapshot interval.
+## Snapshots of delay before rendering — a count of SNAPSHOTS, not of ticks.
 ##
 ## The buffer that absorbs jitter and loss. One means a single dropped packet causes
-## a visible stall; two is the usual compromise. See [DotNetInterpolator].
+## a visible stall; two is the usual compromise. See [DotNetInterpolator], whose
+## [method DotNetInterpolator.delay_ticks] is the one place this becomes ticks — it was
+## once subtracted from a tick number as it stands, which at 128 ticks and 20 snapshots
+## rendered every remote entity past its newest snapshot.
 @export_range(0.0, 10.0, 0.5) var interpolation_buffer: float = 2.0
 
 ## Adjust the buffer from observed jitter and loss.
@@ -276,8 +279,12 @@ func snapshot_interval() -> float:
 
 
 ## Interpolation delay in seconds, from the buffer setting.
+##
+## Measured in the snapshots the manager actually sends — every [method ticks_per_snapshot]
+## ticks, an integer — so it agrees with [method DotNetInterpolator.delay_ms] when the
+## snapshot rate does not divide the tick rate.
 func interpolation_delay() -> float:
-	return interpolation_buffer * snapshot_interval()
+	return interpolation_buffer * float(ticks_per_snapshot()) / float(maxi(1, tick_rate))
 
 
 ## Bits used per position axis, derived from the world size and step.

@@ -224,6 +224,14 @@ Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
 
     `_test_standing_still` holds an entity still on the server while the client predicts it walking, with acks wired: clean, and lossy with the snapshot carrying the stop the one that is lost. Arming it: reverting the client half gives 38 m and 16 m; turning `until_acked` off gives one rewind to a stale position in thirty. The two games' naive freeze controls now assert the rubber band *and* that the floor the client is pulled back to does not climb (game-hungario 1.88 → 1.88, the lobby 39.24 → 39.24; unfixed, 35.72 → 73.32 and 108.56 → 411.89).
 
+18. **The interpolation buffer was in snapshots and was subtracted from ticks.** `DotNetConfig.interpolation_buffer` says "snapshots of delay", `_adapt` computes it in snapshot intervals, `delay_ms()` multiplied it by one — and `sample()` did `server_tick - _delay_ticks`, unconverted. At the default 60/20 a two-snapshot buffer was two ticks, a third of what was asked; at 128/20 it was under a sixth, **less than one snapshot interval**, so the render time sat past the newest snapshot on most frames and every remote entity in the family was extrapolated instead of interpolated. game-playground measured 1,684 extrapolated frames in six seconds. Nothing failed anywhere, because extrapolation is bounded and exact for anything moving in a straight line, and because the only checks were `sample()` at hand-picked ticks written in the same unit — the demo's own comment said *"2 snapshots at 20 Hz = 2 ticks of delay in this unit"*, and its check passed either way.
+
+    **What was done.** The field is `_delay_snapshots`, and `delay_ticks()` — `_delay_snapshots * ticks_per_snapshot()` — is the one conversion and the only thing `sample()` subtracts. The conversion lives in the interpolator rather than in `interpolate_frame`, because `sample()` and `apply()` are public and take a tick; converting in the manager would have left every direct caller in the old unit. It uses `ticks_per_snapshot()` (the integer the manager actually sends on — 6 at 128/20, not 6.4) rather than `tick_rate / snapshot_rate`, so "two snapshots" means two of the snapshots that arrive; `delay_ms()`, `_adapt`'s interval and `DotNetConfig.interpolation_delay()` use the same one. `delay_snapshots()` is the old number under an honest name, and `delay_ticks()` is what `DotNetHistory.client_view_tick` wants.
+
+    **And the diagnostic is something a suite can assert on now.** `sample_count()`, `stall_count()` and `extrapolation_count()` (with `reset_counts()` for a window) were two numbers visible only in `describe()`. `_test_render_delay` drives a 128-tick server sending 20 snapshots to a client through `interpolate_frame` at four fractions a tick, clean and with one snapshot in five lost, and asserts none extrapolated and every frame drawn `delay_ticks()` behind on the entity's own line. Armed — `delay_ticks()` returning the snapshot count — it reports 930 of 1,492 frames extrapolated clean and 1,077 of 1,536 lossy.
+
+19. **The interpolator was fed its own output back as the server's word.** For a remote entity, `receive_snapshot` built the sample it pushes from `_net_read_property` on every interpolated property — and between snapshots those properties hold what `DotNetInterpolator.apply` last wrote into them, which is a blend. So for every property a snapshot did not carry, the interpolator was handed its own half-way value as a new authoritative sample, and anything interpolated that changed once and then stood still **froze part of the way there**: a remote player who turned to face 90 degrees was drawn at 82.5 for ever, and one who stopped was drawn a quarter of a metre short of where they stopped. The same shape as #17, on the other path. It could not be seen until #18 was fixed, because a render time past the newest snapshot answers with the newest values, never a blend — it was found by game-playground's and mg-buses-from-hell's `headless_net` facing checks failing the first time the delay was right. `DotNetBehaviour.received_values()` — the receive-side baseline, every property as the server last sent it — is what goes to the interpolator now. `_test_render_delay`'s last check stops the entity and asserts the client draws it where the server left it; armed, 0.264 m short.
+
 ## The render timeline has to move between packets
 
 `DotNetClock.server_tick()` is what `render_tick()` is derived from, and therefore what
@@ -365,10 +373,11 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 227 checks: wire round-trips, quantisation accuracy, message direction and
+# 241 checks: wire round-trips, quantisation accuracy, message direction and
 # schema mismatch, batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
-# extrapolation bounds, rewind/restore, prediction replay against a server
+# extrapolation bounds, the render delay in ticks at 128/20 with nothing
+# extrapolated (clean and lossy) and a stop drawn where it stopped, rewind/restore, prediction replay against a server
 # simulating the same changing input, a predicted entity the server holds still
 # (clean, and with the snapshot carrying the stop lost), and a server+client
 # integration run with 20% simulated packet loss.

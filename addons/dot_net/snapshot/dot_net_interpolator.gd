@@ -87,21 +87,42 @@ var config: DotNetConfig
 ## net_id -> Track
 var _tracks: Dictionary = {}
 
-## Current delay in ticks, adapted from observed arrival spacing.
-var _delay_ticks: float = 2.0
+## Current delay in SNAPSHOTS, adapted from observed arrival spacing.
+##
+## [b]Snapshots, and converted to ticks in exactly one place.[/b] This field was called
+## `_delay_ticks` and was documented, adapted and reported as a number of snapshots — the
+## config says "snapshots of delay", [method _adapt] computes it in snapshot intervals and
+## [method delay_ms] multiplied it by one — and was then subtracted, unconverted, from a
+## TICK number in [method sample]. At the default 60/20 that is a third of the buffer
+## anybody asked for; at 128 ticks and 20 snapshots it is under a sixth, less than one
+## snapshot interval, so the render time sat past the newest snapshot most of the time and
+## every remote entity in the family was extrapolated rather than interpolated — 1,684
+## extrapolated frames in six seconds of one game. Nothing failed: extrapolation is
+## bounded, the positions were plausible, and the checks that sampled at hand-picked ticks
+## were written in the same confused unit. [method delay_ticks] is the conversion, and the
+## only thing [method sample] subtracts.
+var _delay_snapshots: float = 2.0
 
 ## Rolling estimate of the gap between arrivals, in milliseconds.
 var _arrival_interval_ms: float = 0.0
 var _arrival_jitter_ms: float = 0.0
 var _last_arrival_ms: int = 0
 
+## Counters a suite and an operator read, not only [method describe]. [member _samples] is
+## every call to [method sample] that had two or more samples to choose between — the
+## denominator, without which a count of extrapolations means nothing. [member _stalls] is
+## the render time at or past the newest snapshot (extrapolating or holding), and
+## [member _extrapolations] the subset that guessed past it. On a healthy connection both
+## are near zero; a steady share of frames in either is a buffer too short for the link —
+## or, as it was here, a buffer in the wrong unit.
+var _samples: int = 0
 var _stalls: int = 0
 var _extrapolations: int = 0
 
 
 func _init(p_config: DotNetConfig) -> void:
 	config = p_config
-	_delay_ticks = config.interpolation_buffer
+	_delay_snapshots = config.interpolation_buffer
 
 
 # --- Receiving -------------------------------------------------------------
@@ -148,18 +169,18 @@ func _adapt() -> void:
 	if _arrival_interval_ms <= 0.0:
 		return
 
-	var interval_ms := config.snapshot_interval() * 1000.0
+	var interval_ms := _snapshot_ticks() / float(maxi(1, config.tick_rate)) * 1000.0
 
 	# Cover the nominal interval plus two jitter deviations, expressed in snapshots.
 	var needed := 1.0 + (_arrival_jitter_ms * 2.0) / maxf(1.0, interval_ms)
 	needed = clampf(needed, 1.0, 10.0)
 
-	var before := _delay_ticks
+	var before := _delay_snapshots
 
-	if needed > _delay_ticks:
-		_delay_ticks = needed
+	if needed > _delay_snapshots:
+		_delay_snapshots = needed
 	else:
-		_delay_ticks = lerpf(_delay_ticks, needed, 0.01)
+		_delay_snapshots = lerpf(_delay_snapshots, needed, 0.01)
 
 	# [b]Reported on whole snapshots crossed, not on every adjustment.[/b] This runs on
 	# every arrival and the shrink is a 1% lerp, so a line per change is a line twenty
@@ -171,10 +192,10 @@ func _adapt() -> void:
 	# class absorbing a connection's jitter, which is its whole job. It is also the
 	# answer to "everything remote feels delayed", which nothing else in the process
 	# reports.
-	if floori(_delay_ticks) != floori(before):
+	if floori(_delay_snapshots) != floori(before):
 		DotLog.debug(CHANNEL, "the interpolation buffer moved", {
-			"from": "%.2f ticks" % before,
-			"to": "%.2f ticks" % _delay_ticks,
+			"from": "%.2f snapshots" % before,
+			"to": "%.2f snapshots (%.1f ticks)" % [_delay_snapshots, delay_ticks()],
 			"jitter": "%.1f ms" % _arrival_jitter_ms,
 			"interval": "%.1f ms" % _arrival_interval_ms,
 		})
@@ -200,10 +221,13 @@ func sample(net_id: int, server_tick: float) -> Dictionary:
 	if track.is_empty():
 		return {}
 
-	var render_tick := float(server_tick) - _delay_ticks
+	# Ticks, because [param server_tick] is one. See [member _delay_snapshots].
+	var render_tick := float(server_tick) - delay_ticks()
 
 	if track.samples.size() == 1:
 		return (track.samples[0]["values"] as Dictionary).duplicate()
+
+	_samples += 1
 
 	# Newer than everything we have: the stream stalled. Extrapolate briefly, then
 	# hold — see _extrapolate.
@@ -397,12 +421,54 @@ func prune(live_ids: PackedInt64Array) -> void:
 			_tracks.erase(net_id)
 
 
+## The buffer in snapshots: what [member DotNetConfig.interpolation_buffer] sets and what
+## [method _adapt] adjusts.
+func delay_snapshots() -> float:
+	return _delay_snapshots
+
+
+## The buffer in TICKS: how far behind its [code]server_tick[/code] [method sample] renders,
+## and the number [method DotNetHistory.client_view_tick] wants as its
+## [code]interpolation_delay_ticks[/code]. Until the unit was fixed this returned the
+## snapshot count under this name, and [method sample] subtracted it as though it were this.
 func delay_ticks() -> float:
-	return _delay_ticks
+	return _delay_snapshots * _snapshot_ticks()
 
 
 func delay_ms() -> float:
-	return _delay_ticks * config.snapshot_interval() * 1000.0
+	return delay_ticks() / float(maxi(1, config.tick_rate)) * 1000.0
+
+
+## Ticks between two snapshots, as the server actually sends them.
+##
+## [method DotNetConfig.ticks_per_snapshot], not tick_rate / snapshot_rate: the manager
+## sends every [code]ticks_per_snapshot()[/code] ticks and that is an integer division, so
+## at 128 ticks and 20 snapshots it sends every 6 ticks rather than every 6.4, and "two
+## snapshots of buffer" should be two of the snapshots that actually arrive.
+func _snapshot_ticks() -> float:
+	return float(config.ticks_per_snapshot())
+
+
+## Calls to [method sample] with at least two samples to choose between.
+func sample_count() -> int:
+	return _samples
+
+
+## Of those, how many rendered at or past the newest snapshot.
+func stall_count() -> int:
+	return _stalls
+
+
+## Of the stalls, how many guessed past the newest snapshot rather than holding it.
+func extrapolation_count() -> int:
+	return _extrapolations
+
+
+## Zeroes the counters above, so a probe can measure one window of its own.
+func reset_counts() -> void:
+	_samples = 0
+	_stalls = 0
+	_extrapolations = 0
 
 
 func track_count() -> int:
@@ -412,10 +478,12 @@ func track_count() -> int:
 func describe() -> Dictionary:
 	return {
 		"tracks": _tracks.size(),
-		"delay_ticks": "%.2f" % _delay_ticks,
+		"delay_snapshots": "%.2f" % _delay_snapshots,
+		"delay_ticks": "%.2f" % delay_ticks(),
 		"delay_ms": int(delay_ms()),
 		"arrival_ms": int(_arrival_interval_ms),
 		"jitter_ms": int(_arrival_jitter_ms),
+		"samples": _samples,
 		"stalls": _stalls,
 		"extrapolations": _extrapolations,
 	}

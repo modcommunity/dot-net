@@ -164,7 +164,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 227
+const CHECKS := 241
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -216,6 +216,7 @@ func _run() -> void:
 	_test_interest()
 	_test_budget()
 	await _test_interpolation()
+	_test_render_delay()
 	_test_lag_compensation()
 	_test_prediction()
 	_test_spawning()
@@ -1002,12 +1003,20 @@ func _test_interpolation() -> void:
 	interpolator.push(1, 100, {"position": Vector3(0, 0, 0)})
 	interpolator.push(1, 110, {"position": Vector3(10, 0, 0)})
 
-	# The buffer is 2 snapshots at 20 Hz = 2 ticks of delay in this unit.
+	# The buffer is 2 snapshots, and at the default 60 ticks / 20 snapshots a snapshot is 3
+	# ticks, so this renders 6 ticks behind: tick 101, a tenth of the way from 100 to 110.
+	# This comment used to say "2 ticks of delay in this unit", which is the bug
+	# `_test_render_delay` is about written down as a fact; the check below it passed either
+	# way, because x=7 is also between the two snapshots.
 	var midpoint := interpolator.sample(1, 107)
 	var sampled: Vector3 = midpoint.get("position", Vector3.ZERO)
 	_check(
 		"interpolates between snapshots (x=%.1f)" % sampled.x,
 		sampled.x > 0.1 and sampled.x < 9.9
+	)
+	_check(
+		"six ticks behind at 60/20, not two (x=%.2f)" % sampled.x,
+		absf(sampled.x - 1.0) < 0.01
 	)
 
 	# Out-of-order arrivals must still be usable.
@@ -1140,6 +1149,211 @@ func _test_interpolation() -> void:
 		# Irregular arrivals.
 		await get_tree().process_frame
 	_check("adaptive buffer responds", adaptive.delay_ticks() >= initial * 0.5)
+	_sections_completed += 1
+
+
+## The interpolation buffer is a count of SNAPSHOTS and a render time is a TICK.
+##
+## [method DotNetInterpolator.sample] used to subtract the one from the other unconverted,
+## so a "two snapshot" buffer was two ticks: at 128 ticks and 20 snapshots, under a sixth of
+## what the config asked for and less than one snapshot interval. The render time then sat
+## past the newest snapshot most of the time and every remote entity in the family was
+## extrapolated rather than interpolated — 1,684 extrapolated frames in six seconds of
+## game-playground. Nothing above could see it: every sample there is at a hand-picked tick,
+## chosen by somebody holding the same confusion.
+##
+## So this drives it the way a game does — a server at 128 ticks sending 20 snapshots, a
+## client whose clock is anchored by those snapshots and advanced by its own ticks, and
+## [method DotNetManager.interpolate_frame] four times a tick at the fractions a renderer
+## would pass — and asserts on the interpolator's own extrapolation count, which is what
+## an operator reads when a remote player looks wrong. Synchronous: nothing here suspends.
+func _test_render_delay() -> void:
+	_sections_entered += 1
+	print("")
+	print("[render delay]")
+
+	var fast := DotNetConfig.new()
+	fast.tick_rate = 128
+	fast.snapshot_rate = 20
+	fast.interpolation_buffer = 2.0
+	fast.adaptive_interpolation = false
+
+	var sized := DotNetInterpolator.new(fast)
+	_check(
+		"the buffer is counted in snapshots (%.2f)" % sized.delay_snapshots(),
+		is_equal_approx(sized.delay_snapshots(), 2.0)
+	)
+	# 128 / 20 is 6.4, and the manager sends every `ticks_per_snapshot()` = 6 ticks: two of
+	# the snapshots that actually arrive are twelve ticks.
+	_check(
+		"and sampled in ticks: two snapshots at 128/20 are 12 (%.2f)" % sized.delay_ticks(),
+		is_equal_approx(sized.delay_ticks(), 12.0)
+	)
+	_check(
+		"its milliseconds are those ticks, and the config's (%.1f ms)" % sized.delay_ms(),
+		absf(sized.delay_ms() - 12.0 / 128.0 * 1000.0) < 0.01
+			and absf(sized.delay_ms() - fast.interpolation_delay() * 1000.0) < 0.01
+	)
+
+	var server_d := DotNetManager.new()
+	server_d.name = "DelayServer"
+	server_d.is_server = true
+	server_d.service_scope = &"delay_server"
+	server_d.local_peer_id = 1
+	server_d.auto_tick = false
+	server_d.config_file = ""
+	server_d.config = DotNetConfig.new()
+	server_d.config.tick_rate = 128
+	server_d.config.snapshot_rate = 20
+	add_child(server_d)
+
+	var client_d := DotNetManager.new()
+	client_d.name = "DelayClient"
+	client_d.is_server = false
+	client_d.service_scope = &"delay_client"
+	client_d.local_peer_id = 2
+	client_d.auto_tick = false
+	client_d.config_file = ""
+	client_d.config = DotNetConfig.new()
+	client_d.config.tick_rate = 128
+	client_d.config.snapshot_rate = 20
+	client_d.config.interpolation_buffer = 2.0
+	# Off so the buffer is the configured one: arrivals in a loop that does not wait are
+	# all zero milliseconds apart, which would adapt it to something no link produces.
+	client_d.config.adaptive_interpolation = false
+	add_child(client_d)
+
+	var ok_setup := server_d.setup().ok and client_d.setup().ok
+
+	# Every fifth snapshot lost, never two in a row: the loss a two-snapshot buffer exists
+	# to cover, so the lossy half must come out as clean as the clean one.
+	var delivered: Array[PackedByteArray] = []
+	var sent := [0]
+	var lossy := [false]
+	server_d.send_fn = func(peer_id: int, payload: PackedByteArray, _d: int) -> void:
+		if peer_id != 2:
+			return
+		sent[0] += 1
+		if lossy[0] and sent[0] % 5 == 0:
+			return
+		delivered.append(payload)
+
+	server_d.start()
+	client_d.start()
+	server_d.add_peer(2)
+	server_d.spawner.register_factory(&"player", _build_player)
+	client_d.spawner.register_factory(&"player", _build_player)
+
+	# Somebody else's entity — peer 3's — so this client interpolates it, never predicts it.
+	var spawned := server_d.spawner.spawn(&"player", 3, Transform3D.IDENTITY, 0)
+	var server_entity: DotNetIdentity = spawned.value if spawned.ok else null
+	var mirrored := client_d.spawner.spawn_remote(
+		&"player", server_entity.net_id if server_entity != null else 0, 3,
+		Transform3D.IDENTITY, 0
+	) if server_entity != null else DotResult.fail(DotError.CODE_INVALID, "no server entity")
+	var remote: DotNetIdentity = mirrored.value if mirrored.ok else null
+	_check(
+		"a remote entity on a 128-tick client (setup %s, interpolated %s)"
+			% [ok_setup, remote != null and not remote.is_predicted()],
+		ok_setup and remote != null and not remote.is_predicted()
+	)
+	if remote == null:
+		_sections_completed += 1
+		return
+
+	var server_move := server_entity.behaviours[0] as Movement
+	var client_move := remote.behaviours[0] as Movement
+	# Ten metres a second in x, set on the server and kept: no input drives peer 3.
+	server_move.velocity = Vector3(10.0, 0.0, 0.0)
+
+	var interp := client_d.interpolator
+	var step_x := 10.0 / 128.0
+	var worst := [0.0, 0.0]
+	var counts: Array[Dictionary] = []
+
+	for leg in range(2):
+		lossy[0] = leg == 1
+		interp.reset_counts()
+		var start := 1 + leg * 384
+		for tick in range(start, start + 384):
+			server_d.server_tick(tick)
+			for payload in delivered:
+				var _applied := client_d.receive_snapshot(payload)
+			delivered.clear()
+
+			for quarter in range(4):
+				var alpha := float(quarter) * 0.25
+				client_d.interpolate_frame(alpha)
+				# Past the first second the render time is well inside the stream; before
+				# it the track may still be shorter than the buffer.
+				if tick - start < 128:
+					continue
+				var expected := float(tick) + alpha - interp.delay_ticks()
+				var off := absf(client_move.position.x - expected * step_x)
+				worst[leg] = maxf(worst[leg], off)
+
+			client_d.step(1.0 / 128.0)
+
+		counts.append({
+			"samples": interp.sample_count(),
+			"stalls": interp.stall_count(),
+			"extrapolations": interp.extrapolation_count(),
+		})
+
+	for leg in range(2):
+		var c: Dictionary = counts[leg]
+		var label := "lossy (1 in 5)" if leg == 1 else "clean"
+		_check(
+			"%s: every frame sampled (%d)" % [label, int(c["samples"])],
+			int(c["samples"]) > 1152
+		)
+		# The number the bug was measured by. Unfixed, the render time runs past the newest
+		# snapshot on most frames of both legs.
+		_check(
+			"%s: none extrapolated (%d of %d)"
+				% [label, int(c["extrapolations"]), int(c["samples"])],
+			int(c["extrapolations"]) == 0
+		)
+		_check(
+			"%s: none at or past the newest snapshot (%d)" % [label, int(c["stalls"])],
+			int(c["stalls"]) == 0
+		)
+		# And the picture is where the buffer says: `delay_ticks()` behind the server's
+		# clock, on the entity's own line. Two centimetres is the position quantisation.
+		_check(
+			"%s: drawn %.1f ticks behind, on the line (worst %.3f m)"
+				% [label, interp.delay_ticks(), float(worst[leg])],
+			float(worst[leg]) < 0.02
+		)
+
+	# And then they stop. The last snapshot that moves them carries the stop; every one after
+	# it carries nothing for `position`, because nothing changed. What the client is drawing
+	# a second later has to be where the server left them — not the blend it happened to be
+	# drawing when the stop arrived, which is what a property read back after the
+	# interpolator had written into it used to hand the next snapshot as the server's word.
+	lossy[0] = false
+	server_move.velocity = Vector3.ZERO
+	for tick in range(769, 769 + 128):
+		server_d.server_tick(tick)
+		for payload in delivered:
+			var _applied := client_d.receive_snapshot(payload)
+		delivered.clear()
+		for quarter in range(4):
+			client_d.interpolate_frame(float(quarter) * 0.25)
+		client_d.step(1.0 / 128.0)
+
+	var gap := absf(client_move.position.x - server_move.position.x)
+	_check(
+		"stopped: drawn where the server left them (%.3f m short)" % gap,
+		gap < 0.02
+	)
+
+	server_d.stop()
+	client_d.stop()
+	remove_child(server_d)
+	remove_child(client_d)
+	server_d.free()
+	client_d.free()
 	_sections_completed += 1
 
 
