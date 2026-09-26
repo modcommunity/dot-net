@@ -22,9 +22,27 @@ var _bit_pos: int = 0
 ## field.
 var exhausted: bool = false
 
+## Where reading stops, in bits. The whole buffer unless [method limit_bits] set less.
+var _end_bits: int = -1
+
 
 func _init(data: PackedByteArray) -> void:
 	_bytes = data
+
+
+## Stops reading at [param bits], however much more the buffer holds.
+##
+## [b]A message body is framed in BITS, not bytes, and this is why.[/b] A body a newer
+## sender wrote can end mid-byte, and the padding to the byte boundary is zeroes that look
+## exactly like a one-bit field set to false. Bounding the reader at the body's exact bit
+## length is what lets [method has_more] say "the writer sent nothing further" and mean
+## it -- which is the whole of the append-only rule [DotNetMessage] documents.
+func limit_bits(bits: int) -> void:
+	_end_bits = clampi(bits, 0, _bytes.size() << 3)
+
+
+func _end() -> int:
+	return (_bytes.size() << 3) if _end_bits < 0 else _end_bits
 
 
 # --- Raw bits --------------------------------------------------------------
@@ -42,7 +60,7 @@ func read_bits(bits: int) -> int:
 	if exhausted:
 		return 0
 
-	if _bit_pos + bits > _bytes.size() << 3:
+	if _bit_pos + bits > _end():
 		exhausted = true
 		return 0
 
@@ -265,7 +283,7 @@ func read_bytes(max_bytes: int = 1 << 20) -> PackedByteArray:
 	align()
 
 	var start := _bit_pos >> 3
-	if start + length > _bytes.size():
+	if (start + length) << 3 > _end():
 		exhausted = true
 		return PackedByteArray()
 
@@ -294,11 +312,40 @@ func bit_position() -> int:
 
 
 func bits_remaining() -> int:
-	return maxi(0, (_bytes.size() << 3) - _bit_pos)
+	return maxi(0, _end() - _bit_pos)
 
 
 func bytes_remaining() -> int:
 	return bits_remaining() >> 3
+
+
+## A reader over the next [param bits] bits, byte-aligned first, and this one moved past
+## them. Null, with [member exhausted] set, when fewer are there.
+##
+## How a framed message body is read: the returned reader ends where the body ends, so a
+## message cannot read into the next one, and the next one starts where it should whatever
+## the message read.
+func take_bits(bits: int) -> DotNetReader:
+	align()
+	if exhausted or bits < 0 or bits > bits_remaining():
+		exhausted = true
+		return null
+	var start := _bit_pos >> 3
+	var count := (bits + 7) >> 3
+	var sub := DotNetReader.new(_bytes.slice(start, start + count))
+	sub.limit_bits(bits)
+	_bit_pos = (start + count) << 3
+	return sub
+
+
+## Whether the writer sent anything past this point.
+##
+## The guard for a field appended to a message after it first shipped: read it only
+## `if reader.has_more()`, and a message from a sender that predates the field keeps the
+## field's declared default instead of reading zero. On a reader bounded by
+## [method limit_bits] -- which every message body is -- this is exact to the bit.
+func has_more() -> bool:
+	return bits_remaining() > 0
 
 
 func at_end() -> bool:
@@ -308,7 +355,7 @@ func at_end() -> bool:
 
 
 func seek_bits(position: int) -> void:
-	_bit_pos = clampi(position, 0, _bytes.size() << 3)
+	_bit_pos = clampi(position, 0, _end())
 
 
 func reset() -> void:

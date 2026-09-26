@@ -136,11 +136,16 @@ static func decode_batch(
 		var decoded := registry.decode(reader, from_peer_id, is_server)
 
 		if not decoded.ok:
-			# Stop rather than continue: message bodies are variable-length and the
-			# reader's position is only meaningful if every preceding message was
-			# understood. Carrying on would decode noise.
+			# Stop rather than continue. A body is framed with its length, so an
+			# unknown TYPE is skipped above; what lands here is a malformed or forbidden
+			# message, and a peer sending one is not a peer whose next bytes to trust.
 			first_error = decoded.error
 			break
+
+		# Skipped (a type this end does not have) or a schema table: its body was framed,
+		# so the reader is already past it and the rest of the batch is still readable.
+		if decoded.value == null:
+			continue
 
 		var message: DotNetMessage = decoded.value
 		message.tick = tick

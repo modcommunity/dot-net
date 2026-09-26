@@ -31,6 +31,29 @@ extends RefCounted
 ## [b]Nothing here knows about your game.[/b] The built-in messages
 ## ([code]net.*[/code]) handle clock sync, spawning and state; everything else is
 ## yours, and the registry treats both identically.
+##
+## [b]A message changes by APPENDING, and only by appending.[/b] Two ends built from
+## different sources may both have this type, one with fields the other has never heard
+## of. Every body travels with its length in bits, so:
+##
+## - a reader with FEWER fields reads what it knows and the rest is skipped for it;
+## - a reader with MORE fields finds the body ends early. Read every field added after the
+##   type first shipped behind [method DotNetReader.has_more], and it keeps its declared
+##   default when the sender did not write it:
+##
+## [codeblock]
+## func _read(r: DotNetReader) -> void:
+##     channel = r.read_uint(4)
+##     text = r.read_string(256)
+##     if r.has_more():               # added later; an older sender does not write it
+##         colour = r.read_uint(8)
+## [/codeblock]
+##
+## Never reorder a field, never change one's width or type, never remove one: the older
+## end reads the bits where it expects them and gets a different value with no error.
+## A change that cannot be an append is a new type with a new name, registered beside the
+## old one until nothing sends the old one. Renaming a type IS making a new one, because
+## its wire id is derived from its name.
 
 ## How a message should be delivered. Maps onto transport channels and to what
 ## happens when the network drops a packet.

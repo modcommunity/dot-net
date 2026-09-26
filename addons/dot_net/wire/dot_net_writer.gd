@@ -326,6 +326,21 @@ func write_bytes(data: PackedByteArray) -> void:
 	_bit_pos = _bytes.size() << 3
 
 
+## Appends bytes with NO length prefix, byte-aligned first.
+##
+## For framing that carries its own length elsewhere -- a message body, whose length is
+## written in bits before it -- so the reader can bound itself exactly.
+func write_aligned_bytes(data: PackedByteArray) -> void:
+	align()
+
+	if _bytes.size() + data.size() > MAX_BYTES:
+		overflowed = true
+		return
+
+	_bytes.append_array(data)
+	_bit_pos = _bytes.size() << 3
+
+
 ## Writes a UTF-8 string with a length prefix.
 ##
 ## [param max_bytes] truncates rather than refusing, and truncation happens on the

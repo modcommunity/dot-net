@@ -41,7 +41,7 @@ This is the part to preserve. A game should never need to fork dot-net.
 | What replicates, and how precisely | `DotNetVar` declarations in `_register_net_vars()` | `Type.CUSTOM` + `.codec(w, r)` replicates *anything* |
 | Simulation | `DotNetBehaviour._net_simulate` | Must be deterministic — see below |
 | Player controls | `DotNetInput` subclass | `_sanitise()` is not optional |
-| Message types | `DotNetMessageRegistry.register` | Ids from sorted names; schema hash catches mismatch |
+| Message types | `DotNetMessageRegistry.register` | Id derived from the name; `required = false` for a type a peer may lack |
 | Who sees what | `DotNetInterest` subclass | The biggest lever on bandwidth *and* the only real anti-cheat |
 | How entities are made | `DotNetSpawner.register_factory` | For pooling or procedural entities |
 | Where bytes go | `DotNetManager.send_fn` | Transport-agnostic by construction |
@@ -299,6 +299,22 @@ positions agreeing to a hundredth of a unit.
 The pin returns a new dictionary rather than mutating the cached one: an entry written
 into the cache would survive the expiry that is supposed to re-evaluate it.
 
+## Two builds on one wire
+
+**A server and a client built from different dot-* sources can play, as long as neither lacks something the other REQUIRES.** That was not true before 2026-09-26 and the change that made it true is the last coordinated protocol break in this family: every client and server built before it must be rebuilt once, and none after it should need to be for a message change again.
+
+**Wire ids are derived from the type's name** (`DotNetMessageRegistry.wire_id_for`: the first 32 bits of its SHA-256), not assigned by sorting the registered names. Sorting made two processes agree without negotiating only while they registered exactly the same set; one added type renumbered every type after it, and the schema hash over the whole set refused the join. A derived id is the same number in every build that has the type.
+
+**Every message body is framed with its length in bits** — `id (32) | varint bit length | align | body` — so a receiver without the type skips exactly that message and carries on, mid-batch included, and a receiver with an older version of a type reads what it knows and skips the rest. A body that ends early is not a truncation any more; the length was checked. Bits, not bytes, because a body ending mid-byte is padded with zeroes that look exactly like a one-bit field set to false; `DotNetReader.limit_bits` bounds the body reader exactly so `has_more()` can mean "the sender wrote nothing further".
+
+**Why derived ids and not the negotiated per-peer table this was first specified as.** A negotiated table has to reach the receiver before the first message that uses it, and here nothing can guarantee that: every game encodes its events with `messages.encode` and routes them through its own link, around the manager. A message decoded against a table that has not arrived is dropped or read as the wrong type, silently. A derived id cannot be misread in any order. It costs 20 bits per event or request; snapshots carry no message id.
+
+**The table is still exchanged, for what only it can do.** `DotNetManager` sends `messages.schema_payload()` through `send_fn` as RELIABLE — a server in `add_peer`, a client in `start()`, and `announce_schema(peer)` for a host whose route was not up yet — and the receiver's `decode` adopts it (reserved id 0). A type registered `required` (the default: a game's own event and request types are the game) that the peer does not know refuses the pair with a sentence, *"This server's game needs a newer game client."*, on `peer_schema_refused`; nothing that peer sends is decoded after it. **dot-net cannot drop a peer — it owns no socket — so the host must**: dot-game's `DotGameNetcode` kicks with `error.message`, and a game building its own manager connects the signal itself. An optional type the peer lacks is skipped there and costs nothing. Two names whose derived ids collide are refused at registration, or at adoption when only the peer has one of them.
+
+`schema_hash()` covers **only the required names** now: what must match, printed as twelve characters, so a peer with one extra optional type no longer reads as incompatible.
+
+**The rule for a message author**, because derived ids no longer protect you from it: **append fields, never reorder, retype, re-width or remove one**, and read a field added after the type first shipped only `if reader.has_more()`, so a message from an older sender keeps the field's default. A change that cannot be an append is a **new type with a new name** — renaming a type is making one, because its id is its name — registered beside the old until nothing sends the old one. `netcode_demo`'s `[mismatched schemas]` is the proof: an old and a new registry, an unknown type skipped either side of a known one in one batch, an appended field crossing both ways, and a required type refused from both ends and through the manager.
+
 ## Wire format notes
 
 - Bits are written LSB-first within each byte, bytes in order. **This is the wire
@@ -375,8 +391,9 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 241 checks: wire round-trips, quantisation accuracy, message direction and
-# schema mismatch, batching and fragmentation, clock convergence, replication and
+# 263 checks: wire round-trips, quantisation accuracy, message direction,
+# two builds with different message sets (skipped types, appended fields, a required
+# type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
 # extrapolation bounds, the render delay in ticks at 128/20 with nothing
 # extrapolated (clean and lossy) and a stop drawn where it stopped, rewind/restore, prediction replay against a server
@@ -400,6 +417,7 @@ is why there are no autoloads and why `DotNetManager.service_scope` exists.
 ```
 addons/dot_net/
   dot_net_manager.gd             Tick loop, snapshot send/receive, message routing.
+  dot_net_api.gd                 API level; see dot-core's DotAddonApi.
   core/
     dot_net_clock.gd             Three timelines. Read this first.
     dot_net_config.gd            All tuning. describe_budget() shows what it costs.
@@ -407,7 +425,7 @@ addons/dot_net/
     dot_net_writer.gd            Bit packing + quantisation.
     dot_net_reader.gd            The untrusted side.
     dot_net_message.gd           Base message. Delivery + Direction.
-    dot_net_message_registry.gd  Ids, schema hash, direction enforcement, dispatch.
+    dot_net_message_registry.gd  Derived ids, framing, the schema exchange, dispatch.
     dot_net_packet.gd            Batching, fragmentation, reassembly.
   replication/
     dot_net_var.gd               The declaration. Type.CUSTOM is the escape hatch.

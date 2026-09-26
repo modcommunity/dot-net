@@ -47,6 +47,17 @@ signal snapshot_applied(tick: int)
 signal entity_spawned(identity: DotNetIdentity)
 signal entity_despawned(net_id: int)
 
+## A peer's message schema cannot work with this one: a type one end REQUIRES that the
+## other does not have. [param error] is CODE_VERSION with a sentence a player can read.
+##
+## [b]dot-net cannot act on this and does not try.[/b] It owns no connection, so it cannot
+## drop the peer; what it does is stop decoding anything that peer sends. The host is the
+## one holding the socket, and a server should disconnect the peer with
+## [code]error.message[/code] as the reason -- dot-game's [code]DotGameNetcode[/code] wires
+## that to [code]DotServer.kick[/code], and a game building its own manager connects it
+## itself. A client needs nothing: the server refuses it with the same sentence.
+signal peer_schema_refused(peer_id: int, error: DotError)
+
 @export_group("Role")
 
 ## Whether this process is the authority.
@@ -198,6 +209,7 @@ func setup() -> DotResult:
 
 	registry = DotNetRegistry.new(is_server, local_peer_id)
 	messages = DotNetMessageRegistry.new()
+	messages.peer_refused.connect(_on_peer_refused)
 	budget = DotNetBudget.new(config)
 	stats = DotNetStats.new()
 
@@ -280,7 +292,45 @@ func start() -> DotResult:
 		CHANNEL, "started", {"schema": messages.schema_hash().substr(0, 12)}
 	)
 
+	# A client tells the server what it speaks as soon as it can speak at all. The server
+	# is the end that decides whether the two can play, and it is told first so that a
+	# refusal arrives before anything else the join would have sent.
+	if not is_server:
+		announce_schema(1)
+	for peer_id in _peers:
+		announce_schema(peer_id)
+
 	return DotResult.success(self)
+
+
+## Sends this end's message schema to a peer, through [member send_fn]. See
+## [method DotNetMessageRegistry.schema_payload].
+##
+## [b]Automatic, and callable again.[/b] A server announces to a peer in [method add_peer]
+## and a client to the server in [method start], both through [member send_fn] with
+## RELIABLE delivery, which every game in this family already routes to its event and
+## request calls. A host whose reliable route to a peer did not exist yet at that moment
+## -- a client scene built after the server added the peer -- calls this again once it
+## does. Adopting a table twice is harmless; the latest one counts.
+##
+## Nothing is lost if it never arrives: a message's wire id is derived from its type's
+## name, so decoding does not wait for the table. What waits for it is the check that
+## refuses a peer missing a REQUIRED type.
+func announce_schema(peer_id: int) -> bool:
+	if not send_fn.is_valid() or messages == null:
+		return false
+
+	var payload := messages.schema_payload()
+	send_fn.call(peer_id, payload, DotNetMessage.Delivery.RELIABLE)
+	stats.note_sent(payload.size(), 1)
+	return true
+
+
+func _on_peer_refused(peer_id: int, error: DotError) -> void:
+	DotLog.warn(CHANNEL, "peer cannot play with this schema", {
+		"peer": peer_id, "why": error.message, "detail": error.detail,
+	})
+	peer_schema_refused.emit(peer_id, error)
 
 
 func stop() -> void:
@@ -322,6 +372,9 @@ func add_peer(peer_id: int) -> void:
 
 	DotLog.debug(CHANNEL, "peer added", {"peer": peer_id})
 
+	if _running:
+		announce_schema(peer_id)
+
 
 ## Removes a peer and everything it owned.
 func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
@@ -329,6 +382,9 @@ func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
 	_input_buffers.erase(peer_id)
 	_acks.erase(peer_id)
 	_ack_wired.erase(peer_id)
+
+	if messages != null:
+		messages.forget_peer(peer_id)
 
 	budget.forget_peer(peer_id)
 	interest.forget_peer(peer_id)
@@ -902,9 +958,17 @@ func receive(payload: PackedByteArray, from_peer_id: int) -> DotResult:
 	if not decoded.ok:
 		if decoded.code() == DotError.CODE_FORBIDDEN:
 			stats.note_direction_violation()
-		else:
+		elif decoded.code() != DotError.CODE_VERSION:
+			# A refused schema is not a decode failure: it decoded, and said the two ends
+			# cannot play. It is reported through `peer_schema_refused`, not as noise.
 			stats.note_decode_failure()
 		return decoded
+
+	# Null is a message there is nothing to hand a game: a peer's schema table, a type this
+	# end does not have, or anything from a peer whose schema was refused. Not an error --
+	# a peer one build ahead sends exactly this, and must be able to.
+	if decoded.value == null:
+		return DotResult.success(false)
 
 	messages.dispatch(decoded.value)
 	return DotResult.success(true)

@@ -155,6 +155,50 @@ class ServerNotice extends DotNetMessage:
 		notice = r.read_string(128)
 
 
+## [code]demo.chat[/code] one build later: a field appended, read behind has_more().
+class ChatMessageV2 extends DotNetMessage:
+	var text: String = ""
+	var colour: int = 7
+
+	func _type_name() -> StringName:
+		return &"demo.chat"
+
+	func _write(w: DotNetWriter) -> void:
+		w.write_string(text, 128)
+		w.write_uint(colour, 8)
+
+	func _read(r: DotNetReader) -> void:
+		text = r.read_string(128)
+		if r.has_more():
+			colour = r.read_uint(8)
+
+
+## A type one end has and the other does not, which a peer can do without.
+class ExtraMessage extends DotNetMessage:
+	var value: int = 0
+
+	func _type_name() -> StringName:
+		return &"demo.extra"
+
+	func _write(w: DotNetWriter) -> void:
+		w.write_uint(value, 16)
+
+	func _read(r: DotNetReader) -> void:
+		value = r.read_uint(16)
+
+
+## A type one end has and REQUIRES, which a peer cannot do without.
+class VitalMessage extends DotNetMessage:
+	func _type_name() -> StringName:
+		return &"demo.vital"
+
+	func _write(_w: DotNetWriter) -> void:
+		pass
+
+	func _read(_r: DotNetReader) -> void:
+		pass
+
+
 # --- Harness ---------------------------------------------------------------
 
 var _passed := 0
@@ -164,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 241
+const CHECKS := 263
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -210,6 +254,7 @@ func _run() -> void:
 	_test_wire()
 	_test_quantisation()
 	_test_messages()
+	_test_mismatched_schemas()
 	_test_packets()
 	_test_clock()
 	await _test_replication()
@@ -460,13 +505,26 @@ func _test_messages() -> void:
 		not registry.decode(ew.to_reader(), 3, true).ok
 	)
 
-	# An unknown id means a schema mismatch and must be reported as one.
+	# An unknown id is a type this end does not have -- what a peer one build ahead
+	# sends. It is skipped, by its framed length, and is not an error.
 	var bogus := DotNetWriter.new()
 	bogus.write_uint(4000, DotNetMessageRegistry.ID_BITS)
+	bogus.write_varint(0)
+	var before := registry.skipped
 	var unknown := registry.decode(bogus.to_reader(), 3, true)
 	_check(
-		"unknown id reported as a version problem",
-		not unknown.ok and unknown.code() == DotError.CODE_VERSION
+		"an unknown id is skipped rather than refused",
+		unknown.ok and unknown.value == null and registry.skipped == before + 1
+	)
+
+	# A body claiming more bits than the payload holds is truncated, and that still is an
+	# error: the length is what makes skipping possible, so it has to be believable.
+	var short := DotNetWriter.new()
+	short.write_uint(registry.id_of(&"demo.chat"), DotNetMessageRegistry.ID_BITS)
+	short.write_varint(4000)
+	_check(
+		"a body longer than the payload is a parse failure",
+		registry.decode(short.to_reader(), 3, true).code() == DotError.CODE_PARSE
 	)
 
 	# Dispatch.
@@ -475,6 +533,209 @@ func _test_messages() -> void:
 		received.append((m as ChatMessage).text))
 	registry.dispatch(decoded.value)
 	_check("dispatched to the handler", received.size() == 1)
+
+
+## Two ends built from different sources: the point of deriving ids from names.
+##
+## "Old" registers less than "new". Old must skip what it does not have and carry on --
+## mid-batch included -- a field appended to a shared type must cross in both directions,
+## and a REQUIRED type one end lacks must be refused with a sentence rather than a
+## decode error an hour later.
+func _test_mismatched_schemas() -> void:
+	print("")
+	print("[mismatched schemas]")
+
+	var old := DotNetMessageRegistry.new()
+	old.register(&"demo.chat", ChatMessage)
+	old.seal()
+
+	var new := DotNetMessageRegistry.new()
+	new.register(&"demo.chat", ChatMessageV2)
+	new.register(&"demo.extra", ExtraMessage, DotNetMessage.Delivery.RELIABLE,
+		DotNetMessage.Direction.BOTH, false)
+	new.seal()
+
+	_check(
+		"a type has the same wire id whatever else is registered",
+		old.id_of(&"demo.chat") == new.id_of(&"demo.chat")
+			and old.id_of(&"demo.chat") == DotNetMessageRegistry.wire_id_for(&"demo.chat")
+	)
+	_check(
+		"an extra OPTIONAL type does not change the schema hash",
+		old.schema_hash() == new.schema_hash()
+	)
+
+	# The tables cross, both ways, and neither end refuses.
+	_check(
+		"the old end adopts the new end's table",
+		old.adopt_peer_schema(1, _schema_body(new.schema_payload()), false).ok
+	)
+	_check(
+		"and the new end adopts the old end's",
+		new.adopt_peer_schema(5, _schema_body(old.schema_payload()), true).ok
+	)
+	_check(
+		"each knows what the other has",
+		old.peer_has(1, &"demo.extra") and not new.peer_has(5, &"demo.extra")
+	)
+
+	# New sends [extra, chat, extra] in one batch. Old has no idea what an extra is.
+	var batch := DotNetPacket.Batch.new(9)
+	var e1 := ExtraMessage.new()
+	e1.value = 1234
+	batch.add(e1, 4)
+	var line := ChatMessageV2.new()
+	line.text = "still here"
+	line.colour = 42
+	batch.add(line, 16)
+	batch.add(ExtraMessage.new(), 4)
+
+	var encoded := DotNetPacket.encode_batch(batch, new)
+	var skipped_before := old.skipped
+	var decoded := DotNetPacket.decode_batch(encoded.value, old, 1, false)
+	var got: Array = (decoded.value as Dictionary)["messages"] if decoded.ok else []
+	_check(
+		"the old end skips both unknown messages and keeps the one between them",
+		decoded.ok and got.size() == 1 and old.skipped == skipped_before + 2
+	)
+	_check(
+		"reading the fields it knows of a newer version of its own type",
+		got.size() == 1 and (got[0] as ChatMessage).text == "still here"
+	)
+
+	# And the other way: an old chat into a new reader, whose appended field keeps its
+	# default because the older sender never wrote it.
+	var old_line := ChatMessage.new()
+	old_line.text = "from the past"
+	var ow := DotNetWriter.new()
+	old.encode(old_line, ow)
+	var into_new := new.decode(ow.to_reader(), 5, true)
+	_check(
+		"a newer reader gets the old fields",
+		into_new.ok and (into_new.value as ChatMessageV2).text == "from the past"
+	)
+	_check(
+		"and keeps its default for the field the old sender did not write (%s)"
+			% (str((into_new.value as ChatMessageV2).colour) if into_new.ok else "-"),
+		into_new.ok and (into_new.value as ChatMessageV2).colour == 7
+	)
+
+	# A REQUIRED type one end lacks. The old client meets a server that requires
+	# demo.vital, in both of the places the check runs.
+	var strict := DotNetMessageRegistry.new()
+	strict.register(&"demo.chat", ChatMessageV2)
+	strict.register(&"demo.vital", VitalMessage)
+	strict.seal()
+
+	_check(
+		"a REQUIRED type changes the schema hash",
+		strict.schema_hash() != old.schema_hash()
+	)
+
+	var refusals: Array = []
+	strict.peer_refused.connect(func(peer: int, err: DotError) -> void: refusals.append([peer, err]))
+
+	var at_server := strict.adopt_peer_schema(5, _schema_body(old.schema_payload()), true)
+	_check(
+		"the server refuses a client missing a type it requires",
+		not at_server.ok and at_server.code() == DotError.CODE_VERSION
+	)
+	_check(
+		"with a sentence a player can act on (%s)" % (at_server.error.message if not at_server.ok else ""),
+		not at_server.ok and at_server.error.message == "This server's game needs a newer game client."
+	)
+	_check(
+		"and the type named where an operator reads it",
+		not at_server.ok and at_server.error.detail.contains("demo.vital")
+	)
+	_check("it says so on its signal", refusals.size() == 1 and int(refusals[0][0]) == 5)
+
+	var at_client := old.adopt_peer_schema(1, _schema_body(strict.schema_payload()), false)
+	_check(
+		"and the client refuses it too, from its side (%s)" % (at_client.error.message if not at_client.ok else ""),
+		not at_client.ok and at_client.error.message == "This server's game needs a newer game client."
+	)
+
+	# Nothing from a refused peer is handed to a game.
+	var cw := DotNetWriter.new()
+	var after := ChatMessageV2.new()
+	after.text = "ignored"
+	strict.encode(after, cw)
+	var from_refused := old.decode(cw.to_reader(), 1, false)
+	_check(
+		"and nothing a refused peer sends is decoded",
+		from_refused.ok and from_refused.value == null
+	)
+
+	# Forgetting the peer clears the refusal, so a reconnect is judged afresh.
+	old.forget_peer(1)
+	_check("forgetting a peer forgets its refusal", not old.is_refused(1) and not old.knows_peer(1))
+
+	# The manager: a server announces as it adds a peer, the client as it starts, and a
+	# refusal reaches the host on the manager's own signal.
+	var s := DotNetManager.new()
+	s.is_server = true
+	s.auto_tick = false
+	s.config_file = ""
+	s.service_scope = &"schema_server"
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 3
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = &"schema_client"
+	add_child(s)
+	add_child(c)
+	s.setup()
+	c.setup()
+	s.messages.register(&"demo.chat", ChatMessageV2)
+	s.messages.register(&"demo.vital", VitalMessage)
+	c.messages.register(&"demo.chat", ChatMessage)
+
+	var wire: Array = []
+	s.send_fn = func(peer: int, payload: PackedByteArray, _d: int) -> void: wire.append([1, peer, payload])
+	c.send_fn = func(peer: int, payload: PackedByteArray, _d: int) -> void: wire.append([3, peer, payload])
+
+	var manager_refusals: Array = []
+	s.peer_schema_refused.connect(func(peer: int, err: DotError) -> void: manager_refusals.append([peer, err.message]))
+
+	s.start()
+	c.start()
+	s.add_peer(3)
+
+	_check("both ends announced a table (%d payloads)" % wire.size(), wire.size() == 2)
+
+	for w in wire:
+		if int(w[0]) == 1:
+			c.receive(w[2], 1)
+		else:
+			s.receive(w[2], 3)
+
+	_check(
+		"the server's manager reports the client it cannot play with",
+		manager_refusals.size() == 1 and int(manager_refusals[0][0]) == 3
+	)
+	_check(
+		"and a refused schema is not counted as a decode failure",
+		s.stats.decode_failures == 0
+	)
+
+	s.stop()
+	c.stop()
+	remove_child(s)
+	remove_child(c)
+	s.free()
+	c.free()
+
+
+## The body of a schema payload, as `decode` would hand it to `adopt_peer_schema`.
+func _schema_body(payload: PackedByteArray) -> DotNetReader:
+	var r := DotNetReader.new(payload)
+	var id := r.read_uint(DotNetMessageRegistry.ID_BITS)
+	var bits := r.read_varint()
+	if id != DotNetMessageRegistry.SCHEMA_ID:
+		return DotNetReader.new(PackedByteArray())
+	return r.take_bits(bits)
 
 
 func _test_packets() -> void:
@@ -1230,8 +1491,11 @@ func _test_render_delay() -> void:
 	var delivered: Array[PackedByteArray] = []
 	var sent := [0]
 	var lossy := [false]
-	server_d.send_fn = func(peer_id: int, payload: PackedByteArray, _d: int) -> void:
-		if peer_id != 2:
+	server_d.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		# Snapshots only. The reliable route carries the schema table the manager
+		# announces as it adds a peer, and counting it here would move which snapshot
+		# the one-in-five loss lands on.
+		if peer_id != 2 or d != DotNetMessage.Delivery.UNRELIABLE:
 			return
 		sent[0] += 1
 		if lossy[0] and sent[0] % 5 == 0:
@@ -1834,7 +2098,10 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int) -> Dicti
 	var bytes: Array[int] = []
 	var lost_ticks: Array[int] = []
 	var now := [0]
-	host.send_fn = func(_peer: int, payload: PackedByteArray, _d: int) -> void:
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		# Snapshots only; see _test_render_delay.
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			return
 		sent[0] += 1
 		bytes.append(payload.size())
 		if lossy and sent[0] % 4 == 0:
@@ -1974,8 +2241,14 @@ func _test_integration() -> void:
 	_check("client setup", client.setup().ok)
 
 	# The loopback: the server's payloads land in the client, with loss.
-	server.send_fn = func(peer_id: int, payload: PackedByteArray, _d: int) -> void:
+	server.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
 		if peer_id != 2 and peer_id != 0:
+			return
+		# The reliable route: the schema table, which the client decodes as a message.
+		# Never dropped -- a reliable channel is one that does not lose things.
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var into := client.receive(payload, 1)
+			_check("the client adopts the server's schema table", into.ok)
 			return
 		_drop_next += 1
 		# Drop one packet in five, so interpolation and loss handling are exercised
