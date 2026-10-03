@@ -32,6 +32,10 @@ read. At any instant a client is dealing with three tick numbers:
 
 Drift is corrected by **scaling tick duration**, not by jumping the tick number — snapping teleports every predicted object and re-runs applied inputs. Past `SNAP_THRESHOLD_SECONDS` it does snap, because a suspended tab is not drift. That threshold is a **duration**, and it was a tick count: 60 ticks is one second only at the default rate, so a 128-tick server snapped at 0.47 s and threw a predicted state away for every half-second hitch — which is what a player calls jumpy.
 
+**Behind is not drift, and smoothing it was the worst bug a browser player ever hit here.** A client behind its target stamps every command for a tick the server has already simulated, and the server discards each one as late. The engine drops every physics step past eight in a frame, so every stall — a scene loading, a shader compiling on first draw, both of which a browser does for seconds on its first connect and never on a reconnect — put the clock behind by the stall's length, and `MAX_DRIFT_RATE` closed that at 3 ticks a second at 60 and 6.4 at 128: a half-second hitch was ten seconds of a player who could not steer, in every game in the family, until it "fixed itself". So the correction is asymmetric now: behind by more than the input margin (`catch_up_threshold_ticks()`) jumps forward at once — the ticks jumped over are never sent and the server repeats the last command for them, as for a lost packet — and only a client AHEAD of its target is smoothed. Found 2026-10-03 from three screen recordings and a cold browser profile against the live smash server.
+
+**And the server's clock follows `server_tick(tick)`.** A game-driven server (`auto_tick = false`, every game here) never advanced it, so `clock.tick` read 0 for the server's whole life and every game's HELLO told a joiner to sync to tick 0.
+
 ## The extension points
 
 This is the part to preserve. A game should never need to fork dot-net.
@@ -391,7 +395,7 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 263 checks: wire round-trips, quantisation accuracy, message direction,
+# 264 checks: wire round-trips, quantisation accuracy, message direction,
 # two builds with different message sets (skipped types, appended fields, a required
 # type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and

@@ -114,6 +114,7 @@ var _synced: bool = false
 ## the server has already passed and is discarded. So it is adopted outright, once.
 var _synced_with_rtt: bool = false
 var _snap_count: int = 0
+var _catch_up_count: int = 0
 
 
 func _init(p_tick_rate: int = 60, p_is_authority: bool = false) -> void:
@@ -238,12 +239,46 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		_drift_scale = 1.0
 		return
 
+	if error > catch_up_threshold_ticks():
+		# [b]Behind by more than the margin, and that is not drift to be smoothed.[/b] A
+		# client behind its target stamps every command for a tick the server has
+		# already simulated; the server discards each one as late and repeats the last
+		# command it had, so the player cannot steer and the prediction is pulled back
+		# a few times a second. Smoothing that at [constant MAX_DRIFT_RATE] is 3 ticks a
+		# second at 60 Hz and 6.4 at 128 — a half-second hitch was ten seconds of a
+		# client that could not play, which is exactly what a browser's first connect
+		# looked like: the engine drops every physics step past eight in a frame, so
+		# each load or shader-compile stall put the clock behind by its own length.
+		#
+		# Forward is cheap. The ticks jumped over are never sent, the server repeats the
+		# last command for them as it would for a lost packet, and the predictor finds a
+		# hole in its history once. Backward is not, which is why an error the OTHER way
+		# — a client ahead of its target — is still smoothed below.
+		_catch_up_count += 1
+		DotLog.debug(
+			CHANNEL,
+			"clock caught up; it had fallen behind the server",
+			{"behind_ticks": error, "catch_ups": _catch_up_count}
+		)
+		tick = target
+		_drift_scale = 1.0
+		return
+
 	# Proportional correction, clamped. Positive error means we are behind the
 	# target, so ticks must get shorter to catch up.
 	var correction := clampf(
 		float(error) / float(maxi(1, tick_rate)), -MAX_DRIFT_RATE, MAX_DRIFT_RATE
 	)
 	_drift_scale = 1.0 - correction
+
+
+## How far behind its target the input timeline may fall before it jumps forward, in ticks.
+##
+## The margin itself: within it a command still lands before its tick, so smoothing loses
+## nothing; past it every tick of smoothing is a command the server throws away. See
+## [method sync_from_server].
+func catch_up_threshold_ticks() -> int:
+	return maxi(1, _target_lead() - one_way_ticks())
 
 
 ## [constant SNAP_THRESHOLD_SECONDS] in ticks, at this clock's rate.

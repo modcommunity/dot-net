@@ -450,6 +450,15 @@ func step(delta: float) -> void:
 
 ## One authoritative tick: consume input, simulate, record history, maybe send.
 func server_tick(tick: int) -> void:
+	# [b]The clock follows the tick it is driven at.[/b] A host that ticks this itself
+	# (`auto_tick = false`, which is every game in the family) never advanced the server's
+	# clock, so `clock.tick` read 0 for the life of the server — and every game's HELLO
+	# hands a joiner exactly that number to sync from. The joiner's first input timeline
+	# was millions of ticks in the past, every command it sent was discarded as late, and
+	# it stayed that way until the first snapshot snapped the clock.
+	if is_server:
+		clock.tick = maxi(clock.tick, tick)
+
 	var identities := registry.all()
 
 	for peer_id in _peers:

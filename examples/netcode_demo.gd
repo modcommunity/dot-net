@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 263
+const CHECKS := 264
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -856,9 +856,10 @@ func _test_clock() -> void:
 	# Render must be behind the server, or there is nothing to interpolate between.
 	_check("render tick lags the server", follower.render_tick(4) < follower.server_tick())
 
-	# Small drift corrects by changing tick length, not by jumping.
+	# Small drift corrects by changing tick length, not by jumping. One tick behind is
+	# inside the margin: a command still lands in time, so nothing is lost by smoothing.
 	var before := follower.tick
-	follower.sync_from_server(1005, 100.0)
+	follower.sync_from_server(1001, 100.0)
 	_check("small drift does not snap", absi(follower.tick - before) < 5)
 	_check("drift correction applied", absf(follower.drift_percent()) > 0.0)
 
@@ -877,26 +878,45 @@ func _test_clock() -> void:
 	fast.sync_from_server(10000, 20.0)
 
 	var fast_before := fast.tick
-	# Half a second behind: 64 ticks at 128, which is what a real client logged.
-	fast.sync_from_server(fast.server_tick() + 64, 20.0)
+	# Half a second AHEAD: 64 ticks at 128. A client ahead of its target only adds input
+	# latency, and stepping back would re-stamp ticks already sent, so it is drift.
+	fast.sync_from_server(fast.server_tick() - 64, 20.0)
 	_check(
-		"a half-second hitch at 128 ticks is drift, not a snap",
+		"a client half a second ahead at 128 ticks drifts back, not a snap",
 		absi(fast.tick - fast_before) < 5
 	)
 
-	# Two seconds is a different session, at any rate.
-	fast.sync_from_server(fast.server_tick() + 256, 20.0)
-	_check("and two seconds still snaps", absi(fast.tick - fast_before) > 200)
+	# [b]Half a second BEHIND is not drift, and smoothing it was the bug.[/b] That is what
+	# a hitch does — the engine drops every physics step past eight in a frame, so the
+	# clock loses the stall's length — and a client behind its target stamps every
+	# command for a tick the server has already simulated. At 5% that took ten seconds at
+	# 128 ticks, every command of them discarded: a browser's first connect, where every
+	# load and shader compile is a stall, was a player who could not steer until the
+	# clock crawled back. Armed: smoothing this leaves the clock 60 ticks short.
+	var behind := DotNetClock.new(128, false)
+	behind.sync_from_server(10000, 0.0)
+	behind.sync_from_server(10000, 20.0)
+	var lead := behind.tick - behind.server_tick()
+	behind.sync_from_server(behind.server_tick() + 64, 20.0)
+	_check(
+		"a client half a second BEHIND catches up at once (%d ahead of the server)"
+			% (behind.tick - behind.server_tick()),
+		behind.tick - behind.server_tick() == lead
+	)
 
-	# The same hitch, at the rate the constant was written for. It was never wrong here,
-	# which is exactly why it went unnoticed.
+	# Two seconds is a different session, at any rate.
+	var before_snap := behind.tick
+	behind.sync_from_server(behind.server_tick() + 256, 20.0)
+	_check("and two seconds still snaps", absi(behind.tick - before_snap) > 200)
+
+	# The same, at 60.
 	var slow := DotNetClock.new(60, false)
 	slow.sync_from_server(10000, 0.0)
 	slow.sync_from_server(10000, 20.0)
 	var slow_before := slow.tick
-	slow.sync_from_server(slow.server_tick() + 30, 20.0)
+	slow.sync_from_server(slow.server_tick() - 30, 20.0)
 	_check(
-		"a half-second hitch at 60 ticks is drift too, as it always was",
+		"half a second ahead at 60 ticks is drift too, as it always was",
 		absi(slow.tick - slow_before) < 5
 	)
 
