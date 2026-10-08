@@ -177,6 +177,40 @@ func _net_read_property(property: StringName) -> Variant:
 	return get(property)
 
 
+## property -> value, read once for the snapshot being written; empty outside one.
+##
+## [b]Every peer's snapshot reads every property of every entity it carries[/b], twice
+## (once to decide whether it is dirty, once to write it), so a server of N players read
+## each property 2N times a snapshot through a dynamic `get`. Nothing changes the world
+## while a snapshot is being built, so the value is the same every time: the manager
+## opens this with [method begin_snapshot_reads] before its peer loop and closes it with
+## [method end_snapshot_reads] after, and inside it each property is read once.
+## Outside a snapshot it is closed and reads go straight to [method _net_read_property],
+## so a caller writing state at any other time sees the live value.
+var _snapshot_reads: Dictionary = {}
+var _snapshot_reads_open: bool = false
+
+
+func begin_snapshot_reads() -> void:
+	_snapshot_reads.clear()
+	_snapshot_reads_open = true
+
+
+func end_snapshot_reads() -> void:
+	_snapshot_reads.clear()
+	_snapshot_reads_open = false
+
+
+func _read_for_send(property: StringName) -> Variant:
+	if not _snapshot_reads_open:
+		return _net_read_property(property)
+	if _snapshot_reads.has(property):
+		return _snapshot_reads[property]
+	var value: Variant = _net_read_property(property)
+	_snapshot_reads[property] = value
+	return value
+
+
 ## Writes a property. Override to validate or to trigger side effects.
 func _net_write_property(property: StringName, value: Variant) -> void:
 	set(property, value)
@@ -274,7 +308,7 @@ func collect_dirty(
 		if declaration.on_spawn_only and not force:
 			# Still sent when it changes — "spawn only" means "do not pay for it
 			# every snapshot", not "never update".
-			var current_once: Variant = _net_read_property(declaration.property)
+			var current_once: Variant = _read_for_send(declaration.property)
 			if not _is_dirty(view, declaration, current_once):
 				continue
 
@@ -284,7 +318,7 @@ func collect_dirty(
 			if float(now) - last < interval:
 				continue
 
-		var current: Variant = _net_read_property(declaration.property)
+		var current: Variant = _read_for_send(declaration.property)
 
 		if not force and not _is_dirty(view, declaration, current) \
 				and not (until_acked and _is_unconfirmed(view, declaration, current)):
@@ -348,7 +382,7 @@ func write_state(
 		if index < 0:
 			continue
 
-		var value: Variant = _net_read_property(declaration.property)
+		var value: Variant = _read_for_send(declaration.property)
 
 		writer.write_uint(index, 6)
 		declaration.write(writer, value)
@@ -403,6 +437,7 @@ func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 
 	var kept: Array[Dictionary] = []
 	var resolved := 0
+	var dropped := false
 
 	for entry in view.pending:
 		var entry_tick := int(entry["tick"])
@@ -415,14 +450,23 @@ func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 
 		if entry_tick == acked_tick or not view.strict:
 			view.acked.merge(entry["values"], true)
-		# Otherwise: sent before a snapshot the peer has already applied, and still
-		# unconfirmed. Dropped without promotion, so it goes out again.
+		else:
+			# Sent before a snapshot the peer has already applied, and still
+			# unconfirmed. Dropped without promotion, so it goes out again.
+			dropped = true
 
 	if resolved == 0:
 		return
 
 	view.pending = kept
-	_rebuild_believed(view)
+	# [b]Only a DROP changes what the peer is believed to hold.[/b] `believed` is `acked`
+	# with every pending entry laid over it in tick order, and the entries resolved here
+	# are the oldest ones; promoting them moves their values from the front of that
+	# overlay into `acked`, which is the same dictionary afterwards. Rebuilding anyway
+	# was a copy of every property per entity per peer per acknowledgement -- a third
+	# of a 32-player server's snapshot cost, measured (`game-g2gfast tools/load_probe`).
+	if dropped:
+		_rebuild_believed(view)
 
 
 ## Drops unconfirmed sends older than [param oldest_tick].
@@ -453,7 +497,9 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 		return
 
 	view.pending = kept
-	_rebuild_believed(view)
+	# Promoted (not strict) leaves `believed` as it was; see [method sync_peer_acks].
+	if view.strict:
+		_rebuild_believed(view)
 
 
 ## Forgets everything recorded for one peer.
@@ -654,11 +700,31 @@ func snapshot_values() -> Dictionary:
 
 ## Estimated bits a full update costs, for the bandwidth budget.
 func estimated_bits(peer_id: int) -> int:
+	# Asked once per entity per peer per snapshot, and its answer depends only on
+	# whether the peer is the owner (see [method DotNetVar.visible_to]) -- so two
+	# numbers, worked out once and again only if the declarations change.
+	var is_owner := peer_id == identity.owner_peer_id
+	if _estimate_for != net_vars.size():
+		_estimate_owner = -1
+		_estimate_other = -1
+		_estimate_for = net_vars.size()
+	var cached := _estimate_owner if is_owner else _estimate_other
+	if cached >= 0:
+		return cached
 	var total := 6
 	for declaration in net_vars:
 		if declaration.visible_to(peer_id, identity.owner_peer_id):
 			total += 6 + declaration.estimated_bits()
+	if is_owner:
+		_estimate_owner = total
+	else:
+		_estimate_other = total
 	return total
+
+
+var _estimate_owner: int = -1
+var _estimate_other: int = -1
+var _estimate_for: int = -1
 
 
 func find_var(property: StringName) -> DotNetVar:

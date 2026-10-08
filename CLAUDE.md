@@ -238,6 +238,16 @@ Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
 
 20. **Not fixed, and nothing reaches it today: a predicted property with a `max_rate` that stops changing is never rewound.** `authoritative_values()` leaves out a rate-limited property the snapshot did not carry, because its absence may mean the rate limit held it back rather than that it stood still — and the receiving side cannot tell the two apart. So a predicted `max_rate` property the server holds still is #17's walk-away for that one class of property. No game in the family sets `max_rate` on a predicted property. The fix, when one does, is on the send side: mark a property skipped for rate so the receiver can treat an unmarked absence as "unchanged since the acked baseline". Found by review, 2026-09-24.
 
+## What a snapshot costs per peer, and the three things it was doing N times (2026-10-07)
+
+Nothing in the family had measured a server with more than two players until game-g2gfast's `tools/load_probe` put 32 on one: a snapshot tick cost 71 ms, against a 7.8 ms tick at 128, and 95% of it was `_send_to_peer`'s per-entity bookkeeping, done once per entity **per peer**. Three of those were the same work repeated, and are done once now; none changes a byte on the wire:
+
+- **`_rebuild_believed` ran on every resolved entry**, copying every property of every entity for every peer on every acknowledgement (and on every aged-out entry). Promotion cannot change `believed` -- it is `acked` with pending laid over it in tick order, and the resolved entries are the oldest -- so `sync_peer_acks` and `trim_pending` rebuild only when an entry was DROPPED unconfirmed (strict), which is the loss-recovery case and still recovers.
+- **Each property was read 2N times a snapshot** through a dynamic `get`, to decide whether it was dirty and then to write it, once per peer. The manager opens `begin_snapshot_reads()` on every behaviour before its peer loop and `end_snapshot_reads()` after; inside, `_read_for_send` reads each property once. Outside a snapshot it reads live, so nothing else sees a stale value.
+- **`estimated_bits(peer)` walked the declarations per peer**; its answer depends only on whether the peer is the owner, so it is two cached numbers.
+
+32 players: snapshots 17.7 -> 12.1 ms a tick. What is left is genuinely per peer as written -- `collect_dirty`, `write_state`'s bit packing, the pending record -- and the next step is structural: encode an entity once per snapshot and share the bytes between peers whose dirty set is the same, which for a moving player is every peer but its owner. `netcode_demo` 264 / 0 (acked baselines and loss recovery included); game-g2gfast `headless_net` (one-in-five loss) 172 / 0.
+
 ## The render timeline has to move between packets
 
 `DotNetClock.server_tick()` is what `render_tick()` is derived from, and therefore what

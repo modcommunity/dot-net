@@ -566,6 +566,12 @@ func _send_snapshots(tick: int, identities: Array[DotNetIdentity]) -> void:
 
 	var sent_to := 0
 
+	# Each property read once for this snapshot rather than once per peer; see
+	# [member DotNetBehaviour._snapshot_reads].
+	for identity in identities:
+		for behaviour in identity.behaviours:
+			behaviour.begin_snapshot_reads()
+
 	for peer_id in _peers:
 		budget.begin_tick(peer_id)
 
@@ -589,6 +595,10 @@ func _send_snapshots(tick: int, identities: Array[DotNetIdentity]) -> void:
 
 		if _send_to_peer(peer_id, tick, relevant):
 			sent_to += 1
+
+	for identity in identities:
+		for behaviour in identity.behaviours:
+			behaviour.end_snapshot_reads()
 
 	snapshot_sent.emit(tick, sent_to)
 
