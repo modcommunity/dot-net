@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 264
+const CHECKS := 268
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -265,6 +265,7 @@ func _run() -> void:
 	_test_lag_compensation()
 	_test_prediction()
 	_test_spawning()
+	_test_freed_entity()
 	_test_acked_baselines()
 	_test_standing_still()
 	await _test_integration()
@@ -2375,6 +2376,39 @@ func _build_player(_context: Dictionary) -> Node:
 ## game can keep the node, and [method register_factory] exists so it can hand the
 ## same node back — which means the spawner has to cope with a node that is
 ## already somewhere in the tree.
+## [b]An entity whose node is freed before the netcode stops.[/b] A game change frees the
+## old world's scene before the module that registered its entities stops its manager, so
+## `clear()` meets identities that are already gone. Each one was a script error
+## ("Trying to assign invalid previously freed instance") and 171 of them printed on one
+## `changelevel` away from mg-buses-from-hell, on a run that passed.
+func _test_freed_entity() -> void:
+	_sections_entered += 1
+	print("")
+	print("[freed entity]")
+
+	var config := DotNetConfig.new()
+	var registry := DotNetRegistry.new(true, 1)
+	var kept := _make_entity(&"player", 2)
+	var freed := _make_entity(&"player", 3)
+	registry.register(kept, 0, 1, config)
+	registry.register(freed, 0, 1, config)
+	var freed_id := freed.net_id
+	freed.get_parent().free()
+
+	var errors := EngineErrors.new()
+	OS.add_logger(errors)
+	var dropped := registry.unregister(freed_id)
+	registry.clear()
+	OS.remove_logger(errors)
+
+	_check("a freed entity is unregistered", dropped.ok)
+	_check("and leaves nothing behind for its owner", registry.owned_by(3).is_empty())
+	_check("clear() takes the live one too", registry.count() == 0)
+	_check("with no script error from either (%d)" % errors.count(), errors.count() == 0)
+	kept.get_parent().free()
+	_sections_completed += 1
+
+
 func _test_spawning() -> void:
 	_sections_entered += 1
 	print("")

@@ -145,7 +145,22 @@ func unregister(net_id: int) -> DotResult:
 			DotError.CODE_INVALID, "No entity with id %d." % net_id
 		)
 
-	var identity: DotNetIdentity = _by_id[net_id]
+	# [b]The node may already be gone.[/b] The registry holds identities it does not own, and
+	# a game change frees the old world's scene before the module that registered them
+	# stops its netcode: typing a freed object into `identity` is a script error per entity
+	# (171 of them on one `changelevel` away from mg-buses-from-hell). A freed entry is
+	# still taken out of every table; there is nothing left to notify.
+	var stored: Variant = _by_id[net_id]
+
+	if not is_instance_valid(stored):
+		_by_id.erase(net_id)
+		for owner_id in _by_owner:
+			(_by_owner[owner_id] as Array).erase(net_id)
+		_remember_removed(net_id)
+		unregistered.emit(net_id, null)
+		return DotResult.success(null)
+
+	var identity: DotNetIdentity = stored
 
 	_by_id.erase(net_id)
 

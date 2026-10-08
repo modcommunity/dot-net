@@ -238,6 +238,8 @@ Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
 
 20. **Not fixed, and nothing reaches it today: a predicted property with a `max_rate` that stops changing is never rewound.** `authoritative_values()` leaves out a rate-limited property the snapshot did not carry, because its absence may mean the rate limit held it back rather than that it stood still — and the receiving side cannot tell the two apart. So a predicted `max_rate` property the server holds still is #17's walk-away for that one class of property. No game in the family sets `max_rate` on a predicted property. The fix, when one does, is on the send side: mark a property skipped for rate so the receiver can treat an unmarked absence as "unchanged since the acked baseline". Found by review, 2026-09-24.
 
+21. **`unregister` typed a freed identity, one script error per entity.** The registry holds identities it does not own, and a game change frees the old world's scene before the module that registered them stops its manager, so `clear()` assigned freed objects to a `DotNetIdentity` local: 171 "Trying to assign invalid previously freed instance" on one `changelevel` away from mg-buses-from-hell (dot-game's `_teardown` -> `stop` -> `clear`), on a run that passed. A freed entry is now taken out of every table with nothing to notify. Found 2026-10-08 when dot-server-deploy's multigame stopped booting the scratched lobby, which was not a dot-game module, and booted buses instead. `[freed entity]` in `netcode_demo`; armed, two of its four checks fail and the rest abort.
+
 ## What a snapshot costs per peer, and the three things it was doing N times (2026-10-07)
 
 Nothing in the family had measured a server with more than two players until game-g2gfast's `tools/load_probe` put 32 on one: a snapshot tick cost 71 ms, against a 7.8 ms tick at 128, and 95% of it was `_send_to_peer`'s per-entity bookkeeping, done once per entity **per peer**. Three of those were the same work repeated, and are done once now; none changes a byte on the wire:
@@ -405,7 +407,7 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 264 checks: wire round-trips, quantisation accuracy, message direction,
+# 268 checks: wire round-trips, quantisation accuracy, message direction,
 # two builds with different message sets (skipped types, appended fields, a required
 # type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
