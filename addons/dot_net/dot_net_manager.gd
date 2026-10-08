@@ -69,7 +69,7 @@ signal peer_schema_refused(peer_id: int, error: DotError)
 		local_peer_id = value
 		# The registry keeps its own copy, taken at setup, and decides `is_owner` — and so
 		# `is_predicted` — from it when an entity registers. A client that learns its peer
-		# id from a handshake after setup (game-simple-lobby's hello does) otherwise
+		# id from a handshake after setup (a hello, say) otherwise
 		# registers its own occupant as somebody else's, and walks a full round trip behind
 		# its own keyboard with every check on a loopback that set the id first passing.
 		if registry != null:
