@@ -414,7 +414,7 @@ What is left is not the network: the game half of a 32-player tick is 8.3 ms on 
 
 Over WebSocket "unreliable" is reliable and in order, so until the dual-stack server every client received every snapshot once and in sequence; a native client on ENet gets real UDP. `netcode_demo`'s "reordered and repeated snapshots" runs two real managers with acknowledgements wired through a link that holds snapshots back behind the next one (the one carrying a one-off change always, any other with a seeded 30% chance) and replays stale copies. The late snapshot is ignored by tick, as superseded; the client acknowledges the newer one; the server drops the unconfirmed entry and re-sends; the change arrives 18 ticks later and never goes back, with no decode failures and the position 0.15 m behind. Armed: without the acknowledgement it never arrives (the late snapshot ages out as delivered, which is the documented behaviour of a host that has not wired acks).
 
-**One limit, written down rather than fixed: a link that reorders with an exact period of two starves a property.** The client acknowledges only what it applies and the server re-sends in its very next snapshot, so if every other snapshot is held back the re-send is always in a held one. It was the first version of the check and never converged. Jitter has no period, and nothing here has seen one in practice; if it ever shows up, the fix is to re-send in the next two snapshots rather than the next one. Real ENet loss (netem) is still unmeasured (`dual-stack-follow-1`).
+**A lost property is owed until confirmed** (`PeerView.relost`, set when an unconfirmed send is dropped as lost, cleared when the peer confirms the value). The first version of the check held back every other snapshot and never converged: the client acknowledges only what it applies and the server re-sent once, in its very next snapshot, which on that link was always a held one. Owed until confirmed, it goes out in each snapshot until one is applied — the rule the predicted entity's state already had, applied to a property only after it has been lost once, so a clean link pays nothing. The check runs both links (jitter and every-other); both deliver the change at tick 72 (the jitter link took 81 before). Armed: without the mark the every-other link never delivers it. Real ENet loss (netem) is still unmeasured (`dual-stack-follow-1`).
 
 ## Validating changes
 
@@ -424,7 +424,7 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 278 checks: wire round-trips, quantisation accuracy, message direction,
+# 282 checks: wire round-trips, quantisation accuracy, message direction,
 # two builds with different message sets (skipped types, appended fields, a required
 # type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and

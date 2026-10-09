@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 278
+const CHECKS := 282
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -2389,11 +2389,21 @@ var _reorder_rng := RandomNumberGenerator.new()
 var _reorder_held_change := false
 
 func _test_reordered_and_repeated() -> void:
-	_reorder_rng.seed = 20261009
-	_reorder_held_change = false
 	_sections_entered += 1
 	print("")
 	print("[reordered and repeated snapshots]")
+	_reorder_run(false)
+	# The link that used to starve a property: every other snapshot held back, so the one
+	# re-send after a loss always landed in a held one. A lost property is owed until it is
+	# confirmed now, so it is sent again in each snapshot until one is applied.
+	_reorder_run(true)
+	_sections_completed += 1
+
+
+func _reorder_run(every_other: bool) -> void:
+	_reorder_rng.seed = 20261009
+	_reorder_held_change = false
+	var label := "every other snapshot late" if every_other else "jitter"
 
 	var host := DotNetManager.new()
 	host.name = "ReorderServer"
@@ -2475,7 +2485,7 @@ func _test_reordered_and_repeated() -> void:
 			# that exact period would starve a property; jitter does not have a period.
 			var carries_change := tick >= 61 and tick <= 63 and held.is_empty() and changed_at < 0 \
 				and not _reorder_held_change
-			if held.is_empty() and (carries_change or _reorder_rng.randf() < 0.3):
+			if held.is_empty() and (carries_change or every_other or _reorder_rng.randf() < 0.3):
 				if carries_change:
 					_reorder_held_change = true
 				held.append(payload)
@@ -2498,12 +2508,12 @@ func _test_reordered_and_repeated() -> void:
 
 	var apart := absf(on_server.position.x - float((on_client.received_values().get(&"position", Vector3.ZERO) as Vector3).x))
 
-	_check("a change carried only by a snapshot that arrived late still arrives (tick %d)" % changed_at,
+	_check("%s: a change carried only by a late snapshot still arrives (tick %d)" % [label, changed_at],
 		_reorder_held_change and changed_at > 63)
-	_check("and once arrived it never goes back to the older value", not regressed)
-	_check("late and repeated snapshots decode cleanly (%d failures)" % watcher.stats.decode_failures,
+	_check("%s: and once arrived it never goes back to the older value" % label, not regressed)
+	_check("%s: late and repeated snapshots decode cleanly (%d failures)" % [label, watcher.stats.decode_failures],
 		watcher.stats.decode_failures == 0)
-	_check("the watched position keeps up (%.2f m behind)" % apart, apart < 1.0)
+	_check("%s: the watched position keeps up (%.2f m behind)" % [label, apart], apart < 1.0)
 
 	host.stop()
 	watcher.stop()
@@ -2511,7 +2521,6 @@ func _test_reordered_and_repeated() -> void:
 	remove_child(watcher)
 	host.free()
 	watcher.free()
-	_sections_completed += 1
 
 
 func _test_integration() -> void:

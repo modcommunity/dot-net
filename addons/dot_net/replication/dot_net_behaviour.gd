@@ -102,6 +102,11 @@ class PeerView extends RefCounted:
 	## Newest tick this peer has acknowledged.
 	var last_ack: int = 0
 
+	## property -> true for a property whose send this peer never confirmed and which was
+	## dropped as lost: owed until the peer confirms it, not merely until it is sent again.
+	## See [method collect_dirty].
+	var relost: Dictionary = {}
+
 	## Whether acknowledgements are arriving for this peer.
 	##
 	## Until one does, an unconfirmed snapshot is assumed delivered once it ages out
@@ -362,7 +367,15 @@ func collect_dirty(
 		if declaration.on_spawn_only and not dirty:
 			continue
 
-		if not dirty and not (until_acked and _is_unconfirmed(view, declaration, current)):
+		# A property once lost is owed until confirmed, like the predicted entity's.
+		var owed := until_acked
+		if not owed and view.relost.has(property):
+			if _is_unconfirmed(view, declaration, current):
+				owed = true
+			else:
+				view.relost.erase(property)
+
+		if not dirty and not (owed and _is_unconfirmed(view, declaration, current)):
 			continue
 
 		out.append(declaration)
@@ -568,8 +581,13 @@ func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 			view.acked.merge(entry["values"], true)
 		else:
 			# Sent before a snapshot the peer has already applied, and still
-			# unconfirmed. Dropped without promotion, so it goes out again.
+			# unconfirmed. Dropped without promotion, so it goes out again -- and stays
+			# owed until confirmed (`relost`), because sent once more it can be lost
+			# once more, and on a link that holds back every other snapshot the next
+			# send is always the held one.
 			dropped = true
+			for property: StringName in entry["values"]:
+				view.relost[property] = true
 
 	if resolved == 0:
 		return
@@ -616,6 +634,9 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 
 		if not view.strict:
 			view.acked.merge(entry["values"], true)
+		else:
+			for property: StringName in entry["values"]:
+				view.relost[property] = true
 
 	if kept.size() == view.pending.size():
 		return
