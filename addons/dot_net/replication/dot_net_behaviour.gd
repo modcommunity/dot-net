@@ -190,8 +190,9 @@ func _net_read_property(property: StringName) -> Variant:
 var _snapshot_reads: Dictionary = {}
 var _snapshot_reads_open: bool = false
 
-## Within one snapshot: what each distinct set of properties encodes to, keyed by the set
-## as a bitmask of declaration indices. See [method write_state].
+## Within one snapshot: what each distinct set of properties encodes to, by the bit of a
+## byte it starts at (always 0 for a set with nothing byte-aligned in it) and then by the
+## set, as a bitmask of declaration indices. See [method write_state].
 var _encoded: Dictionary = {}
 
 ## Declaration -> its index in [member net_vars], built once [method _bind] has the list.
@@ -420,20 +421,37 @@ func write_state(
 	# sent, what is unconfirmed -- is still per peer, below; the values recorded are one
 	# dictionary shared by every peer's pending entry, which nothing writes to after this.
 	var encoded: Array = []
+	# [b]One shared copy, shifted into place -- unless something in it is byte-aligned.[/b] A
+	# string or bytes aligns before its bytes, so where its padding falls depends on the bit
+	# of a byte the encoding starts at; such a set is encoded at the bit it will be laid in
+	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
+	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
+	var pad := writer.bit_length() & 7
+	var aligned := false
+	for declaration in declarations:
+		if declaration.may_align():
+			aligned = true
+			break
+	var at := pad if aligned else 0
 
 	if _snapshot_reads_open:
 		var key := _signature(declarations)
 		if key >= 0:
-			if _encoded.has(key):
-				encoded = _encoded[key]
+			var at_pad: Dictionary = _encoded.get(at, {})
+			if at_pad.has(key):
+				encoded = at_pad[key]
 			else:
-				encoded = _encode(declarations)
-				_encoded[key] = encoded
+				encoded = _encode(declarations, at)
+				at_pad[key] = encoded
+				_encoded[at] = at_pad
 
 	if encoded.is_empty():
-		encoded = _encode(declarations)
+		encoded = _encode(declarations, at)
 
-	writer.write_bit_run(encoded[0], int(encoded[1]))
+	if aligned:
+		writer.write_bit_run(encoded[0], pad, int(encoded[1]))
+	else:
+		writer.write_shifted_run(encoded[0], int(encoded[1]))
 	var recorded: Dictionary = encoded[2]
 
 	if recorded.is_empty():
@@ -452,14 +470,18 @@ func write_state(
 	view.pending.append({"tick": tick, "values": recorded})
 
 
-## The encoding of [param declarations], as [code][bytes, bits, recorded][/code].
+## The encoding of [param declarations], as [code][bytes, end bit, recorded][/code], begun
+## [param pad] zero bits into its first byte.
 ##
 ## An index per property rather than a full bitmask: with a handful of properties the
 ## index is smaller, and it does not need the receiver to know the declaration order
 ## beyond the shared registration.
-func _encode(declarations: Array[DotNetVar]) -> Array:
+func _encode(declarations: Array[DotNetVar], pad: int = 0) -> Array:
 	var scratch := DotNetWriter.new(64)
 	var recorded := {}
+
+	if pad > 0:
+		scratch.write_bits(0, pad)
 
 	scratch.write_uint(declarations.size(), 6)
 

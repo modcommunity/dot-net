@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 272
+const CHECKS := 274
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -252,6 +252,7 @@ func _run() -> void:
 	print("")
 
 	_test_wire()
+	_test_bit_runs()
 	_test_quantisation()
 	_test_messages()
 	_test_mismatched_schemas()
@@ -335,6 +336,64 @@ func _test_wire() -> void:
 	var hostile_reader := hostile.to_reader()
 	var refused := hostile_reader.read_bytes(1024)
 	_check("oversized length refused", refused.is_empty() and not hostile_reader.ok())
+
+
+## A run of bits encoded once and laid into another writer, at every bit offset, with a
+## string in it. A string is written byte-aligned, so its padding depends on where in a byte
+## it starts: state encoded at one offset and laid in at another read back as garbage from
+## the string on (game-playground's NPC weapon id, the first time snapshots did this).
+func _test_bit_runs() -> void:
+	print("")
+	print("[bit runs]")
+	var all_read := true
+
+	for pad in range(8):
+		var scratch := DotNetWriter.new()
+		if pad > 0:
+			scratch.write_bits(0, pad)
+		scratch.write_uint(5, 6)
+		scratch.write_string("zee_smg")
+		scratch.write_uint(37, 7)
+
+		var into := DotNetWriter.new()
+		if pad > 0:
+			into.write_bits(0b1011011 & ((1 << pad) - 1), pad)
+		into.write_bit_run(scratch.to_bytes(), pad, scratch.bit_length())
+		into.write_uint(9, 4)
+
+		var reader := into.to_reader()
+		var head := reader.read_uint(pad) if pad > 0 else 0
+		var a := reader.read_uint(6)
+		var text := reader.read_string()
+		var b := reader.read_uint(7)
+		var tail := reader.read_uint(4)
+		all_read = all_read and head == (0b1011011 & ((1 << pad) - 1)) and a == 5 \
+			and text == "zee_smg" and b == 37 and tail == 9
+
+	_check("a run laid in at each of the eight bit offsets reads back, string and all", all_read)
+
+	# And the shifted run: one copy encoded at bit 0, with nothing aligned in it, laid in
+	# at every offset -- the path every moving player's state takes.
+	var shifted_read := true
+	var source := DotNetWriter.new()
+	source.write_uint(5, 6)
+	source.write_float_range(12.5, -100.0, 100.0, 16)
+	source.write_uint(37, 7)
+	for pad in range(8):
+		var into := DotNetWriter.new()
+		if pad > 0:
+			into.write_bits(0b1101101 & ((1 << pad) - 1), pad)
+		into.write_shifted_run(source.to_bytes(), source.bit_length())
+		into.write_uint(9, 4)
+		var reader := into.to_reader()
+		var head := reader.read_uint(pad) if pad > 0 else 0
+		var a := reader.read_uint(6)
+		var f := reader.read_float_range(-100.0, 100.0, 16)
+		var b := reader.read_uint(7)
+		var tail := reader.read_uint(4)
+		shifted_read = shifted_read and head == (0b1101101 & ((1 << pad) - 1)) and a == 5 \
+			and absf(f - 12.5) < 0.01 and b == 37 and tail == 9
+	_check("and a shifted run, encoded once at bit 0, reads back at each of them", shifted_read)
 
 
 func _test_quantisation() -> void:

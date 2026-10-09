@@ -361,6 +361,13 @@ static func _values_equal(a: Variant, b: Variant) -> bool:
 	return a == b
 
 
+## Whether this property's encoding may contain byte-aligned data: a string or bytes, which
+## align before their bytes, or a custom codec, which might. Such an encoding depends on the
+## bit of a byte it starts at; see [method DotNetBehaviour.write_state].
+func may_align() -> bool:
+	return type == Type.STRING or type == Type.BYTES or type == Type.CUSTOM
+
+
 ## Whether [param peer_id] should receive this property.
 func visible_to(peer_id: int, owner_peer_id: int) -> bool:
 	match audience:

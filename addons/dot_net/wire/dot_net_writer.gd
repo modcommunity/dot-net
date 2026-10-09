@@ -341,21 +341,67 @@ func write_aligned_bytes(data: PackedByteArray) -> void:
 	_bit_pos = _bytes.size() << 3
 
 
-## Appends [param bits] bits that another writer produced, at whatever bit this one is at.
+## Appends what another writer wrote from bit [param from_bit] to bit [param to_bit].
 ##
 ## For a snapshot that sends the same encoded state to many peers: encoded once into its
 ## own writer, then laid into each peer's packet with this, which is the same bits on the
 ## wire as encoding it again, field by field, for every one of them (the cost that made a
-## 32-player server's snapshots quadratic). [param data] is that writer's `to_bytes()`; its
-## last byte's unused high bits are zero, as a writer leaves them.
-func write_bit_run(data: PackedByteArray, bits: int) -> void:
+## 32-player server's snapshots quadratic).
+##
+## [b][param from_bit] must sit at the same bit of its byte as this writer does[/b] -- the
+## source writer is started with that many zero bits. Not for speed, though it makes this a
+## byte copy: a string or a byte array is written byte-aligned, and where its padding falls
+## depends on where in a byte it starts, so state encoded at one offset and laid in at
+## another decodes as garbage from the first aligned field on (a weapon id read as
+## 'WV\u00ad5…', which game-playground's suite caught the first time this ran).
+func write_bit_run(data: PackedByteArray, from_bit: int, to_bit: int) -> void:
+	var bits := to_bit - from_bit
+
+	if bits <= 0:
+		return
+
+	if (from_bit & 7) != (_bit_pos & 7):
+		push_error("DotNetWriter.write_bit_run: source at bit %d of its byte, this writer at %d"
+			% [from_bit & 7, _bit_pos & 7])
+		return
+
+	var last := (to_bit + 7) >> 3
+
+	if data.size() < last:
+		push_error("DotNetWriter.write_bit_run: bits to %d from %d bytes" % [to_bit, data.size()])
+		return
+
+	var end_bit := _bit_pos + bits
+
+	if ((end_bit + 7) >> 3) > MAX_BYTES:
+		overflowed = true
+		return
+
+	var first := from_bit >> 3
+
+	if (_bit_pos & 7) != 0:
+		# The byte in progress: its written low bits and the source's zero low bits share it.
+		_bytes[_bytes.size() - 1] |= data[first]
+		first += 1
+
+	if first < last:
+		_bytes.append_array(data.slice(first, last))
+
+	_bit_pos = end_bit
+	_bytes.resize((_bit_pos + 7) >> 3)
+
+
+## Appends [param bits] bits another writer wrote from its bit 0, at whatever bit this one
+## is at, shifting every byte. Only for bits with nothing byte-aligned in them -- see
+## [method write_bit_run] for why that matters and for the run that has.
+func write_shifted_run(data: PackedByteArray, bits: int) -> void:
 	if bits <= 0:
 		return
 
 	var needed := (bits + 7) >> 3
 
 	if data.size() < needed:
-		push_error("DotNetWriter.write_bit_run: %d bits from %d bytes" % [bits, data.size()])
+		push_error("DotNetWriter.write_shifted_run: %d bits from %d bytes" % [bits, data.size()])
 		return
 
 	var end_bit := _bit_pos + bits
@@ -367,13 +413,12 @@ func write_bit_run(data: PackedByteArray, bits: int) -> void:
 	var offset := _bit_pos & 7
 
 	if offset == 0:
-		# Byte-aligned: the bytes go in as they are.
 		_bytes.append_array(data.slice(0, needed))
 	else:
 		# Each source byte straddles two of ours: its low bits complete the byte in
 		# progress, its high bits start the next one.
-		var index := _bit_pos >> 3
 		var back := 8 - offset
+		var index := _bytes.size() - 1
 		for i in range(needed):
 			var b := data[i]
 			_bytes[index] |= (b << offset) & 0xFF
@@ -381,7 +426,6 @@ func write_bit_run(data: PackedByteArray, bits: int) -> void:
 			index += 1
 
 	_bit_pos = end_bit
-	# The last source byte may have pushed one byte past what the bits need, all zero.
 	_bytes.resize((_bit_pos + 7) >> 3)
 
 
