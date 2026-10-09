@@ -274,6 +274,15 @@ class Buffer extends RefCounted:
 				return input
 		return null
 
+	## The newest input for a tick before [param tick], or null when there is none.
+	func latest_before(tick: int) -> DotNetInput:
+		var out: DotNetInput = null
+		for input in _inputs:
+			if input.tick >= tick:
+				break
+			out = input
+		return out
+
 	## Inputs from [param from_tick] onward, in order. The replay set.
 	func since(from_tick: int) -> Array[DotNetInput]:
 		var out: Array[DotNetInput] = []

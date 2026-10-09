@@ -128,6 +128,22 @@ func reconcile(
 	while replay_tick <= current_tick:
 		var input := input_buffer.peek(replay_tick)
 
+		# [b]A hole is not a gap.[/b] A tick with no input, but older and newer ones in the buffer,
+		# is a tick the client never generated a command for -- its clock jumped forward
+		# over it (`DotNetClock`'s catch-up) -- and the server ran it on the player's
+		# previous command, as it runs any tick whose command never came. The replay does
+		# the same. Stopping here instead left the prediction a catch-up's worth of ticks
+		# of a running player short of the server, 2 m in game-arena's headless_lossy at
+		# 20% loss (2026-10-09), until the next correction pulled it back.
+		if input == null:
+			var previous := input_buffer.latest_before(replay_tick)
+			# A hole has inputs on BOTH sides. Past the newest input are ticks this client
+			# has not played yet (a lockstep host reconciles before it records the tick),
+			# and replaying those on the last command predicted them twice: game-arena's
+			# headless_net push check went 0.2 m -> 1.5 m off the server.
+			if previous != null and not input_buffer.since(replay_tick + 1).is_empty():
+				input = previous
+
 		# A missing input means the client discarded it — the buffer is too short
 		# for this latency. Simulating with no input diverges, so stop and let the
 		# next snapshot correct it rather than compounding the error.

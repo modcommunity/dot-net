@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 297
+const CHECKS := 299
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1965,6 +1965,51 @@ func _test_prediction() -> void:
 	_check("velocity reconverged too",
 		client_movement.velocity.distance_to(server_movement.velocity) < 0.001)
 
+	# A hole in the history: the client's clock jumped forward over ticks 14-16 (a
+	# catch-up), so it never made commands for them and the server ran them on tick 13's,
+	# as it runs any tick whose command never came. The replay has to do the same, not
+	# stop at the hole: stopping left game-arena's predicted player 2 m short of the
+	# server at 20% loss (2026-10-09).
+	var holed_server := _in_tree(_make_entity(&"player", 2))
+	holed_server.is_authoritative = true
+	var holed_server_movement := holed_server.behaviours[0] as Movement
+	var holed_at_10 := {}
+	for input in inputs:
+		if input.tick < 14 or input.tick > 16:
+			holed_server_movement._net_apply_input(input, input.tick)
+		holed_server_movement._net_simulate(input.tick, dt)
+		if input.tick == 10:
+			holed_at_10 = holed_server_movement.snapshot_values().duplicate()
+	var holed_client := _in_tree(_make_entity(&"player", 2))
+	holed_client.is_owner = true
+	holed_client.is_authoritative = false
+	var holed_client_movement := holed_client.behaviours[0] as Movement
+	var holed := DotNetInput.Buffer.new(config.input_history_ticks)
+	for input in inputs:
+		if input.tick < 14 or input.tick > 16:
+			holed.push(input)
+	# Its own predictor, so the counts the shared one is checked on below stay its own.
+	var across := DotNetPredictor.new(config).reconcile(holed_client, 10, holed_at_10, holed, 20, dt)
+	var hole_gap := holed_client_movement.position.distance_to(holed_server_movement.position)
+	_check("a replay across a hole repeats the command before it, as the server did (%d ticks, %.4f m apart)" % [
+		int(across.value) if across.ok else -1, hole_gap],
+		across.ok and int(across.value) == 10 and hole_gap < 0.001)
+
+	# And past the newest input is not a hole: those are ticks this client has not played
+	# yet (a lockstep host reconciles before it records the tick). Replayed on the last
+	# command they were predicted twice; game-arena's headless_net caught it at 1.5 m.
+	var ahead_client := _in_tree(_make_entity(&"player", 2))
+	ahead_client.is_owner = true
+	ahead_client.is_authoritative = false
+	var ahead := DotNetInput.Buffer.new(config.input_history_ticks)
+	for input in inputs:
+		if input.tick <= 12:
+			ahead.push(input)
+	var stopped := DotNetPredictor.new(config).reconcile(ahead_client, 10, authoritative_at_10, ahead, 14, dt)
+	_check("a replay stops at the newest input rather than predict ticks not played (%d)" % (int(stopped.value) if stopped.ok else -1),
+		stopped.ok and int(stopped.value) == 2)
+	_out_of_tree(ahead_client)
+
 	# A replay that cannot reach its inputs must stop rather than compound the
 	# error — history has been acked away here, so there is nothing to replay from.
 	var starved := DotNetInput.Buffer.new(config.input_history_ticks)
@@ -1991,7 +2036,7 @@ func _test_prediction() -> void:
 	_check("the predictor reports what it did",
 		predictor.describe()["replays"] == 2)
 
-	for entity in [server_entity, client_entity, lonely, untouched]:
+	for entity in [server_entity, client_entity, lonely, untouched, holed_server, holed_client]:
 		_out_of_tree(entity)
 
 
