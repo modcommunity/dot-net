@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 274
+const CHECKS := 278
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -270,6 +270,7 @@ func _run() -> void:
 	_test_acked_baselines()
 	_test_standing_still()
 	_test_staggered_snapshots()
+	_test_reordered_and_repeated()
 	await _test_integration()
 
 	print("")
@@ -2371,6 +2372,145 @@ func _test_staggered_snapshots() -> void:
 	_check("and no tick builds more than a quarter of them (%d of 8)" % busiest, busiest <= 2)
 	_check("unstaggered, every peer is sent on the same tick (%d of 8)" % off_busiest, off_busiest == 8)
 
+	_sections_completed += 1
+
+
+## Snapshots that arrive OUT OF ORDER and TWICE, through two real managers with
+## acknowledgements wired end to end.
+##
+## [b]Nothing here had ever seen either.[/b] Over WebSocket "unreliable" is reliable and in
+## order, so every client so far received every snapshot once, in sequence; a native client
+## on ENet (dot-server's dual stack, 2026-10-07) gets real UDP. A late snapshot is ignored
+## by tick, as superseded -- which loses whatever only it carried, unless the server re-sends
+## it once the client acknowledges a newer one. That recovery is checked behaviour by
+## behaviour in [acked baselines]; this is the whole path: the encoder, the wire, the
+## receiver's tick rule, the client's acknowledgement and the server's resend.
+var _reorder_rng := RandomNumberGenerator.new()
+var _reorder_held_change := false
+
+func _test_reordered_and_repeated() -> void:
+	_reorder_rng.seed = 20261009
+	_reorder_held_change = false
+	_sections_entered += 1
+	print("")
+	print("[reordered and repeated snapshots]")
+
+	var host := DotNetManager.new()
+	host.name = "ReorderServer"
+	host.is_server = true
+	host.service_scope = &"reorder_server"
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 20
+	add_child(host)
+
+	var watcher := DotNetManager.new()
+	watcher.name = "ReorderClient"
+	watcher.is_server = false
+	watcher.service_scope = &"reorder_client"
+	watcher.local_peer_id = 2
+	watcher.auto_tick = false
+	watcher.config_file = ""
+	watcher.config = DotNetConfig.new()
+	watcher.config.tick_rate = 60
+	watcher.config.snapshot_rate = 20
+	add_child(watcher)
+
+	var _s1 := host.setup()
+	var _s2 := watcher.setup()
+
+	# Every snapshot the server sends to peer 2, held so the link can choose the order.
+	var sent: Array[PackedByteArray] = []
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if peer_id != 2:
+			return
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := watcher.receive(payload, 1)
+			return
+		sent.append(payload)
+
+	host.start()
+	watcher.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	watcher.spawner.register_factory(&"player", _build_player)
+
+	# Somebody else's entity: this client only watches it.
+	var spawned := host.spawner.spawn(&"player", 3, Transform3D.IDENTITY, 0)
+	var server_entity: DotNetIdentity = spawned.value
+	var _mirror := watcher.spawner.spawn_remote(&"player", server_entity.net_id, 3, Transform3D.IDENTITY, 0)
+	var client_entity := watcher.registry.get_identity(server_entity.net_id)
+	var on_server := server_entity.behaviours[0] as Movement
+	var on_client := client_entity.behaviours[0] as Movement
+
+	var deliver := func(payload: PackedByteArray) -> void:
+		var _r := watcher.receive_snapshot(payload)
+		var _a := host.receive_ack_payload(2, watcher.encode_ack())
+
+	var held: Array[PackedByteArray] = []
+	var health_seen: Array[int] = []
+	var changed_at := -1
+	var regressed := false
+
+	for tick in range(1, 181):
+		on_server.position += Vector3(0.05, 0.0, 0.0)
+		# One change to a property that otherwise never changes, on a tick whose snapshot
+		# the link below will deliver late.
+		if tick == 61:
+			on_server.health = 42
+		host.server_tick(tick)
+
+		for payload in sent:
+			# The snapshot carrying the change is always held back, and any other one is
+			# with a fixed chance; a held snapshot is delivered after the next one, when it
+			# is older than one already applied and ignored.
+			#
+			# [b]Not every other one, which was tried first and never converged[/b]: the
+			# client acknowledges only what it applies, the server re-sends in its very next
+			# snapshot, and with every pair swapped that next snapshot is always the held
+			# one -- the re-send lands late, every time, for ever. A link that reorders with
+			# that exact period would starve a property; jitter does not have a period.
+			var carries_change := tick >= 61 and tick <= 63 and held.is_empty() and changed_at < 0 \
+				and not _reorder_held_change
+			if held.is_empty() and (carries_change or _reorder_rng.randf() < 0.3):
+				if carries_change:
+					_reorder_held_change = true
+				held.append(payload)
+				continue
+			deliver.call(payload)
+			if not held.is_empty():
+				deliver.call(held[0])
+				held.clear()
+			# And now and then a stale copy of one already applied, arriving again.
+			if tick % 7 == 0:
+				deliver.call(payload)
+		sent.clear()
+
+		var now_health := int(on_client.received_values().get(&"health", 100))
+		health_seen.append(now_health)
+		if now_health == 42 and changed_at < 0:
+			changed_at = tick
+		if changed_at >= 0 and now_health != 42:
+			regressed = true
+
+	var apart := absf(on_server.position.x - float((on_client.received_values().get(&"position", Vector3.ZERO) as Vector3).x))
+
+	_check("a change carried only by a snapshot that arrived late still arrives (tick %d)" % changed_at,
+		_reorder_held_change and changed_at > 63)
+	_check("and once arrived it never goes back to the older value", not regressed)
+	_check("late and repeated snapshots decode cleanly (%d failures)" % watcher.stats.decode_failures,
+		watcher.stats.decode_failures == 0)
+	_check("the watched position keeps up (%.2f m behind)" % apart, apart < 1.0)
+
+	host.stop()
+	watcher.stop()
+	remove_child(host)
+	remove_child(watcher)
+	host.free()
+	watcher.free()
 	_sections_completed += 1
 
 

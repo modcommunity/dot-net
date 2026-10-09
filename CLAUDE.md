@@ -410,6 +410,12 @@ Measured with game-g2gfast `tools/load_probe -- surf_mesa 32` (32 admitted playe
 
 What is left is not the network: the game half of a 32-player tick is 8.3 ms on its own, over a 7.8 ms budget at 128, so the next step is the motor's per-player cost (dot-player-controller) or the tick rate (Christian's call).
 
+## Late and repeated snapshots, end to end (2026-10-09)
+
+Over WebSocket "unreliable" is reliable and in order, so until the dual-stack server every client received every snapshot once and in sequence; a native client on ENet gets real UDP. `netcode_demo`'s "reordered and repeated snapshots" runs two real managers with acknowledgements wired through a link that holds snapshots back behind the next one (the one carrying a one-off change always, any other with a seeded 30% chance) and replays stale copies. The late snapshot is ignored by tick, as superseded; the client acknowledges the newer one; the server drops the unconfirmed entry and re-sends; the change arrives 18 ticks later and never goes back, with no decode failures and the position 0.15 m behind. Armed: without the acknowledgement it never arrives (the late snapshot ages out as delivered, which is the documented behaviour of a host that has not wired acks).
+
+**One limit, written down rather than fixed: a link that reorders with an exact period of two starves a property.** The client acknowledges only what it applies and the server re-sends in its very next snapshot, so if every other snapshot is held back the re-send is always in a held one. It was the first version of the check and never converged. Jitter has no period, and nothing here has seen one in practice; if it ever shows up, the fix is to re-send in the next two snapshots rather than the next one. Real ENet loss (netem) is still unmeasured (`dual-stack-follow-1`).
+
 ## Validating changes
 
 ```bash
@@ -418,7 +424,7 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 274 checks: wire round-trips, quantisation accuracy, message direction,
+# 278 checks: wire round-trips, quantisation accuracy, message direction,
 # two builds with different message sets (skipped types, appended fields, a required
 # type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
