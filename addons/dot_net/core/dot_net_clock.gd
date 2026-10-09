@@ -115,11 +115,11 @@ var _drift_scale: float = 1.0
 ## buffer's to absorb, which is what it measures and is sized for.
 var _received_tick: int = 0
 
-## Samples in a window, and the closest any came to the receive timeline in this one.
-## See [member _received_tick].
+## Samples in a window of arrivals all behind the receive timeline. The step back is one
+## tick whatever the window saw: stepping by how far behind they were would bring back the
+## render timeline jumping backwards that this replaced. See [member _received_tick].
 const SETTLE_SAMPLES := 16
 var _settle_count: int = 0
-var _settle_best: int = 0
 var _settle_open: bool = false
 
 var _rtt_ms: float = 0.0
@@ -317,10 +317,8 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 	if not _settle_open:
 		_settle_open = true
 		_settle_count = 0
-		_settle_best = ahead
 
 	_settle_count += 1
-	_settle_best = maxi(_settle_best, ahead)
 
 	if _settle_count >= SETTLE_SAMPLES:
 		_received_tick -= 1
