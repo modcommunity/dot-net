@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 268
+const CHECKS := 272
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -268,6 +268,7 @@ func _run() -> void:
 	_test_freed_entity()
 	_test_acked_baselines()
 	_test_standing_still()
+	_test_staggered_snapshots()
 	await _test_integration()
 
 	print("")
@@ -2227,6 +2228,91 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int) -> Dicti
 	host.free()
 	guest.free()
 	return out
+
+
+## [member DotNetConfig.stagger_snapshots]: every peer still gets a snapshot exactly every
+## ticks_per_snapshot() ticks, but on its own phase, so no one tick builds them all. Run
+## both ways, because a test that only ran staggered could not tell staggering from a
+## server that happened to send to everybody at once.
+func _test_staggered_snapshots() -> void:
+	_sections_entered += 1
+	print("")
+	print("[staggered snapshots]")
+
+	var by_mode := {}
+
+	for staggered in [false, true]:
+		var host := DotNetManager.new()
+		host.name = "StaggerHost%s" % ("On" if staggered else "Off")
+		host.is_server = true
+		host.service_scope = &"stagger"
+		host.local_peer_id = 1
+		host.auto_tick = false
+		host.config_file = ""
+		host.config = DotNetConfig.new()
+		host.config.tick_rate = 128
+		host.config.snapshot_rate = 32
+		host.config.stagger_snapshots = staggered
+		add_child(host)
+		var _ready_now := host.setup()
+
+		var current := [0]
+		var sends := {}
+		host.send_fn = func(peer_id: int, _payload: PackedByteArray, d: int) -> void:
+			if d != DotNetMessage.Delivery.UNRELIABLE:
+				return
+			if not sends.has(peer_id):
+				sends[peer_id] = []
+			(sends[peer_id] as Array).append(current[0])
+
+		host.start()
+		for peer_id in range(2, 10):
+			host.add_peer(peer_id)
+		host.spawner.register_factory(&"player", _build_player)
+		var _spawned := host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0)
+
+		for t in range(1, 17):
+			current[0] = t
+			host.server_tick(t)
+
+		by_mode[staggered] = sends
+		host.stop()
+		remove_child(host)
+		host.free()
+
+	var on: Dictionary = by_mode[true]
+	var off: Dictionary = by_mode[false]
+
+	var every_peer_four := on.size() == 8
+	var four_apart := true
+	var busiest := 0
+	var per_tick := {}
+
+	for peer_id in on:
+		var ticks: Array = on[peer_id]
+		every_peer_four = every_peer_four and ticks.size() == 4
+		for k in range(1, ticks.size()):
+			four_apart = four_apart and int(ticks[k]) - int(ticks[k - 1]) == 4
+		for t in ticks:
+			per_tick[t] = int(per_tick.get(t, 0)) + 1
+
+	for t in per_tick:
+		busiest = maxi(busiest, int(per_tick[t]))
+
+	var off_busiest := 0
+	var off_per_tick := {}
+	for peer_id in off:
+		for t in off[peer_id]:
+			off_per_tick[t] = int(off_per_tick.get(t, 0)) + 1
+	for t in off_per_tick:
+		off_busiest = maxi(off_busiest, int(off_per_tick[t]))
+
+	_check("staggered, every peer is sent four snapshots in sixteen ticks", every_peer_four)
+	_check("each exactly four ticks after the last", four_apart)
+	_check("and no tick builds more than a quarter of them (%d of 8)" % busiest, busiest <= 2)
+	_check("unstaggered, every peer is sent on the same tick (%d of 8)" % off_busiest, off_busiest == 8)
+
+	_sections_completed += 1
 
 
 func _test_integration() -> void:

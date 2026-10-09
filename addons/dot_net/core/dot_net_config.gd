@@ -29,6 +29,22 @@ extends DotConfig
 ## as jitter no interpolator can smooth.
 @export_range(1, 240, 1) var snapshot_rate: int = 20
 
+## Spreads each snapshot's peers over the ticks between snapshots, instead of sending every
+## peer its snapshot on the same tick.
+##
+## [b]Off by default, and the reason to turn it on is a full server.[/b] At 128 ticks and
+## 32 snapshots a second, a snapshot goes out every fourth tick, and building one for every
+## peer at once is the whole cost of that tick: three cheap ticks and one that costs four
+## times their average (game-g2gfast `tools/load_probe`, 32 players: a 66 ms p99 on a 18 ms
+## mean). Staggered, peer [code]p[/code] is sent its snapshot on the ticks where
+## [code]p % ticks_per_snapshot() == tick % ticks_per_snapshot()[/code]: every peer still
+## hears from the server at exactly the same rate, a fixed number of ticks apart, and the
+## work is the same, spread flat. What it costs: lag-compensation history is recorded every
+## tick rather than every snapshot tick, since a peer's view can now sit on any tick, and
+## the per-snapshot sharing of encoded state ([DotNetBehaviour]) is among the peers of one
+## phase rather than all of them.
+@export var stagger_snapshots: bool = false
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.

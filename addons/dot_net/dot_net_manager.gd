@@ -482,9 +482,18 @@ func server_tick(tick: int) -> void:
 		for behaviour in identity.behaviours:
 			behaviour._net_simulate(tick, step)
 
+	var period := config.ticks_per_snapshot()
+
+	# Staggered: some peers every tick, each on its own phase. See
+	# [member DotNetConfig.stagger_snapshots].
+	if config.stagger_snapshots and period > 1:
+		history.record(identities, tick)
+		_send_snapshots(tick, identities, posmod(tick, period), period)
+		return
+
 	_ticks_since_snapshot += 1
 
-	if _ticks_since_snapshot >= config.ticks_per_snapshot():
+	if _ticks_since_snapshot >= period:
 		_ticks_since_snapshot = 0
 		history.record(identities, tick)
 		_send_snapshots(tick, identities)
@@ -550,7 +559,11 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 # --- Snapshots -------------------------------------------------------------
 
 ## Builds and sends a snapshot to every peer, filtered and prioritised per peer.
-func _send_snapshots(tick: int, identities: Array[DotNetIdentity]) -> void:
+## [param phase] and [param period]: only the peers whose id falls on this phase, when
+## snapshots are staggered ([member DotNetConfig.stagger_snapshots]); -1 is every peer.
+func _send_snapshots(
+	tick: int, identities: Array[DotNetIdentity], phase: int = -1, period: int = 1
+) -> void:
 	var context := {"tick": tick, "config": config}
 
 	interest._prepare(identities, context)
@@ -573,6 +586,9 @@ func _send_snapshots(tick: int, identities: Array[DotNetIdentity]) -> void:
 			behaviour.begin_snapshot_reads()
 
 	for peer_id in _peers:
+		if phase >= 0 and posmod(peer_id, period) != phase:
+			continue
+
 		budget.begin_tick(peer_id)
 
 		var observer := _observer_for(peer_id)

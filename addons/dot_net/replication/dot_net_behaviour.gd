@@ -190,14 +190,23 @@ func _net_read_property(property: StringName) -> Variant:
 var _snapshot_reads: Dictionary = {}
 var _snapshot_reads_open: bool = false
 
+## Within one snapshot: what each distinct set of properties encodes to, keyed by the set
+## as a bitmask of declaration indices. See [method write_state].
+var _encoded: Dictionary = {}
+
+## Declaration -> its index in [member net_vars], built once [method _bind] has the list.
+var _index_of: Dictionary = {}
+
 
 func begin_snapshot_reads() -> void:
 	_snapshot_reads.clear()
+	_encoded.clear()
 	_snapshot_reads_open = true
 
 
 func end_snapshot_reads() -> void:
 	_snapshot_reads.clear()
+	_encoded.clear()
 	_snapshot_reads_open = false
 
 
@@ -251,6 +260,10 @@ func _bind(config: DotNetConfig) -> void:
 	for declaration in net_vars:
 		declaration.bind_config(config)
 
+	_index_of.clear()
+	for i in range(net_vars.size()):
+		_index_of[net_vars[i]] = i
+
 	_registered = true
 
 	# A behaviour that declares nothing is legal — it may exist only for
@@ -299,29 +312,56 @@ func collect_dirty(
 ) -> Array[DotNetVar]:
 	var out: Array[DotNetVar] = []
 	var view := _view_for(peer_id)
-	var now := Time.get_ticks_msec()
+	var owner := identity.owner_peer_id
+	# Only asked for when something here is rate-limited: a clock read per behaviour per
+	# peer per snapshot is a thousand of them a tick on a full server, for nothing.
+	var now := -1
+	var believed := view.believed
 
+	# [b]Written out rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per
+	# property[/b]: this loop runs for every property of every relevant entity for every peer,
+	# about thirteen thousand times a snapshot with thirty-two players, and a GDScript call
+	# costs more than the comparison it wraps. The three are still the definitions; this is
+	# them inlined, in the same order, and `netcode_demo`'s dirty-tracking sections hold it.
 	for declaration in net_vars:
-		if not declaration.visible_to(peer_id, identity.owner_peer_id):
-			continue
+		match declaration.audience:
+			DotNetVar.Audience.OWNER:
+				if peer_id != owner:
+					continue
+			DotNetVar.Audience.OBSERVERS:
+				if peer_id == owner:
+					continue
 
-		if declaration.on_spawn_only and not force:
-			# Still sent when it changes — "spawn only" means "do not pay for it
-			# every snapshot", not "never update".
-			var current_once: Variant = _read_for_send(declaration.property)
-			if not _is_dirty(view, declaration, current_once):
-				continue
+		var property := declaration.property
 
 		if not force and declaration.max_rate > 0.0:
+			if now < 0:
+				now = Time.get_ticks_msec()
 			var interval := 1000.0 / declaration.max_rate
-			var last := float(view.last_sent_ms.get(declaration.property, -100000))
+			var last := float(view.last_sent_ms.get(property, -100000))
 			if float(now) - last < interval:
 				continue
 
-		var current: Variant = _read_for_send(declaration.property)
+		var current: Variant
+		if _snapshot_reads_open and _snapshot_reads.has(property):
+			current = _snapshot_reads[property]
+		else:
+			current = _read_for_send(property)
 
-		if not force and not _is_dirty(view, declaration, current) \
-				and not (until_acked and _is_unconfirmed(view, declaration, current)):
+		if force:
+			out.append(declaration)
+			continue
+
+		var dirty := not believed.has(property) \
+			or declaration.differs(believed[property], current)
+
+		# "Spawn only" means "do not pay for it every snapshot", not "never update": sent
+		# when it changes, and never kept owed until acknowledged as the predicted entity's
+		# properties are.
+		if declaration.on_spawn_only and not dirty:
+			continue
+
+		if not dirty and not (until_acked and _is_unconfirmed(view, declaration, current)):
 			continue
 
 		out.append(declaration)
@@ -370,29 +410,38 @@ func write_state(
 ) -> void:
 	var view := _view_for(peer_id)
 	var now := Time.get_ticks_msec()
-	var recorded := {}
 
-	# An index per property rather than a full bitmask: with a handful of properties
-	# the index is smaller, and it does not need the receiver to know the declaration
-	# order beyond the shared registration.
-	writer.write_uint(declarations.size(), 6)
+	# [b]Encoded once per snapshot for each distinct set of properties, not once per peer.[/b]
+	# Inside a snapshot every property is read once (see [member _snapshot_reads]), so the
+	# same set of properties is the same bits for every peer it goes to -- and for a moving
+	# player that set is the same for every peer but its owner. Encoding it again per peer
+	# was the quadratic part of a full server's snapshots (game-g2gfast tools/load_probe,
+	# 32 players). The per-peer half -- what that peer is believed to hold, when it was last
+	# sent, what is unconfirmed -- is still per peer, below; the values recorded are one
+	# dictionary shared by every peer's pending entry, which nothing writes to after this.
+	var encoded: Array = []
 
-	for declaration in declarations:
-		var index := net_vars.find(declaration)
-		if index < 0:
-			continue
+	if _snapshot_reads_open:
+		var key := _signature(declarations)
+		if key >= 0:
+			if _encoded.has(key):
+				encoded = _encoded[key]
+			else:
+				encoded = _encode(declarations)
+				_encoded[key] = encoded
 
-		var value: Variant = _read_for_send(declaration.property)
+	if encoded.is_empty():
+		encoded = _encode(declarations)
 
-		writer.write_uint(index, 6)
-		declaration.write(writer, value)
-
-		view.believed[declaration.property] = value
-		view.last_sent_ms[declaration.property] = now
-		recorded[declaration.property] = value
+	writer.write_bit_run(encoded[0], int(encoded[1]))
+	var recorded: Dictionary = encoded[2]
 
 	if recorded.is_empty():
 		return
+
+	for property: StringName in recorded:
+		view.believed[property] = recorded[property]
+		view.last_sent_ms[property] = now
 
 	if tick <= 0:
 		# Untracked: assume delivered, which is the only assumption available when
@@ -401,6 +450,51 @@ func write_state(
 		return
 
 	view.pending.append({"tick": tick, "values": recorded})
+
+
+## The encoding of [param declarations], as [code][bytes, bits, recorded][/code].
+##
+## An index per property rather than a full bitmask: with a handful of properties the
+## index is smaller, and it does not need the receiver to know the declaration order
+## beyond the shared registration.
+func _encode(declarations: Array[DotNetVar]) -> Array:
+	var scratch := DotNetWriter.new(64)
+	var recorded := {}
+
+	scratch.write_uint(declarations.size(), 6)
+
+	for declaration in declarations:
+		var index := int(_index_of.get(declaration, -1))
+		if index < 0:
+			index = net_vars.find(declaration)
+		if index < 0:
+			continue
+
+		var value: Variant = _read_for_send(declaration.property)
+
+		scratch.write_uint(index, 6)
+		declaration.write(scratch, value)
+		recorded[declaration.property] = value
+
+	return [scratch.to_bytes(), scratch.bit_length(), recorded]
+
+
+## [param declarations] as a bitmask of their indices, or -1 when it cannot stand for them:
+## out of declaration order (the bits would be the same for two different encodings) or
+## an index past what an int holds.
+func _signature(declarations: Array[DotNetVar]) -> int:
+	var key := 0
+	var last := -1
+
+	for declaration in declarations:
+		var index := int(_index_of.get(declaration, -1))
+		if index <= last or index >= 62:
+			return -1
+		key |= 1 << index
+		last = index
+
+	# The empty set is a real set (a count of zero), kept apart from "no key".
+	return key | (1 << 62)
 
 
 ## Resolves this peer's unconfirmed sends against the tick it has acknowledged.
@@ -481,6 +575,14 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 	var view: PeerView = _views.get(peer_id)
 
 	if view == null or view.pending.is_empty():
+		return
+
+	# [b]The oldest entry first, and nearly always that is the whole answer.[/b] Pending is
+	# in tick order, so if its oldest entry is inside the window every entry is. Walking the
+	# list into a new one regardless was an allocation and a pass over every unconfirmed send
+	# per entity per peer per snapshot -- 3.3 ms of a 32-player server's tick, for a call
+	# that trims nothing on all but the rare snapshot a peer stops acknowledging.
+	if int(view.pending[0]["tick"]) >= oldest_tick:
 		return
 
 	var kept: Array[Dictionary] = []

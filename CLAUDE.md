@@ -399,6 +399,17 @@ Same as the rest of the family, plus one specific to this repo:
   loading, and a script that fails to load makes a headless run hang rather than
   error visibly.
 
+## A full server's snapshots (2026-10-08, `g2g-capacity-1`)
+
+Measured with game-g2gfast `tools/load_probe -- surf_mesa 32` (32 admitted players running, 128 ticks, 32 snapshots a second; only the probe's row totals are trustworthy, because `LOAD_PHASES` times every call and its per-phase figures are mostly the timer). Snapshots averaged 12.4 ms a tick; now 8.0-8.8, with every peer sent byte-for-byte what it was (19,886 B/s each, unchanged):
+
+- **Encoded once per snapshot for each distinct set of properties** (`DotNetBehaviour.write_state` / `_encode` / `_signature`). Inside a snapshot each property is read once, so a set of properties is the same bits for every peer it goes to, and for a moving player that set is the same for every peer but its owner. The bits are laid into each peer's packet with `DotNetWriter.write_bit_run` at whatever bit it is at; the per-peer record (believed, last sent, pending) is still per peer, and the recorded values are one dictionary shared by every peer's pending entry, which nothing writes to. A set out of declaration order is encoded fresh, since a bitmask could not tell two orders apart. 12.4 -> 9.5 ms.
+- **`collect_dirty` written out** rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per property: about thirteen thousand iterations a snapshot at 32 players, where the call costs more than the comparison. Same rules in the same order (spawn-only still never kept owed). 9.5 -> 8.8 ms.
+- **`trim_pending` returns on its oldest entry** when that is inside the window, which it nearly always is.
+- **`DotNetConfig.stagger_snapshots`** (off by default): peer `p` is sent its snapshot on the ticks where `p % ticks_per_snapshot() == tick % ticks_per_snapshot()`, so at 128 ticks and 32 snapshots no one tick builds all of them. Every peer still hears from the server at the same rate, a fixed number of ticks apart. The probe at 32 players: p99 46.6 -> 22.7 ms, worst 53.7 -> 30.5, mean 16.3 -> 17.3 (sharing is among a quarter of the peers). Lag-compensation history is recorded every tick when on. `netcode_demo`'s "staggered snapshots" runs both ways (4 checks).
+
+What is left is not the network: the game half of a 32-player tick is 8.3 ms on its own, over a 7.8 ms budget at 128, so the next step is the motor's per-player cost (dot-player-controller) or the tick rate (Christian's call).
+
 ## Validating changes
 
 ```bash
@@ -407,7 +418,7 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 268 checks: wire round-trips, quantisation accuracy, message direction,
+# 272 checks: wire round-trips, quantisation accuracy, message direction,
 # two builds with different message sets (skipped types, appended fields, a required
 # type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and

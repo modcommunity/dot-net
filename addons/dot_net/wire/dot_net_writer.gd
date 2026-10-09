@@ -341,6 +341,50 @@ func write_aligned_bytes(data: PackedByteArray) -> void:
 	_bit_pos = _bytes.size() << 3
 
 
+## Appends [param bits] bits that another writer produced, at whatever bit this one is at.
+##
+## For a snapshot that sends the same encoded state to many peers: encoded once into its
+## own writer, then laid into each peer's packet with this, which is the same bits on the
+## wire as encoding it again, field by field, for every one of them (the cost that made a
+## 32-player server's snapshots quadratic). [param data] is that writer's `to_bytes()`; its
+## last byte's unused high bits are zero, as a writer leaves them.
+func write_bit_run(data: PackedByteArray, bits: int) -> void:
+	if bits <= 0:
+		return
+
+	var needed := (bits + 7) >> 3
+
+	if data.size() < needed:
+		push_error("DotNetWriter.write_bit_run: %d bits from %d bytes" % [bits, data.size()])
+		return
+
+	var end_bit := _bit_pos + bits
+
+	if ((end_bit + 7) >> 3) > MAX_BYTES:
+		overflowed = true
+		return
+
+	var offset := _bit_pos & 7
+
+	if offset == 0:
+		# Byte-aligned: the bytes go in as they are.
+		_bytes.append_array(data.slice(0, needed))
+	else:
+		# Each source byte straddles two of ours: its low bits complete the byte in
+		# progress, its high bits start the next one.
+		var index := _bit_pos >> 3
+		var back := 8 - offset
+		for i in range(needed):
+			var b := data[i]
+			_bytes[index] |= (b << offset) & 0xFF
+			_bytes.append(b >> back)
+			index += 1
+
+	_bit_pos = end_bit
+	# The last source byte may have pushed one byte past what the bits need, all zero.
+	_bytes.resize((_bit_pos + 7) >> 3)
+
+
 ## Writes a UTF-8 string with a length prefix.
 ##
 ## [param max_bytes] truncates rather than refusing, and truncation happens on the
