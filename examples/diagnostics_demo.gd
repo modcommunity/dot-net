@@ -26,7 +26,7 @@ var _sections_finished: int = 0
 ## check that never ran inside a section that had already announced itself — a runtime
 ## error aborts the rest of that function and the counter is satisfied — so the total is
 ## compared with this. Raise it with every check added.
-const CHECKS := 68
+const CHECKS := 71
 
 
 func _ready() -> void:
@@ -173,6 +173,23 @@ func _section_loss() -> void:
 	_check("a duplicate does not cancel a real loss", dup.snapshots_lost == 2,
 		"%d" % dup.snapshots_lost)
 	_check("and is counted out of order", dup.out_of_order == 1)
+
+	# A snapshot every second tick is the normal case at 64 ticks and 32 snapshots, and
+	# a gap of one period is not a loss. Counting ticks reported half of every clean link
+	# lost (0.52 measured against 0.05 injected, through a real relay on ENet).
+	var period := DotNetStats.new()
+	period.snapshot_interval_ticks = 2
+	for tick in [2, 4, 6, 8, 10]:
+		period.note_snapshot(tick)
+	_check("a gap of one period is no loss", period.snapshots_lost == 0,
+		"%d" % period.snapshots_lost)
+	period.note_snapshot(16)
+	_check("a gap of three periods is two lost, not five ticks",
+		period.snapshots_lost == 2, "%d" % period.snapshots_lost)
+	period.note_snapshot(12)
+	_check("and a late one in the gap is uncounted as before",
+		period.snapshots_lost == 1 and period.out_of_order == 1,
+		"%d lost, %d out of order" % [period.snapshots_lost, period.out_of_order])
 
 	# Loss cannot go negative, however badly a peer misbehaves.
 	var evil := DotNetStats.new()

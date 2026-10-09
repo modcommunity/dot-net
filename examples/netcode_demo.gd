@@ -208,7 +208,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 282
+const CHECKS := 297
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -271,6 +271,7 @@ func _run() -> void:
 	_test_standing_still()
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
+	_test_input_batches()
 	await _test_integration()
 
 	print("")
@@ -1477,11 +1478,67 @@ func _test_interpolation() -> void:
 		clock.render_tick(2) == clock.server_tick() - 2
 	)
 
-	# And a sample re-anchors it absolutely rather than adding to it.
-	clock.sync_from_server(1000, 0.0)
+	# A sample moves it TO the sample, never by it -- and only forward, at once.
+	clock.sync_from_server(1010, 0.0)
 	_check(
-		"a sample re-anchors it rather than accumulating (%d)" % clock.server_tick(),
-		clock.server_tick() == 1000
+		"a quicker packet moves it forward to the sample, not by it (%d)" % clock.server_tick(),
+		clock.server_tick() == 1010
+	)
+
+	# [b]A late packet is not the server going back in time.[/b] It was: every sample
+	# re-anchored the timeline absolutely, so on a link whose packets take 30..80 ms the
+	# render timeline went back and forth with each one -- measured through a real relay
+	# on ENet, 35 times backwards in ten seconds by up to 3.9 ticks.
+	clock.sync_from_server(1004, 0.0)
+	_check(
+		"one late packet does not pull it back (%d)" % clock.server_tick(),
+		clock.server_tick() == 1010
+	)
+	for _i in range(DotNetClock.SETTLE_SAMPLES):
+		clock.sync_from_server(1004, 0.0)
+	_check(
+		"a whole window of them does, by one tick (%d)" % clock.server_tick(),
+		clock.server_tick() == 1009
+	)
+
+	# The same over a jittery link: 64 ticks, a snapshot every second tick, each taking
+	# 1..4 ticks to arrive, so they arrive late, early and out of order.
+	var jit := DotNetClock.new(64, false)
+	jit.adaptive_margin = false
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 64
+	var server_now := 2000
+	var in_flight: Array = []
+	var back_steps := 0
+	var worst_back := 0
+	var worst_off := 0
+	var previous := -1
+	for frame in range(640):
+		server_now += 1
+		if server_now % 2 == 0:
+			in_flight.append([frame + rng.randi_range(1, 4), server_now])
+		jit.advance(1.0 / 64.0)
+		var due: Array = []
+		for packet in in_flight:
+			if int(packet[0]) <= frame:
+				due.append(packet)
+		for packet in due:
+			in_flight.erase(packet)
+			jit.sync_from_server(int(packet[1]), 47.0)
+		if previous >= 0 and jit.received_tick() < previous:
+			back_steps += 1
+			worst_back = maxi(worst_back, previous - jit.received_tick())
+		if frame > 64:
+			worst_off = maxi(worst_off, absi(jit.received_tick() - (server_now - 1)))
+		previous = jit.received_tick()
+	_check(
+		"over a jittery link the receive timeline almost never goes back, and one tick at most (%d times, %d ticks)"
+			% [back_steps, worst_back],
+		back_steps <= 3 and worst_back <= 1
+	)
+	_check(
+		"and stays within a tick or two of the quickest arrival (%d)" % worst_off,
+		worst_off <= 2
 	)
 
 	# Adaptive buffering must grow under jitter.
@@ -1614,11 +1671,20 @@ func _test_render_delay() -> void:
 
 	var interp := client_d.interpolator
 	var step_x := 10.0 / 128.0
-	var worst := [0.0, 0.0]
+	var worst := [0.0, 0.0, 0.0]
 	var counts: Array[Dictionary] = []
 
-	for leg in range(2):
+	# The third leg is clean and on a 120 ms round trip. The render time is counted back
+	# from the newest snapshot the client HOLDS, not from the tick the server is on: counted
+	# from the server's tick, the flight time came out of the buffer -- ten ticks of these
+	# twelve -- and three frames in four were drawn past the newest snapshot (measured
+	# through a real relay on ENet, game-arena's `headless_lossy`). Snapshots in this loop
+	# arrive the instant they are sent, so a buffer that is right here is right because of
+	# where it is measured from, not because the link was kind.
+	for leg in range(3):
 		lossy[0] = leg == 1
+		if leg == 2:
+			client_d.stats.note_rtt(120.0)
 		interp.reset_counts()
 		var start := 1 + leg * 384
 		for tick in range(start, start + 384):
@@ -1646,9 +1712,9 @@ func _test_render_delay() -> void:
 			"extrapolations": interp.extrapolation_count(),
 		})
 
-	for leg in range(2):
+	for leg in range(3):
 		var c: Dictionary = counts[leg]
-		var label := "lossy (1 in 5)" if leg == 1 else "clean"
+		var label: String = ["clean", "lossy (1 in 5)", "120 ms round trip"][leg]
 		_check(
 			"%s: every frame sampled (%d)" % [label, int(c["samples"])],
 			int(c["samples"]) > 1152
@@ -1679,7 +1745,7 @@ func _test_render_delay() -> void:
 	# interpolator had written into it used to hand the next snapshot as the server's word.
 	lossy[0] = false
 	server_move.velocity = Vector3.ZERO
-	for tick in range(769, 769 + 128):
+	for tick in range(1153, 1153 + 128):
 		server_d.server_tick(tick)
 		for payload in delivered:
 			var _applied := client_d.receive_snapshot(payload)
@@ -2521,6 +2587,74 @@ func _reorder_run(every_other: bool) -> void:
 	remove_child(watcher)
 	host.free()
 	watcher.free()
+
+
+## Every packet carries the last few inputs, so one lost packet costs no tick.
+func _test_input_batches() -> void:
+	print("")
+	print("[input batches]")
+
+	var buffer := DotNetInput.Buffer.new(32)
+	for tick in [10, 11, 12, 14, 15]:
+		var input := DemoInput.new()
+		input.tick = tick
+		input.delta = 1.0 / 60.0
+		input.move = Vector2(0.1 * tick - 1.0, 0.5)
+		input.fire = tick % 2 == 0
+		buffer.push(input)
+
+	var recent := buffer.recent(3, 14)
+	_check("recent() is the newest three at or before a tick, oldest first",
+		recent.size() == 3 and recent[0].tick == 11 and recent[2].tick == 14)
+
+	var writer := DotNetWriter.new()
+	DotNetInput.write_batch(writer, recent)
+	var read := DotNetInput.read_batch(DotNetReader.new(writer.to_bytes()),
+		func() -> DotNetInput: return DemoInput.new())
+	var same := read.size() == 3
+	for i in range(mini(read.size(), 3)):
+		var a: DemoInput = recent[i]
+		var b: DemoInput = read[i]
+		same = same and a.tick == b.tick and a.fire == b.fire \
+			and a.move.distance_to(b.move) < 0.01 and absf(a.delta - b.delta) < 0.001
+	_check("a batch round-trips every tick, across a gap, with its fields", same)
+
+	var one := DotNetWriter.new()
+	recent[2].write(one)
+	print("    one input %d bytes, a batch of three %d" % [one.to_bytes().size(), writer.to_bytes().size()])
+	_check("the copies cost less than a whole input each",
+		writer.to_bytes().size() < one.to_bytes().size() * 3)
+
+	var cut := writer.to_bytes().slice(0, writer.to_bytes().size() - 2)
+	var partial := DotNetInput.read_batch(DotNetReader.new(cut),
+		func() -> DotNetInput: return DemoInput.new())
+	_check("a truncated batch keeps only the inputs it read whole",
+		partial.size() == 2 and partial[1].tick == 12)
+
+	# The server's half: a resent copy of a consumed tick is not a late input.
+	var server := DotNetInput.Buffer.new(32)
+	for input in read:
+		server.push(input)
+	server.take(11)
+	server.take(12)
+	_check("the server's buffer says how far it has consumed", server.last_consumed_tick() == 12)
+	var again := DotNetInput.read_batch(DotNetReader.new(writer.to_bytes()),
+		func() -> DotNetInput: return DemoInput.new())
+	var pushed := 0
+	for input in again:
+		if input.tick > server.last_consumed_tick():
+			server.push(input)
+			pushed += 1
+	_check("so a host skips the stale copies instead of counting them late",
+		pushed == 1 and server.late_count == 0 and server.duplicate_count == 1,
+		)
+	# Lost packet, next one arrives: the lost tick is there before it is due.
+	var lost_then := DotNetInput.Buffer.new(32)
+	var batch_15 := buffer.recent(3, 15)
+	for input in batch_15:
+		lost_then.push(input)
+	_check("a packet lost before tick 14 is covered by the next one",
+		lost_then.take(14) != null and lost_then.take(15) != null)
 
 
 func _test_integration() -> void:

@@ -89,8 +89,9 @@ var _accumulator: float = 0.0
 ## Scale applied to tick duration while correcting drift. 1.0 is no correction.
 var _drift_scale: float = 1.0
 
-## Most recent estimate of the server's tick.
-## Estimated tick the server is on, advanced locally and re-anchored on every sample.
+## The newest snapshot tick, as the quickest recent arrivals place it, advanced locally:
+## the RECEIVE timeline. [method server_tick] is this plus the flight time; the render
+## timeline is this less the interpolation delay.
 ##
 ## [b]It has to advance between samples.[/b] A snapshot arrives twenty times a second and
 ## frames render far more often; an estimate that only moved when one arrived would make
@@ -98,7 +99,28 @@ var _drift_scale: float = 1.0
 ## interpolated position — a step function of arrivals. The interpolator would compute a
 ## new value only on the frames a packet happened to land on, which is the 20 Hz stepping
 ## it exists to remove.
-var _estimated_server_tick: int = 0
+##
+## [b]And it follows the quickest arrivals, not every one.[/b] It was re-anchored to
+## [code]sample + one_way[/code] on every snapshot, which is right on a link that delivers
+## every packet in the same time and nowhere else: a packet held up 25 ms put the whole
+## timeline back 25 ms, and the next one on time put it forward again. Measured through a
+## real UDP relay with 30..80 ms each way (game-arena's `headless_lossy`): the render
+## timeline went BACKWARDS 35 to 48 times in ten seconds, by up to 3-4 ticks, and lurched
+## by up to 5 -- a remote player drawn half a metre back and then forward, with every
+## position it was asked for correct, so nothing that compared positions could see it.
+## Now a sample later than the timeline moves it forward at once (that packet came as
+## quickly as packets can, so the server is at least there), a sample behind it moves
+## it nothing, and a whole [constant SETTLE_SAMPLES] of samples behind it takes it back
+## by a single tick -- the path really did get slower. Late packets are the interpolation
+## buffer's to absorb, which is what it measures and is sized for.
+var _received_tick: int = 0
+
+## Samples in a window, and the closest any came to the receive timeline in this one.
+## See [member _received_tick].
+const SETTLE_SAMPLES := 16
+var _settle_count: int = 0
+var _settle_best: int = 0
+var _settle_open: bool = false
 
 var _rtt_ms: float = 0.0
 var _jitter_ms: float = 0.0
@@ -153,7 +175,7 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 	# every sample. Without this it is whatever the last packet said, and everything
 	# rendered from it moves in packet-sized jumps. See the note on the field.
 	if not is_authority and _synced:
-		_estimated_server_tick += steps
+		_received_tick += steps
 
 	if _accumulator >= step:
 		# Still behind after the cap. Discard the backlog rather than carrying it
@@ -165,7 +187,7 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 		# stayed put would read as a lead that grew by the length of the stall, and the
 		# next sample would correct it as drift rather than as the stall it was.
 		if not is_authority and _synced:
-			_estimated_server_tick += dropped
+			_received_tick += dropped
 
 		DotLog.debug(
 			CHANNEL, "dropped ticks to avoid a catch-up spiral", {"ticks": dropped}
@@ -206,12 +228,13 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 
 	_note_rtt(rtt_ms)
 
-	_estimated_server_tick = server_tick + one_way_ticks()
+	var first := not _synced or (not _synced_with_rtt and _rtt_ms > 0.0)
+	_follow_arrival(server_tick, first)
 
-	var target := _estimated_server_tick + _target_lead()
+	var target := server_tick() + _target_lead()
 	var error := target - tick
 
-	if not _synced or (not _synced_with_rtt and _rtt_ms > 0.0):
+	if first:
 		# Either the first sample, with nothing to smooth toward — or the first one that
 		# knows how long the link actually is, which supersedes an anchor that assumed it
 		# was instant rather than drifting from it.
@@ -270,6 +293,38 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		float(error) / float(maxi(1, tick_rate)), -MAX_DRIFT_RATE, MAX_DRIFT_RATE
 	)
 	_drift_scale = 1.0 - correction
+
+
+## Moves the receive timeline for one snapshot that arrived carrying [param sampled]. See
+## [member _received_tick] for why it is not simply set.
+func _follow_arrival(sampled: int, anchor: bool) -> void:
+	var ahead := sampled - _received_tick
+
+	if anchor or absi(ahead) > snap_threshold_ticks():
+		# The first sample, or a different session: nothing to filter against.
+		_received_tick = sampled
+		_settle_open = false
+		return
+
+	if ahead >= 0:
+		# As quick as any packet has come: the server is at least this far along.
+		_received_tick = sampled
+		_settle_open = false
+		return
+
+	# Behind the timeline: a late packet, or the path got slower. One window of them all
+	# behind is the second, and the timeline goes back one tick at a time.
+	if not _settle_open:
+		_settle_open = true
+		_settle_count = 0
+		_settle_best = ahead
+
+	_settle_count += 1
+	_settle_best = maxi(_settle_best, ahead)
+
+	if _settle_count >= SETTLE_SAMPLES:
+		_received_tick -= 1
+		_settle_open = false
 
 
 ## How far behind its target the input timeline may fall before it jumps forward, in ticks.
@@ -348,9 +403,18 @@ func _note_rtt(rtt_ms: float) -> void:
 
 # --- Timeline accessors ----------------------------------------------------
 
-## The tick this client believes the server is simulating right now.
+## The tick this client believes the server is simulating right now: the receive
+## timeline plus the flight time.
 func server_tick() -> int:
-	return _estimated_server_tick if not is_authority else tick
+	return _received_tick + one_way_ticks() if not is_authority else tick
+
+
+## The newest snapshot tick this client expects to hold now, as the quickest recent
+## arrivals place it. What the render timeline is measured back from: an interpolation
+## delay is "this many snapshots behind the newest", and the newest is the one that has
+## ARRIVED, not the one the server is building. See [member _received_tick].
+func received_tick() -> int:
+	return _received_tick if not is_authority else tick
 
 
 ## The tick inputs are being generated for. Ahead of the server.
@@ -358,13 +422,18 @@ func input_tick() -> int:
 	return tick
 
 
-## The tick to render, given an interpolation delay in ticks. Behind the server.
+## The tick to render, given an interpolation delay in ticks: that far behind the newest
+## snapshot this client holds ([method received_tick]), not behind the tick the server is
+## on. The two differ by the flight time, and a delay counted from the server's tick spent
+## the first [method one_way_ticks] of itself waiting for a snapshot still in flight --
+## measured through a real relay at 110-160 ms round trip, 93-100% of frames were drawn
+## past the newest snapshot and extrapolated, where 0-14% are now.
 ##
-## Never returns a tick ahead of the estimated server tick: rendering ahead means
+## Never returns a tick ahead of the receive timeline: rendering ahead means
 ## interpolating toward a snapshot that has not arrived, which is extrapolation with
 ## none of the guards.
 func render_tick(delay_ticks: int) -> int:
-	return mini(server_tick() - delay_ticks, server_tick())
+	return mini(received_tick() - delay_ticks, received_tick())
 
 
 func rtt_ms() -> float:
@@ -401,6 +470,8 @@ func reset(start_tick: int = 0) -> void:
 	_rtt_samples.clear()
 	_rtt_ms = 0.0
 	_jitter_ms = 0.0
+	_received_tick = 0
+	_settle_open = false
 
 
 func describe() -> Dictionary:
@@ -410,6 +481,7 @@ func describe() -> Dictionary:
 		"authority": is_authority,
 		"synced": is_synced(),
 		"server_tick": server_tick(),
+		"received_tick": received_tick(),
 		"lead": _target_lead(),
 		"rtt_ms": int(_rtt_ms),
 		"jitter_ms": int(_jitter_ms),

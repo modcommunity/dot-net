@@ -51,6 +51,20 @@ var snapshots_received: int = 0
 
 var _last_snapshot_tick: int = -1
 
+## Ticks between two snapshots the sender meant to send, which is what a gap is measured
+## in. [DotNetManager] sets it from [method DotNetConfig.ticks_per_snapshot] before every
+## snapshot it notes.
+##
+## [b]A gap is in snapshots, not ticks.[/b] This counted every missing TICK as a lost
+## snapshot, which is right only when a server sends a snapshot every tick -- the one
+## configuration nothing in the family runs. At arena's 64 ticks and 32 snapshots every
+## arrival was two ticks after the last, so a clean link reported half its snapshots lost
+## and a link losing a fifth reported 0.6: measured through a real UDP relay on ENet, the
+## first time anything here saw real loss, 0.52 against 0.05 injected and 0.60 against
+## 0.20. A number that is wrong by a factor of ten is a diagnosis pointing at the network
+## when the network is fine.
+var snapshot_interval_ticks: int = 1
+
 ## Rolling rates.
 var bytes_sent_per_sec: float = 0.0
 var bytes_received_per_sec: float = 0.0
@@ -140,9 +154,12 @@ func note_snapshot(tick: int) -> void:
 
 		return
 
+	# Rounded, so a sender whose period does not divide the tick evenly (a staggered
+	# phase, a tick rate that changed under it) is not read as a fraction of a loss.
 	var gap := tick - _last_snapshot_tick
-	if gap > 1:
-		snapshots_lost += gap - 1
+	var missing := int(roundf(float(gap) / float(maxi(1, snapshot_interval_ticks)))) - 1
+	if missing > 0:
+		snapshots_lost += missing
 
 	_last_snapshot_tick = tick
 

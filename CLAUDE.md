@@ -240,6 +240,25 @@ Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
 
 21. **`unregister` typed a freed identity, one script error per entity.** The registry holds identities it does not own, and a game change frees the old world's scene before the module that registered them stops its manager, so `clear()` assigned freed objects to a `DotNetIdentity` local: 171 "Trying to assign invalid previously freed instance" on one `changelevel` away from mg-buses-from-hell (dot-game's `_teardown` -> `stop` -> `clear`), on a run that passed. A freed entry is now taken out of every table with nothing to notify. Found 2026-10-08 when dot-server-deploy's multigame stopped booting the scratched lobby, which was not a dot-game module, and booted buses instead. `[freed entity]` in `netcode_demo`; armed, two of its four checks fail and the rest abort.
 
+22. **`DotNetStats` counted a gap in ticks as that many lost snapshots.** Right only for a server that sends a snapshot every tick, which nothing in the family does: at arena's 64 ticks and 32 snapshots a clean link reported half its snapshots lost, and through a real UDP relay `loss_rate()` read 0.55 against 0.04 injected and 0.60 against 0.21. `snapshot_interval_ticks` (set by the manager from `config.ticks_per_snapshot()` before every snapshot) makes a gap a number of periods. `diagnostics_demo`'s *a gap of one period is no loss* (3 checks), armed.
+
+23. **The render timeline went backwards on every late packet.** `sync_from_server` set the estimate to `sample + one_way` on every snapshot, so on a link whose packets take 30..80 ms the timeline moved back with each slow one and forward with the next: through a real relay, 35-48 times backwards in ten seconds by up to 3-4 ticks, a remote player drawn half a metre back and then forward with every position it was asked for correct. Nothing that compared positions could see it, because the truth moves back with the time it is sampled at. The receive timeline now moves forward at once to a sample ahead of it, ignores one behind it, and goes back one tick only after a whole `SETTLE_SAMPLES` (16) of samples all behind it. `netcode_demo`'s render-timeline checks (4, including a seeded jittery link: 51 times back by up to 2 ticks before, 0 now); game-arena's `headless_lossy` *the render timeline goes back at most twice* (38 and 48 times before). Armed both places. A side effect worth knowing: following the quickest packets puts the input lead about half the jitter higher, which is what stopped the late commands the same link produced (25-39 of 640 before).
+
+24. **The interpolation delay was counted back from the server's tick, so the flight time came out of it.** `interpolate_frame` sampled at `server_tick() - delay`, and `server_tick()` is the newest snapshot plus `one_way_ticks()`: on a 120 ms round trip four of a two-snapshot buffer's ticks were spent waiting for a snapshot still in the air, and 93-100% of frames were drawn past the newest snapshot and extrapolated (`headless_lossy`, armed; 0-14% now). It never showed on a loopback, where the flight time is zero. It now samples at `received_tick()`, which is also what `DotNetHistory.client_view_tick` (`current - one_way - delay`) always assumed the client was drawing. `netcode_demo`'s render delay has a third leg on a 120 ms round trip (4 checks; armed, 945 of 1,536 frames extrapolated and 0.78 m off the line).
+
+25. **Nothing resent an input.** `DotNetInput.Buffer.push` counted duplicates with the comment "clients resend recent inputs so a dropped packet does not cost a tick", and no client in the family did, so every lost input packet was a tick the server ran on the previous command. `DotNetInput.write_batch` / `read_batch` put the last few inputs in one packet (count, the first tick in full, each later one as a varint step; 9 bytes for one arena command, 19 for three), `Buffer.recent(count, upto_tick)` gives a client its copies from the replay history, and `Buffer.last_consumed_tick()` lets a server skip the copies it has simulated rather than count each as late. Wiring it is each game's bridge: game-arena sends three (80% of ticks with the right command at 20% loss before, 99-100% after); the other ten bridges still send one. `netcode_demo`'s *input batches* (7 checks).
+
+## Real loss, through a relay (2026-10-09, `dual-stack-follow-1`)
+
+`addons/dot_net/testing/dot_net_udp_relay.gd` is a UDP proxy for tests: listen on a port, forward every client it hears to a target, and drop, delay (`delay_ms` +- `jitter_ms`, so a spread wider than the gap between packets reorders them as a real path does), hold back (`reorder`, `reorder_ms`) and duplicate each datagram, each direction on its own seeded generator. It runs on its own thread so a hitch in the game being measured is not a burst in the network measuring it (`threaded = false` and `poll()` to step it by hand). No `class_name`: it ships inside the addon so a game linking `dot_net` can preload it by path, and a test tool should not reserve a global name in every project. The kernel's queueing discipline would do the same and needs root; ENet's own simulated loss is an engine compile flag.
+
+`examples/relay_demo.tscn` (28 checks) shows it injects what it says, measured at the far end: 80.0% of 1,000 datagrams through 20% loss, 39 duplicates at 5%, delays inside the window, the relay's counts equal to what arrived, the same seed losing the same datagrams; and a real ENet pair through 20% loss each way and 30..80 ms, where every reliable packet arrives exactly once and in order and the unreliable ones arrive about 80% of the time **and out of order: Godot's ENet sends `TRANSFER_MODE_UNRELIABLE` UNSEQUENCED** (186 of 242 behind a newer one). Nothing sent unreliable may assume order. Audited 2026-10-09: snapshots (superseded by tick in `receive_snapshot`), inputs (the buffer is sorted by tick), voice (dot-voice's jitter buffer orders by sequence) and dot-server's heartbeat and ping (a timestamp echoed, a value) are all order-free; **dot-server's `SCOREBOARD` is the exception** -- the client keeps whatever payload arrived last, so a reordered one shows the previous scoreboard until the next, and it carries nothing to tell them apart.
+
+game-arena's `headless_lossy` is where it is used on a real game, and its CLAUDE.md has the numbers. What it found in this addon is #22-#25 above. What it found and is NOT fixed here:
+
+- **The clock's jitter is always about zero on ENet.** Its jitter is the spread of the round-trip samples it is fed, a game feeds one per snapshot, and the number it feeds (ENet's smoothed round trip, or a two-second heartbeat) barely moves, so `adaptive_margin` never widens the margin. #23's arrival filter covers jitter in practice (no late commands at 30..80 ms), at the price of an input lead 2-4 ticks over what the transit needs. The real fix is for the server to say how early each peer's commands arrive, which is a snapshot wire change.
+- **The adaptive interpolation buffer is sized for jitter, not for loss.** At 20% loss 12-14% of frames still extrapolate (bounded by `max_extrapolation_sec`; drawn within 1-2 cm of the truth at the 95th percentile, worst jump 0.03-0.3 m on a player running a circle).
+
 ## What a snapshot costs per peer, and the three things it was doing N times (2026-10-07)
 
 Nothing in the family had measured a server with more than two players until game-g2gfast's `tools/load_probe` put 32 on one: a snapshot tick cost 71 ms, against a 7.8 ms tick at 128, and 95% of it was `_send_to_peer`'s per-entity bookkeeping, done once per entity **per peer**. Three of those were the same work repeated, and are done once now; none changes a byte on the wire:
@@ -263,9 +282,11 @@ one — which is exactly the stepping interpolation exists to remove, arrived at
 route the interpolator itself cannot see.
 
 `advance()` now walks the estimate forward with the local clock, and `sync_from_server`
-re-anchors it absolutely. A stall that drops ticks drops them from both timelines, or the
+re-anchors it. A stall that drops ticks drops them from both timelines, or the
 input lead would appear to have grown by the length of the stall and the next sample would
 correct it as drift.
+
+**Re-anchored on the quickest arrivals, not on every one, and measured from what has arrived** (2026-10-09, #23 and #24 below). The timeline the clock walks is the RECEIVE timeline (`received_tick()`: the newest snapshot tick, as the quickest recent packets place it); `server_tick()` is that plus the flight time, and the render time is `received_tick()` less the interpolation delay.
 
 It hid because `_test_interpolation` called `DotNetInterpolator.sample()` directly with
 hand-picked ticks — the clock was never in the path. It was found from `dot-2d-hungry`,
@@ -414,7 +435,7 @@ What is left is not the network: the game half of a 32-player tick is 8.3 ms on 
 
 Over WebSocket "unreliable" is reliable and in order, so until the dual-stack server every client received every snapshot once and in sequence; a native client on ENet gets real UDP. `netcode_demo`'s "reordered and repeated snapshots" runs two real managers with acknowledgements wired through a link that holds snapshots back behind the next one (the one carrying a one-off change always, any other with a seeded 30% chance) and replays stale copies. The late snapshot is ignored by tick, as superseded; the client acknowledges the newer one; the server drops the unconfirmed entry and re-sends; the change arrives 18 ticks later and never goes back, with no decode failures and the position 0.15 m behind. Armed: without the acknowledgement it never arrives (the late snapshot ages out as delivered, which is the documented behaviour of a host that has not wired acks).
 
-**A lost property is owed until confirmed** (`PeerView.relost`, set when an unconfirmed send is dropped as lost, cleared when the peer confirms the value). The first version of the check held back every other snapshot and never converged: the client acknowledges only what it applies and the server re-sent once, in its very next snapshot, which on that link was always a held one. Owed until confirmed, it goes out in each snapshot until one is applied — the rule the predicted entity's state already had, applied to a property only after it has been lost once, so a clean link pays nothing. The check runs both links (jitter and every-other); both deliver the change at tick 72 (the jitter link took 81 before). Armed: without the mark the every-other link never delivers it. Real ENet loss (netem) is still unmeasured (`dual-stack-follow-1`).
+**A lost property is owed until confirmed** (`PeerView.relost`, set when an unconfirmed send is dropped as lost, cleared when the peer confirms the value). The first version of the check held back every other snapshot and never converged: the client acknowledges only what it applies and the server re-sent once, in its very next snapshot, which on that link was always a held one. Owed until confirmed, it goes out in each snapshot until one is applied — the rule the predicted entity's state already had, applied to a property only after it has been lost once, so a clean link pays nothing. The check runs both links (jitter and every-other); both deliver the change at tick 72 (the jitter link took 81 before). Armed: without the mark the every-other link never delivers it. Real ENet loss is measured now, through a relay rather than netem: see "Real loss, through a relay".
 
 ## Validating changes
 
@@ -424,22 +445,26 @@ find . -name '*.gd' -not -path './.godot/*' | while read f; do
     godot --headless --path . --check-only --script "res://${f#./}"
 done
 
-# 282 checks: wire round-trips, quantisation accuracy, message direction,
+# 297 checks: wire round-trips, input batches, a receive timeline that a late packet does not
+# pull back, quantisation accuracy, message direction,
 # two builds with different message sets (skipped types, appended fields, a required
 # type refused from both ends), batching and fragmentation, clock convergence, replication and
 # dirty tracking, interest strategies agreeing, budget fairness, interpolation and
 # extrapolation bounds, the render delay in ticks at 128/20 with nothing
-# extrapolated (clean and lossy) and a stop drawn where it stopped, rewind/restore, prediction replay against a server
+# extrapolated (clean, lossy and on a 120 ms round trip) and a stop drawn where it stopped, rewind/restore, prediction replay against a server
 # simulating the same changing input, a predicted entity the server holds still
 # (clean, and with the snapshot carrying the stop lost), and a server+client
 # integration run with 20% simulated packet loss.
 godot --headless --path . res://examples/netcode_demo.tscn
 
-# 68 checks over DotNetStats and DotNetSnapshot on their own: inferred loss,
-# reordering vs. duplication, rates on a connection that stopped, rtt
+# 71 checks over DotNetStats and DotNetSnapshot on their own: inferred loss (counted in
+# snapshot periods), reordering vs. duplication, rates on a connection that stopped, rtt
 # percentiles and the bounded sample window, delta/apply round-trips, and
 # baseline isolation.
 godot --headless --path . res://examples/diagnostics_demo.tscn
+
+# 28 checks on the lossy UDP relay against real sockets, and a real ENet pair through it.
+godot --headless --path . res://examples/relay_demo.tscn
 ```
 
 The integration test runs both managers in one process over a lossy loopback, which
@@ -484,6 +509,8 @@ addons/dot_net/
   stats/
     dot_net_stats.gd             The counters that turn "feels laggy" into a cause.
                                  roll() must be called each frame; see below.
+  testing/
+    dot_net_udp_relay.gd         A lossy UDP relay for tests. No class_name; preload by path.
 ```
 
 ## Things deliberately not here

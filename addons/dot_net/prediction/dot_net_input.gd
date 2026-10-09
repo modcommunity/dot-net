@@ -113,6 +113,72 @@ func _to_string() -> String:
 	return "DotNetInput(tick %d)" % tick
 
 
+# --- Batches: the last few inputs in every packet ---------------------------
+
+## Most inputs one batch carries. Four bits of count.
+const BATCH_MAX := 15
+
+## Writes [param inputs] (oldest first, ticks ascending) as one batch: a count, the first
+## tick in full and each later one as the step from the one before, then each input's
+## delta and fields.
+##
+## [b]Why a client sends its last few inputs every tick rather than one.[/b] Inputs are
+## unreliable, and a lost one is a tick the server simulates on the previous command,
+## which the client predicted on the real one -- a correction for every lost packet that
+## changed anything, and with the view angle changing every tick that is every lost
+## packet. Measured through a real UDP relay in front of an ENet server (game-arena's
+## `headless_lossy`): at 20% loss each way a fifth of a moving player's ticks were
+## simulated on a guess, and 9% of snapshots corrected his prediction. Resending is what the input buffer already expected -- its duplicate
+## counter says "clients resend recent inputs" -- and nothing in the family did. Three
+## copies turn one loss in five into one tick in a hundred and twenty-five for about
+## twelve extra bytes a packet; the copies after the first cost a varint for the tick
+## instead of 32 bits.
+static func write_batch(writer: DotNetWriter, inputs: Array) -> void:
+	var count := mini(inputs.size(), BATCH_MAX)
+	var first := inputs.size() - count
+	writer.write_uint(count, 4)
+
+	var previous := -1
+	for i in range(first, inputs.size()):
+		var input: DotNetInput = inputs[i]
+		if previous < 0:
+			writer.write_uint(input.tick, 32)
+		else:
+			writer.write_varint(maxi(1, input.tick - previous))
+		previous = input.tick
+		writer.write_float_range(input.delta, 0.0, 0.5, 12)
+		input._write(writer)
+
+
+## Reads what [method write_batch] wrote, building each input with [param make] (a
+## [Callable] returning a new instance of the game's subclass). Oldest first.
+##
+## Untrusted: the count is four bits, a tick step is at least one, and a batch that runs
+## out part-way returns what was read whole before it.
+static func read_batch(reader: DotNetReader, make: Callable) -> Array[DotNetInput]:
+	var out: Array[DotNetInput] = []
+	var count := reader.read_uint(4)
+	var tick := -1
+
+	for i in range(count):
+		if tick < 0:
+			tick = reader.read_uint(32)
+		else:
+			tick += maxi(1, reader.read_varint())
+
+		var input: DotNetInput = make.call()
+		input.tick = tick
+		input.delta = reader.read_float_range(0.0, 0.5, 12)
+		input._read(reader)
+
+		if not reader.ok():
+			break
+
+		out.append(input)
+
+	return out
+
+
 # --- Buffer ----------------------------------------------------------------
 
 ## A client's queue of inputs, on both sides of the connection.
@@ -170,6 +236,22 @@ class Buffer extends RefCounted:
 			_inputs.pop_front()
 
 		return DotResult.success(true)
+
+	## The newest tick handed to the simulation, or -1. A server reading a batch of
+	## resent inputs skips the copies at or before it rather than counting each as late.
+	func last_consumed_tick() -> int:
+		return _last_consumed_tick
+
+	## Up to [param count] inputs at or before [param upto_tick], oldest first: what a
+	## client resends with every packet. See [method DotNetInput.write_batch].
+	func recent(count: int, upto_tick: int) -> Array[DotNetInput]:
+		var out: Array[DotNetInput] = []
+		var i := _inputs.size() - 1
+		while i >= 0 and out.size() < count:
+			if _inputs[i].tick <= upto_tick:
+				out.push_front(_inputs[i])
+			i -= 1
+		return out
 
 	## Takes the input for a tick, or null.
 	func take(tick: int) -> DotNetInput:

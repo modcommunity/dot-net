@@ -550,7 +550,10 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 	if alpha < 0.0:
 		alpha = Engine.get_physics_interpolation_fraction()
 
-	var server_tick_now := float(clock.server_tick()) + clampf(alpha, 0.0, 1.0)
+	# The RECEIVE timeline, not the server's tick: an interpolation delay is counted back
+	# from the newest snapshot this client holds. Counted from the server's tick it lost
+	# the flight time out of the buffer -- see `DotNetClock.render_tick`.
+	var server_tick_now := float(clock.received_tick()) + clampf(alpha, 0.0, 1.0)
 
 	for identity in registry.all():
 		interpolator.apply(identity, server_tick_now)
@@ -718,6 +721,9 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 		stats.note_decode_failure()
 		return DotResult.fail(DotError.CODE_PARSE, "Truncated snapshot header.")
 
+	# In snapshots, not ticks: a gap of one period is no loss at all. Set every time,
+	# because a client adopts the server's tick rate after it started.
+	stats.snapshot_interval_ticks = config.ticks_per_snapshot()
 	stats.note_snapshot(tick)
 
 	if tick <= _applied_snapshot_tick and _applied_snapshot_tick > 0:
