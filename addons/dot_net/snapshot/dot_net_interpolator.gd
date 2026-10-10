@@ -256,11 +256,15 @@ func _adapt() -> void:
 	var needed := 1.0 + (_arrival_jitter_ms * 2.0) / maxf(1.0, interval_ms)
 
 	# And, where the host reports it, what lateness says: one interval to the snapshot
-	# after the render time, how late recent ones came, one tick for the frame's fraction,
-	# and one more interval if any recent snapshot went missing. See [method note_lateness].
+	# after the render time, how late recent ones came, and one more interval if any recent
+	# snapshot went missing. See [method note_lateness]. Not a tick more for the frame's
+	# fraction, which would be exact and cost every clean link a tick of delay to cover
+	# what the bounded extrapolation already draws within millimetres: measured at 64
+	# ticks, a steady link's buffer was 4.1 ticks with it and 3.0 without, against 2.5
+	# before any of this, with nothing extrapolated in any of them.
 	if not _lateness.is_empty():
 		var period := maxf(1.0, _snapshot_ticks())
-		var ticks := period + _late_ticks() + 1.0
+		var ticks := period + _late_ticks()
 		if _lost.has(true):
 			ticks += period
 		needed = maxf(needed, ticks / period)

@@ -2165,7 +2165,7 @@ func _test_buffer_growth() -> void:
 	_check("growing the buffer never moved the render time back (%.2f ticks)" % back, back < 0.001)
 	_check("once grown it covers the lateness: %d of 256 ticks extrapolated (buffer %.1f ticks)" % [
 		extrapolated, interpolator.delay_ticks()], extrapolated == 0)
-	_check("and on time it needs only an interval and a frame (%.1f ticks)" % _settled_delay(config),
+	_check("and on time it needs about an interval (%.1f ticks)" % _settled_delay(config),
 		_settled_delay(config) <= float(period) + 1.5)
 
 
