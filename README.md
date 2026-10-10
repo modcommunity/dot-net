@@ -85,7 +85,7 @@ godot --headless --path . res://examples/netcode_demo.tscn
 
 ## Honest limits
 
-`_net_simulate` must be deterministic across machines or reconciliation will not converge, which rules out Godot's physics for anything needing exact agreement. See [CLAUDE.md](CLAUDE.md#determinism-is-a-requirement-not-an-aspiration). Rollback netcode, matchmaking and voice are out of scope.
+`_net_simulate` must be deterministic across machines or reconciliation will not converge, which rules out Godot's physics for anything needing exact agreement. See [docs/prediction.md](docs/prediction.md#determinism-is-a-requirement-not-an-aspiration). Rollback netcode, matchmaking and voice are out of scope.
 
 ## Licence
 

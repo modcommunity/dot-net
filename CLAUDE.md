@@ -1,542 +1,115 @@
 # dot-net
 
-Multiplayer netcode for Godot 4: tick synchronisation, a bit-packed wire format,
-declarative state replication, snapshot interpolation, client-side prediction with
-server reconciliation, lag-compensated rewind, and pluggable interest management.
+Multiplayer netcode for Godot 4: tick synchronisation, a bit-packed wire format, declarative state replication, snapshot interpolation, client-side prediction with server reconciliation, lag-compensated rewind, and pluggable interest management.
 
-**The distributable is `addons/dot_net/`.** It requires [dot-core](../dot-core).
-It does not depend on dot-server — a game can use dot-net over Godot's raw
-multiplayer, over dot-core's transports, or over anything else that moves bytes.
+**The distributable is `addons/dot_net/`.** It requires [dot-core](../dot-core) and does not depend on dot-server: a game can use dot-net over Godot's raw multiplayer, over dot-core's transports, or over anything else that moves bytes. It owns no socket and no client-to-server channel.
 
 ```bash
 ln -s ../../dot-core/addons/dot_core addons/dot_core
 ```
 
-## Three timelines, not one
+Read the family [CLAUDE.md](../../CLAUDE.md) first; this file is only what is specific to dot-net. The reasoning is in [docs/](docs/README.md).
 
-The thing most often got wrong, and the reason `DotNetClock` is the first file to
-read. At any instant a client is dealing with three tick numbers:
+## Read before
 
-```
-  render tick        server tick        input tick
-  (behind)           (estimated)        (ahead)
-  ────────────────────────●────────────────────────>
-       ↑ interpolate           ↑ predict
-```
+| Read | Before |
+| --- | --- |
+| [docs/README.md](docs/README.md) | the index |
+| [docs/timelines.md](docs/timelines.md) | `DotNetClock`, the interpolator, anything about when something is drawn or which tick a command is for |
+| [docs/prediction.md](docs/prediction.md) | `_net_simulate`, `DotNetPredictor`, `DotNetInput`, reconciliation, lag compensation |
+| [docs/replication.md](docs/replication.md) | `DotNetVar`, `DotNetBehaviour`, acked baselines, interest, the budget, snapshot cost |
+| [docs/wire.md](docs/wire.md) | the bit format, message ids, framing, the schema exchange, changing a message, unreliable delivery |
+| [docs/security.md](docs/security.md) | anything a client sends, spawns, message direction, the reader |
+| [docs/testing.md](docs/testing.md) | the three suites, the UDP relay, adding a check |
+| [docs/history.md](docs/history.md) | a netcode bug that "cannot be happening"; the numbered bug list the code comments cite |
 
-- **Input runs ahead.** A command for tick N must be in the server's hands *before*
-  it simulates N. Running level with the server means every command arrives late.
-- **Render runs behind.** Interpolating needs both bracketing snapshots to have
-  arrived.
-- **Server tick is estimated**, never known.
+## Layout
 
-Drift is corrected by **scaling tick duration**, not by jumping the tick number — snapping teleports every predicted object and re-runs applied inputs. Past `SNAP_THRESHOLD_SECONDS` it does snap, because a suspended tab is not drift. That threshold is a **duration**, and it was a tick count: 60 ticks is one second only at the default rate, so a 128-tick server snapped at 0.47 s and threw a predicted state away for every half-second hitch — which is what a player calls jumpy.
+| Path | What |
+| --- | --- |
+| `addons/dot_net/dot_net_manager.gd` | tick loop, snapshot send/receive, message routing |
+| `addons/dot_net/core/` | `DotNetClock` (three timelines: read it first), `DotNetConfig` (all tuning; `describe_budget()`) |
+| `addons/dot_net/wire/` | writer (bit packing, quantisation), reader (the untrusted side), messages, the registry (derived ids, framing, schema exchange), packets (batching, fragmentation) |
+| `addons/dot_net/replication/` | `DotNetVar`, `DotNetIdentity`, `DotNetBehaviour` (what a game subclasses most), registry (ids never reused), spawner (prefab allow-list, factories) |
+| `addons/dot_net/snapshot/` | `DotNetSnapshot`, `DotNetInterpolator` |
+| `addons/dot_net/prediction/` | `DotNetInput` and its buffer, `DotNetPredictor` |
+| `addons/dot_net/lagcomp/` | `DotNetHistory`: rewind the world to what the shooter saw |
+| `addons/dot_net/interest/` | base, all, distance, grid |
+| `addons/dot_net/bandwidth/`, `stats/` | per-peer budget with a starvation-bounded accumulator; `DotNetStats` |
+| `addons/dot_net/testing/dot_net_udp_relay.gd` | a lossy UDP relay for tests. No `class_name`: preload by path |
+| `examples/` | `netcode_demo`, `diagnostics_demo`, `relay_demo` |
 
-**Behind is not drift, and smoothing it was the worst bug a browser player ever hit here.** A client behind its target stamps every command for a tick the server has already simulated, and the server discards each one as late. The engine drops every physics step past eight in a frame, so every stall — a scene loading, a shader compiling on first draw, both of which a browser does for seconds on its first connect and never on a reconnect — put the clock behind by the stall's length, and `MAX_DRIFT_RATE` closed that at 3 ticks a second at 60 and 6.4 at 128: a half-second hitch was ten seconds of a player who could not steer, in every game in the family, until it "fixed itself". So the correction is asymmetric now: behind by more than the input margin (`catch_up_threshold_ticks()`) jumps forward at once — the ticks jumped over are never sent and the server repeats the last command for them, as for a lost packet — and only a client AHEAD of its target is smoothed. Found 2026-10-03 from three screen recordings and a cold browser profile against the live smash server.
+## Running and testing
 
-**And the server's clock follows `server_tick(tick)`.** A game-driven server (`auto_tick = false`, every game here) never advanced it, so `clock.tick` read 0 for the server's whole life and every game's HELLO told a joiner to sync to tick 0.
+- The family's two steps ([game-dev/CLAUDE.md](../../CLAUDE.md#validating-anything)), then all three scenes: `netcode_demo.tscn` (everything, including a two-manager integration run under loss), `diagnostics_demo.tscn` (`DotNetStats`, `DotNetSnapshot`), `relay_demo.tscn` (the relay and a real ENet pair). [testing](docs/testing.md)
+- **A dot-net change is not done until the games' `headless_net` suites agree**, and game-arena's `headless_lossy` for anything about loss or timing: most bugs here were found there, by a second peer, a real socket or a real round trip that this repo's suites lacked.
+- The integration test runs both managers in one process, which is why there are no autoloads and why `DotNetManager.service_scope` exists.
 
-## The extension points
+## Extension points
 
-This is the part to preserve. A game should never need to fork dot-net.
+A game should never need to fork dot-net. Family rules: [extension-points.md](../../docs/extension-points.md).
 
 | To change | Subclass / assign | Notes |
 | --- | --- | --- |
-| What replicates, and how precisely | `DotNetVar` declarations in `_register_net_vars()` | `Type.CUSTOM` + `.codec(w, r)` replicates *anything* |
-| Simulation | `DotNetBehaviour._net_simulate` | Must be deterministic — see below |
+| What replicates, and how precisely | `DotNetVar` declarations in `_register_net_vars()` | `Type.CUSTOM` + `.codec(w, r)` replicates anything |
+| Simulation | `DotNetBehaviour._net_simulate` | Must be deterministic |
 | Player controls | `DotNetInput` subclass | `_sanitise()` is not optional |
 | Message types | `DotNetMessageRegistry.register` | Id derived from the name; `required = false` for a type a peer may lack |
-| Who sees what | `DotNetInterest` subclass | The biggest lever on bandwidth *and* the only real anti-cheat |
+| Who sees what | `DotNetInterest` subclass | The biggest lever on bandwidth and the only real anti-cheat |
 | How entities are made | `DotNetSpawner.register_factory` | For pooling or procedural entities |
 | Where bytes go | `DotNetManager.send_fn` | Transport-agnostic by construction |
 | Reading a computed property | `_net_read_property` / `_net_write_property` | Replicate something you do not store |
 | Extra rewind state | `_net_record_history()` on a behaviour | Crouch flags, animation frames |
+| Drawing interpolated state | `_net_interpolated(render_tick)` | Not `_net_state_applied`, which fires per snapshot |
 
-`DotNetInterest` is worth calling out. `_is_relevant` is the whole interface for most
-strategies; `_candidates` exists for spatial indexes that can answer in bulk;
-`_score` feeds prioritisation when the budget bites. `examples/netcode_demo.gd`
-defines `TagInterest` in a dozen lines to prove the claim.
+`DotNetInterest`: `_is_relevant` is the whole interface for most strategies; `_candidates` is for spatial indexes that answer in bulk; `_score` feeds prioritisation. `netcode_demo`'s `TagInterest` is a dozen lines.
 
-## Determinism is a requirement, not an aspiration
+## Rules that bite
 
-`_net_simulate` runs on the server **and** on the owning client, for the same tick,
-and reconciliation only converges if both get the same answer. Anything that differs
-between machines breaks it:
+Short forms; the reasoning is in the linked file.
 
-- wall-clock time, or `randf()` without a shared seeded stream;
-- another player's *unpredicted* state;
-- a physics query against geometry only one side has loaded;
-- iteration over an unordered collection whose order differs.
+**Time**
 
-`DotNetPredictor.correction_rate()` is the number that tells you. Near zero means
-the two agree. Consistently high means the simulation is not deterministic, and no
-amount of smoothing will fix that — it will just hide it badly.
+- Input runs ahead of the server, render behind it, and the server tick is only estimated. [timelines](docs/timelines.md#three-timelines-not-one)
+- A client AHEAD is smoothed by scaling tick duration; a client BEHIND by more than the input margin jumps forward at once. Never smooth "behind". [timelines](docs/timelines.md#drift-and-catch-up)
+- `SNAP_THRESHOLD_SECONDS` is a duration, never a tick count. [timelines](docs/timelines.md#drift-and-catch-up)
+- A game-driven server (`auto_tick = false`) must call `server_tick(tick)` or its clock reads 0 forever. [timelines](docs/timelines.md#drift-and-catch-up)
+- The interpolation buffer is in SNAPSHOTS; `delay_ticks()` is the one conversion, and the render time is `received_tick()` minus it, never `server_tick()` minus it. [timelines](docs/timelines.md#the-render-time)
+- The receive timeline follows the quickest arrivals and goes back only after `SETTLE_SAMPLES` all behind. [timelines](docs/timelines.md#the-receive-timeline)
+- Copy interpolated state from `_net_interpolated`; it carries none of `_net_state_applied`'s bookkeeping and never fires for a predicted entity. [timelines](docs/timelines.md#_net_interpolated)
 
-## Security decisions worth not undoing
+**Prediction**
 
-- **Clients send inputs, never state.** A client that sent positions could send any
-  position.
-- **`DotNetInput._sanitise()` runs on the server after decode.** Quantisation bounds
-  each field; it cannot bound the relationship between them. A move vector of length
-  40 is representable and would make a player 40× faster.
-- **`DotNetMessage.Direction` is enforced on receipt.** Without it any client can send
-  the server a spawn or a "you have been kicked". Checked against the *transport's*
-  view of the sender, never a peer id inside the payload.
-- **Spawns name a prefab id, never a scene path.** A path would let a peer ask others
-  to load any scene in the build.
-- **Net ids are never reused.** A reused id means a snapshot in flight for a dead
-  entity is applied to a live one.
-- **`DotNetReader` is the untrusted side.** Reads past the end return zero and set a
-  sticky `exhausted`; length prefixes are bounded *before* allocating — a varint of
-  4 billion must not cause an allocation attempt.
-- **`DotNetVar.Audience.OWNER`** keeps ammo and cooldowns off the wire to opponents.
-- **Interest management is the anti-cheat that works.** Data never sent cannot be
-  drawn on a wallhack.
-- **Rewind is bounded** by `max_rewind_sec`; an excessive claim is clamped, not
-  honoured.
+- `_net_simulate` must be deterministic across machines: no wall clock, no unseeded random, no unpredicted state of another player, no physics query against geometry one side lacks, no unordered iteration. `correction_rate()` tells you. [prediction](docs/prediction.md#determinism-is-a-requirement-not-an-aspiration)
+- A replay applies each tick's input and then simulates, exactly as `server_tick` does; a hole between two inputs replays on the older one; nothing past the newest input is replayed. [prediction](docs/prediction.md#reconciliation)
+- A predicted entity rewinds to `authoritative_values()` (absent means unchanged), a remote one is interpolated from `received_values()`. Never feed either from the properties, which hold the client's own prediction or blend. [prediction](docs/prediction.md#what-the-server-said)
+- Send the last few inputs in each packet (`write_batch` / `read_batch`, `Buffer.recent`). [prediction](docs/prediction.md#input-batches)
+- Rewind is bounded by `max_rewind_sec` (1 s); a larger claim is clamped. [security](docs/security.md)
 
-## Bugs the demo caught (and what they mean for you)
+**Replication**
 
-Every one of these passed the parse check. Run `examples/netcode_demo.tscn`.
+- Dirty tracking is per peer (`PeerView`: acked, pending, believed); a lost snapshot's properties go dirty again. [replication](docs/replication.md#acked-baselines)
+- Acks are optional and carried by the host (`encode_ack` in the input packet). A client acks only a fully-applied snapshot. [replication](docs/replication.md#acked-baselines)
+- The owner's predicted entity, and any property lost once, stay owed until confirmed. [replication](docs/replication.md#owed-until-confirmed)
+- The interest cache is pinned with what the peer owns and everything `always_relevant`, as a new dictionary. [replication](docs/replication.md#the-interest-cache-is-a-cache-of-one-instant)
+- A property set with anything byte-aligned (`may_align`) is encoded per bit offset, never shifted. [replication](docs/replication.md#what-a-snapshot-costs)
+- Snapshots read each property once, inside `begin_snapshot_reads` / `end_snapshot_reads`. [replication](docs/replication.md#what-a-snapshot-costs)
+- Net ids are never reused; a freed identity is dropped from every table without being typed. [replication](docs/replication.md#identities)
+- `local_peer_id` forwards to the registry through a setter: never keep a second copy of it. [replication](docs/replication.md#identities)
 
-1. **`DotNodeRef.of_created(&"X", Node)` produced a garbage class name.** `str()` on a
-   `GDScriptNativeClass` yields `<GDScriptNativeClass#-92233…>`, so the ref resolved to
-   nothing. This was a **dot-core** bug that also silently broke dot-server's game
-   root — `DotGameManager` could not load a scene. Fixed in `_class_name_of`.
-2. **`HashingContext.update()` errors on empty input.** An empty message schema hashed
-   to an engine error. Fixed in `DotHash.sha256_bytes`.
-3. **Reader exhaustion was not sticky**, so a decoder ignoring `ok()` got a plausible
-   value for the field *after* the overrun.
-4. **History was sized from `snapshot_rate`** while the caller recorded per tick, so
-   rewinds silently landed on the buffer boundary. Now sized from `tick_rate` —
-   over-allocating costs memory, under-allocating costs hit registration.
-5. **The priority accumulator starved a 100×-lower-priority entity for 100 ticks.**
-   Eventually-sent is not good enough at 20 Hz. Added a superlinear starvation boost.
-6. **A suspending test section was called without `await`, and nothing said so.**
-   `_test_interpolation()` suspends on `get_tree().process_frame`. Called without
-   `await`, it ran to that suspension and stopped; `_run()` carried on to
-   `quit()`. Its last assertion — "adaptive buffer responds" — therefore never ran
-   once, and the count printed at the end could not reveal it, because that count
-   is of checks that *ran*. The suspended coroutine's locals were also exactly the
-   seven objects Godot reported leaked at exit, which three audits had chased as a
-   reference cycle in `DotNetInterpolator`. There is no cycle. **A test count is
-   not coverage.** `_run()` now compares suspending sections entered against
-   sections completed, so a dropped section is a failed check.
+**The wire**
 
-7. **Reconciliation replayed without the inputs.** `DotNetPredictor.reconcile`
-   looked up each unacked tick's input and then never applied it, so the whole
-   replay ran on whatever input the behaviour was still holding — the newest one.
-   `DotNetManager.server_tick` applies the input and *then* simulates; the replay
-   has to do the same or the two do not agree, which is the one property this
-   class exists to provide. It was invisible because it only shows up when the
-   input changes inside the unacked window, and the integration run fed a constant
-   input for all sixty ticks: replaying with the wrong input gave the right answer.
-   `_test_prediction` zig-zags the input instead, and reverting the fix leaves the
-   client **1.18 m** from the server after ten replayed ticks — a correction of
-   that size, arriving with every snapshot, is exactly the rubber-banding
-   `correction_rate()` is meant to warn about.
+- Bits are LSB-first; positions clamp, angles wrap. Changing either is a protocol break. [wire](docs/wire.md#format)
+- Message ids are derived from the name. **Append fields, never reorder, retype, re-width or remove one**; read a late-added field only `if reader.has_more()`. Anything else is a new type with a new name. [wire](docs/wire.md#changing-a-message)
+- A required type the peer lacks raises `peer_schema_refused`; **the host must drop the peer** (dot-net owns no socket). [wire](docs/wire.md#the-schema-exchange)
+- Godot's ENet sends UNRELIABLE as unsequenced: nothing sent unreliable may assume order. [wire](docs/wire.md#unreliable-means-unordered)
+- Clients send inputs, never state; `_sanitise()` runs on the server after decode; message direction is checked against the transport's sender. [security](docs/security.md)
 
-8. **Respawning a pooled entity put it in the wrong parent and said it worked.**
-   `DotNetSpawner._instantiate` called `_container.add_child(node)`
-   unconditionally. A factory handing back a pooled instance — which is the
-   documented reason `register_factory` and `free_on_despawn` exist — passes a
-   node that already has a parent, and a real pool keeps its idle instances
-   under its own node rather than in the live container. `add_child` does not
-   fail that call: it pushes an engine error and returns, so the entity is
-   registered, live, and still under the pool, with `_apply_transform`
-   subsequently setting a global transform through the wrong parent. The
-   returned `DotResult` is `ok`. It now moves the node if it needs moving and
-   leaves it alone if it is already in the container.
+**GDScript**
 
-   **The first version of the test could not have caught it.** It pooled the node
-   without re-parenting it, so the reused node was already in the container and
-   every assertion after the engine error still passed — the same shape as #7,
-   found the same way, in a test written the same afternoon. A pool that parks
-   its nodes in the live container is not a pool.
+- `var x := something_returning_Variant()` is a parse error here: write `var x: Variant = ...`. [testing](docs/testing.md#gdscript-traps)
+- A suspending test section called without `await` silently stops; suites count sections entered against completed. [testing](docs/testing.md)
 
-9. **A prefab declared in the inspector failed silently.** `_ready()` called
-   `register_prefab` for each entry of the exported `prefabs` dictionary and
-   discarded the result, so the contract that a prefab with no `DotNetIdentity`
-   is a *startup* error held only for games registering in code. From the
-   inspector the id was simply absent and surfaced much later, on the first
-   spawn, as "unknown prefab". Both failure modes now log an error naming the id.
-   **The lesson is about the test, not the code: a constant input is not an
-   input.**
+## Known gaps
 
-10. **The three diagnostics were each wrong in a way that pointed elsewhere.**
-    Found by writing `diagnostics_demo`, which is the first thing to name
-    `DotNetStats` or `DotNetSnapshot` — `netcode_demo` drives both, but only
-    along the healthy path, so every branch describing an *unhealthy* one was
-    reached by nothing.
-
-    `loss_rate()` divided snapshot losses by `packets_received`, which counts
-    packets of every kind. A client sends inputs every tick and receives
-    snapshots more slowly, so its reported loss fell as unrelated traffic rose;
-    a server, which receives no snapshots at all, reported 0.0 no matter what
-    it had recorded. It now divides by `snapshots_received`.
-
-    `note_snapshot` counted a reordered packet twice over: once as lost when
-    the gap it left was measured, and again as out-of-order when it arrived. A
-    path that reorders therefore reported steady loss while losing nothing —
-    a diagnosis pointing at the wrong subsystem, which is the one thing this
-    class must not do. A tick older than the newest now un-counts the loss it
-    was blamed for; a repeat of the newest is a duplicate and does not.
-
-    The rolling rates were only ever closed from `note_sent`/`note_received`,
-    so a connection that went quiet kept reporting the throughput it had when
-    it stopped — stale at exactly the moment someone reads it to find out why.
-    `DotNetManager._physics_process` now calls `stats.roll()` every frame,
-    before `step()` and regardless of traffic.
-
-12. **Dirty tracking was one dictionary shared by every peer.** Snapshots are built
-    one peer at a time, and `write_state` marked a property clean on the behaviour
-    itself — so the first peer served received the change and **every other peer
-    received nothing**. A two-client game replicated to one of them; a third client
-    coming into range of an entity saw only whatever changed after it arrived; and
-    a `max_rate` limit set for one peer silenced the property for all of them.
-
-    It survived because **the integration run has exactly one peer**, which is the
-    only shape in which the shared dictionary and a per-peer one behave the same.
-    Same lesson as #7 and #8, and the same lesson the family CLAUDE.md draws from
-    dot-server: *a code path only one deployment shape reaches is a code path
-    nothing has run.* `_test_acked_baselines` uses two peers for this reason.
-
-13. **A lost snapshot stranded every property it carried, permanently.** Snapshots
-    are unreliable and carry only what changed, and the baseline was updated at
-    send time — so a property written into a dropped packet was never sent again
-    until it happened to change. Invisible for a position that moves every tick,
-    which is all the integration run replicates; indefinite divergence for health,
-    a team, a weapon or a name. Fixed by the acked baselines above.
-
-14. **`DotNetSnapshot.net_ids()` returned insertion order.** It is the public
-    way to iterate a snapshot's entities, and "iteration over an unordered
-    collection whose order differs" is on the determinism list above. Two peers
-    that inserted the same ids in a different order walked them in a different
-    order. Sorted now.
-
-15. **`DotNetHistory.record` read `global_basis` off entities that were not in the tree.** `DotNetIdentity.world_position` already answered ZERO for one, with the reason written down — a game may take a replicated node out between ticks, and a round re-laying its map does it from inside the manager's own loop — and the history's rotation read, one line away, did not. mg-smash-copter's dedicated server printed ten `Condition "!is_inside_tree()"` backtraces every round, one per deck of the boot field, on a green run. The history now skips an entity that is not in the world when it records, rewinds and restores: a sample at the origin would be worse than none, since a rewind to that tick would drag a hitbox through the middle of the map. The demo counts engine errors with a `Logger` to assert zero, which is the only way a suite can see a line that goes to stderr and changes no exit code.
-
-16. **A peer id set after `setup()` never reached the registry.** The registry takes its own copy of `local_peer_id` when it is built and decides `is_owner` — so `is_predicted` — from it at registration. A client that learns its id from its hello, after setup, so over a real socket it registered its own occupant as somebody else's and predicted nothing at all; its loopback suite, which sets the id first, asserted the opposite and passed. `local_peer_id` has a setter that forwards it now. **Two copies of one value is the bug the second copy was guarding against.**
-
-17. **A predicted entity the server held still walked away from it.** A client predicting a move the server refused — a server-only freeze, a wall only the server has, any rule the client does not know — was never pulled back: 113 units in game-hungario's `headless_net` naive control, 530 in the lobby's, and growing. This was written down first as "a snapshot carries an entity only when something changed, and reconcile returns early for one it did not carry", and **that was the wrong mechanism**: the entity *is* in every snapshot it is relevant for, with an empty body, and reconcile ran for every one of them (40 of 40 in the demo). What went wrong was what it was handed. `receive_snapshot` filled the reconcile values from `snapshot_values()`, which reads the properties — and on the owning client those hold its own prediction, because every game's `_net_simulate` copies each predicted tick into them. So "the server has nothing new to say" became "the server agrees with you", and the replay then ran the lead a second time on top of it: the client did not merely stay away, it walked at twice its speed (38 m where 20 m was legitimate, in the demo). Every game rewinds inside `_net_state_applied` by copying those same properties into its simulation, so fixing only the values `reconcile` was handed would have reached none of them.
-
-    **What was done.** `read_state(reader, tick, rewind = true)` on a predicted entity puts every property the snapshot left out back to what the server last sent, *before* `_net_state_applied`, and `DotNetBehaviour.authoritative_values()` — the receive-side baseline overlaid with this snapshot — is what goes to `reconcile`. The protocol already said an absent property means unchanged; the client simply had not believed it. A property with a `max_rate` is the one exception and is left alone unless it arrived: its absence means the limit was hit, not that it stood still.
-
-    **And the send side had to make "absent means unchanged" true under loss.** A property is not re-sent while its first send is in flight (dirty tracking compares against `believed`), so a lost packet left the client's baseline stale until its acknowledgement of a *later* snapshot reached the server — and the rewind would then pull a player who had just stopped back to where they were before the lost packet, every snapshot for a round trip. So for the entity a peer owns and predicts (`owner_peer_id == peer` and `Authority.SHARED`), and only that one, `collect_dirty(..., until_acked = true)` keeps a property owed until the peer has *confirmed* its current value. A property that changes every snapshot costs nothing extra, since it is sent anyway; one that changes once is re-sent for a round trip's worth of snapshots, for one entity per peer. An entity held still costs its 10-byte header and nothing else, which the demo asserts. Without acks wired, `acked` fills as sends age out of `ack_window_snapshots`, so the same rule is a bounded blind re-send — the only recovery such a host has.
-
-    **Why not the alternatives.** (a) *Always send the owner's entity in full*: exact, but it pays a stationary player's full state every snapshot to fix something the protocol already expresses, and it would still have needed the client fix — the bug was never that the entity was missing. (b) *An explicit "unchanged since baseline" marker*: that marker already exists — it is the entity's presence with an empty body — so a new bit on the wire would say again what the client was failing to read. "Include it whenever the acked input tick advanced" is (a) with a condition and the same flaw.
-
-    `_test_standing_still` holds an entity still on the server while the client predicts it walking, with acks wired: clean, and lossy with the snapshot carrying the stop the one that is lost. Arming it: reverting the client half gives 38 m and 16 m; turning `until_acked` off gives one rewind to a stale position in thirty. The two games' naive freeze controls now assert the rubber band *and* that the floor the client is pulled back to does not climb (game-hungario 1.88 → 1.88, the lobby 39.24 → 39.24; unfixed, 35.72 → 73.32 and 108.56 → 411.89).
-
-18. **The interpolation buffer was in snapshots and was subtracted from ticks.** `DotNetConfig.interpolation_buffer` says "snapshots of delay", `_adapt` computes it in snapshot intervals, `delay_ms()` multiplied it by one — and `sample()` did `server_tick - _delay_ticks`, unconverted. At the default 60/20 a two-snapshot buffer was two ticks, a third of what was asked; at 128/20 it was under a sixth, **less than one snapshot interval**, so the render time sat past the newest snapshot on most frames and every remote entity in the family was extrapolated instead of interpolated. game-playground measured 1,684 extrapolated frames in six seconds. Nothing failed anywhere, because extrapolation is bounded and exact for anything moving in a straight line, and because the only checks were `sample()` at hand-picked ticks written in the same unit — the demo's own comment said *"2 snapshots at 20 Hz = 2 ticks of delay in this unit"*, and its check passed either way.
-
-    **What was done.** The field is `_delay_snapshots`, and `delay_ticks()` — `_delay_snapshots * ticks_per_snapshot()` — is the one conversion and the only thing `sample()` subtracts. The conversion lives in the interpolator rather than in `interpolate_frame`, because `sample()` and `apply()` are public and take a tick; converting in the manager would have left every direct caller in the old unit. It uses `ticks_per_snapshot()` (the integer the manager actually sends on — 6 at 128/20, not 6.4) rather than `tick_rate / snapshot_rate`, so "two snapshots" means two of the snapshots that arrive; `delay_ms()`, `_adapt`'s interval and `DotNetConfig.interpolation_delay()` use the same one. `delay_snapshots()` is the old number under an honest name, and `delay_ticks()` is what `DotNetHistory.client_view_tick` wants.
-
-    **And the diagnostic is something a suite can assert on now.** `sample_count()`, `stall_count()` and `extrapolation_count()` (with `reset_counts()` for a window) were two numbers visible only in `describe()`. `_test_render_delay` drives a 128-tick server sending 20 snapshots to a client through `interpolate_frame` at four fractions a tick, clean and with one snapshot in five lost, and asserts none extrapolated and every frame drawn `delay_ticks()` behind on the entity's own line. Armed — `delay_ticks()` returning the snapshot count — it reports 930 of 1,492 frames extrapolated clean and 1,077 of 1,536 lossy.
-
-19. **The interpolator was fed its own output back as the server's word.** For a remote entity, `receive_snapshot` built the sample it pushes from `_net_read_property` on every interpolated property — and between snapshots those properties hold what `DotNetInterpolator.apply` last wrote into them, which is a blend. So for every property a snapshot did not carry, the interpolator was handed its own half-way value as a new authoritative sample, and anything interpolated that changed once and then stood still **froze part of the way there**: a remote player who turned to face 90 degrees was drawn at 82.5 for ever, and one who stopped was drawn a quarter of a metre short of where they stopped. The same shape as #17, on the other path. It could not be seen until #18 was fixed, because a render time past the newest snapshot answers with the newest values, never a blend — it was found by game-playground's and mg-buses-from-hell's `headless_net` facing checks failing the first time the delay was right. `DotNetBehaviour.received_values()` — the receive-side baseline, every property as the server last sent it — is what goes to the interpolator now. `_test_render_delay`'s last check stops the entity and asserts the client draws it where the server left it; armed, 0.264 m short.
-
-20. **Not fixed, and nothing reaches it today: a predicted property with a `max_rate` that stops changing is never rewound.** `authoritative_values()` leaves out a rate-limited property the snapshot did not carry, because its absence may mean the rate limit held it back rather than that it stood still — and the receiving side cannot tell the two apart. So a predicted `max_rate` property the server holds still is #17's walk-away for that one class of property. No game in the family sets `max_rate` on a predicted property. The fix, when one does, is on the send side: mark a property skipped for rate so the receiver can treat an unmarked absence as "unchanged since the acked baseline". Found by review, 2026-09-24.
-
-21. **`unregister` typed a freed identity, one script error per entity.** The registry holds identities it does not own, and a game change frees the old world's scene before the module that registered them stops its manager, so `clear()` assigned freed objects to a `DotNetIdentity` local: 171 "Trying to assign invalid previously freed instance" on one `changelevel` away from mg-buses-from-hell (dot-game's `_teardown` -> `stop` -> `clear`), on a run that passed. A freed entry is now taken out of every table with nothing to notify. Found 2026-10-08 when dot-server-deploy's multigame stopped booting the scratched lobby, which was not a dot-game module, and booted buses instead. `[freed entity]` in `netcode_demo`; armed, two of its four checks fail and the rest abort.
-
-22. **`DotNetStats` counted a gap in ticks as that many lost snapshots.** Right only for a server that sends a snapshot every tick, which nothing in the family does: at arena's 64 ticks and 32 snapshots a clean link reported half its snapshots lost, and through a real UDP relay `loss_rate()` read 0.55 against 0.04 injected and 0.60 against 0.21. `snapshot_interval_ticks` (set by the manager from `config.ticks_per_snapshot()` before every snapshot) makes a gap a number of periods. `diagnostics_demo`'s *a gap of one period is no loss* (3 checks), armed.
-
-23. **The render timeline went backwards on every late packet.** `sync_from_server` set the estimate to `sample + one_way` on every snapshot, so on a link whose packets take 30..80 ms the timeline moved back with each slow one and forward with the next: through a real relay, 35-48 times backwards in ten seconds by up to 3-4 ticks, a remote player drawn half a metre back and then forward with every position it was asked for correct. Nothing that compared positions could see it, because the truth moves back with the time it is sampled at. The receive timeline now moves forward at once to a sample ahead of it, ignores one behind it, and goes back one tick only after a whole `SETTLE_SAMPLES` (16) of samples all behind it. `netcode_demo`'s render-timeline checks (4, including a seeded jittery link: 51 times back by up to 2 ticks before, 0 now); game-arena's `headless_lossy` *the render timeline goes back at most twice* (38 and 48 times before). Armed both places. A side effect worth knowing: following the quickest packets puts the input lead about half the jitter higher, which is what stopped the late commands the same link produced (25-39 of 640 before).
-
-24. **The interpolation delay was counted back from the server's tick, so the flight time came out of it.** `interpolate_frame` sampled at `server_tick() - delay`, and `server_tick()` is the newest snapshot plus `one_way_ticks()`: on a 120 ms round trip four of a two-snapshot buffer's ticks were spent waiting for a snapshot still in the air, and 93-100% of frames were drawn past the newest snapshot and extrapolated (`headless_lossy`, armed; 0-14% now). It never showed on a loopback, where the flight time is zero. It now samples at `received_tick()`, which is also what `DotNetHistory.client_view_tick` (`current - one_way - delay`) always assumed the client was drawing. `netcode_demo`'s render delay has a third leg on a 120 ms round trip (4 checks; armed, 945 of 1,536 frames extrapolated and 0.78 m off the line).
-
-25. **Nothing resent an input.** `DotNetInput.Buffer.push` counted duplicates with the comment "clients resend recent inputs so a dropped packet does not cost a tick", and no client in the family did, so every lost input packet was a tick the server ran on the previous command. `DotNetInput.write_batch` / `read_batch` put the last few inputs in one packet (count, the first tick in full, each later one as a varint step; 9 bytes for one arena command, 19 for three), `Buffer.recent(count, upto_tick)` gives a client its copies from the replay history, and `Buffer.last_consumed_tick()` lets a server skip the copies it has simulated rather than count each as late. Wiring it is each game's bridge: game-arena sends three (80% of ticks with the right command at 20% loss before, 99-100% after); the other ten bridges still send one. `netcode_demo`'s *input batches* (7 checks).
-
-26. **A replay stopped at a hole the clock's catch-up had made.** When `DotNetClock` falls behind by more than the input margin it jumps forward, and the ticks it jumps over get no command: the server runs them on the player's previous one, as it runs any tick whose command never came. `DotNetPredictor.reconcile` read the missing input as "the history is too short for this latency" and stopped replaying, so the prediction was a catch-up's worth of ticks of a running player short of the server until the next correction -- 2.0 m in game-arena's `headless_lossy` at 20% loss, one run in twenty. A tick with no input but inputs on both sides of it (`Buffer.latest_before`, `Buffer.since`) is replayed on the older one now. **Both sides, and the first version was wrong without it:** past the newest input are ticks the client has not played yet -- a lockstep host reconciles before it records the tick -- and replaying those predicted them twice (game-arena's `headless_net` push check, 0.2 m to 1.5 m; g2gfast, playground and wipeout failed the same way). `netcode_demo`'s *a replay across a hole* (armed: 0.90 m apart, 3 of 10 ticks replayed) and *a replay stops at the newest input* (2 of 4).
-
-## Real loss, through a relay (2026-10-09, `dual-stack-follow-1`)
-
-`addons/dot_net/testing/dot_net_udp_relay.gd` is a UDP proxy for tests: listen on a port, forward every client it hears to a target, and drop, delay (`delay_ms` +- `jitter_ms`, so a spread wider than the gap between packets reorders them as a real path does), hold back (`reorder`, `reorder_ms`) and duplicate each datagram, each direction on its own seeded generator. It runs on its own thread so a hitch in the game being measured is not a burst in the network measuring it (`threaded = false` and `poll()` to step it by hand). No `class_name`: it ships inside the addon so a game linking `dot_net` can preload it by path, and a test tool should not reserve a global name in every project. The kernel's queueing discipline would do the same and needs root; ENet's own simulated loss is an engine compile flag.
-
-`examples/relay_demo.tscn` (28 checks) shows it injects what it says, measured at the far end: 80.0% of 1,000 datagrams through 20% loss, 39 duplicates at 5%, delays inside the window, the relay's counts equal to what arrived, the same seed losing the same datagrams; and a real ENet pair through 20% loss each way and 30..80 ms, where every reliable packet arrives exactly once and in order and the unreliable ones arrive about 80% of the time **and out of order: Godot's ENet sends `TRANSFER_MODE_UNRELIABLE` UNSEQUENCED** (186 of 242 behind a newer one). Nothing sent unreliable may assume order. Audited 2026-10-09: snapshots (superseded by tick in `receive_snapshot`), inputs (the buffer is sorted by tick), voice (dot-voice's jitter buffer orders by sequence) and dot-server's heartbeat and ping (a timestamp echoed, a value) are all order-free; dot-server's `SCOREBOARD` was the exception -- the client kept whatever payload arrived last, so a reordered one showed the previous scoreboard -- and carries a `seq` since 2026-10-09 that the client checks.
-
-game-arena's `headless_lossy` is where it is used on a real game, and its CLAUDE.md has the numbers. What it found in this addon is #22-#25 above. What it found and is NOT fixed here:
-
-- **The clock's jitter is always about zero on ENet.** Its jitter is the spread of the round-trip samples it is fed, a game feeds one per snapshot, and the number it feeds (ENet's smoothed round trip, or a two-second heartbeat) barely moves, so `adaptive_margin` never widens the margin. #23's arrival filter covers jitter in practice (no late commands at 30..80 ms), at the price of an input lead 2-4 ticks over what the transit needs. The real fix is for the server to say how early each peer's commands arrive, which is a snapshot wire change.
-- **The adaptive interpolation buffer is sized for jitter, not for loss.** At 20% loss 12-14% of frames still extrapolate (bounded by `max_extrapolation_sec`; drawn within 1-2 cm of the truth at the 95th percentile, worst jump 0.03-0.3 m on a player running a circle).
-
-## What a snapshot costs per peer, and the three things it was doing N times (2026-10-07)
-
-Nothing in the family had measured a server with more than two players until game-g2gfast's `tools/load_probe` put 32 on one: a snapshot tick cost 71 ms, against a 7.8 ms tick at 128, and 95% of it was `_send_to_peer`'s per-entity bookkeeping, done once per entity **per peer**. Three of those were the same work repeated, and are done once now; none changes a byte on the wire:
-
-- **`_rebuild_believed` ran on every resolved entry**, copying every property of every entity for every peer on every acknowledgement (and on every aged-out entry). Promotion cannot change `believed` -- it is `acked` with pending laid over it in tick order, and the resolved entries are the oldest -- so `sync_peer_acks` and `trim_pending` rebuild only when an entry was DROPPED unconfirmed (strict), which is the loss-recovery case and still recovers.
-- **Each property was read 2N times a snapshot** through a dynamic `get`, to decide whether it was dirty and then to write it, once per peer. The manager opens `begin_snapshot_reads()` on every behaviour before its peer loop and `end_snapshot_reads()` after; inside, `_read_for_send` reads each property once. Outside a snapshot it reads live, so nothing else sees a stale value.
-- **`estimated_bits(peer)` walked the declarations per peer**; its answer depends only on whether the peer is the owner, so it is two cached numbers.
-
-32 players: snapshots 17.7 -> 12.1 ms a tick. What is left is genuinely per peer as written -- `collect_dirty`, `write_state`'s bit packing, the pending record -- and the next step is structural: encode an entity once per snapshot and share the bytes between peers whose dirty set is the same, which for a moving player is every peer but its owner. `netcode_demo` 264 / 0 (acked baselines and loss recovery included); game-g2gfast `headless_net` (one-in-five loss) 172 / 0.
-
-## The render timeline has to move between packets
-
-`DotNetClock.server_tick()` is what `render_tick()` is derived from, and therefore what
-every interpolated position is sampled at. It used to be *only* set — by
-`sync_from_server`, when a snapshot arrived — and never advanced.
-
-So the rendered tick was a step function of arrivals: the interpolator produced a new
-value on the frames a packet happened to land on and the same value on every frame in
-between. At 20 Hz snapshots and 144 Hz rendering, six frames in seven drew the previous
-one — which is exactly the stepping interpolation exists to remove, arrived at by the one
-route the interpolator itself cannot see.
-
-`advance()` now walks the estimate forward with the local clock, and `sync_from_server`
-re-anchors it. A stall that drops ticks drops them from both timelines, or the
-input lead would appear to have grown by the length of the stall and the next sample would
-correct it as drift.
-
-**Re-anchored on the quickest arrivals, not on every one, and measured from what has arrived** (2026-10-09, #23 and #24 below). The timeline the clock walks is the RECEIVE timeline (`received_tick()`: the newest snapshot tick, as the quickest recent packets place it); `server_tick()` is that plus the flight time, and the render time is `received_tick()` less the interpolation delay.
-
-It hid because `_test_interpolation` called `DotNetInterpolator.sample()` directly with
-hand-picked ticks — the clock was never in the path. It was found from `dot-2d-hungry`,
-which asked why a remote monster it was interpolating had not moved.
-
-## An interpolated value that nothing is told about is a value nobody uses
-
-`DotNetInterpolator.apply` writes the smoothed value of every property declared
-`interpolated()` and then calls `DotNetBehaviour._net_interpolated(server_tick)`.
-
-That call is the whole point. A game copies replicated state into a node or a simulation
-from a hook, and the obvious hook is `_net_state_applied` — which fires when a *snapshot*
-arrives, a few times a second. A game with only that hook moves every remote entity in
-20 Hz steps while the interpolated value sits in the property nobody read, and the
-symptom is an interpolator that appears not to work. It was written that way here, and in
-game-arena, until `dot-2d-hungry` looked for where the interpolated position went.
-
-`_net_interpolated` deliberately carries none of `_net_state_applied`'s bookkeeping. Its
-tick is a *render* tick, behind the server's, and recording it as the newest state applied
-would make reconciliation rewind to a tick the server never sent. A predicted entity is
-never notified at all, for the reason `apply` already returns early: writing interpolated
-state over a prediction fights the predictor every frame.
-
-## The interest cache is a cache of one instant
-
-`DotNetInterest.relevant_for` caches its answer per peer for
-`evaluation_interval_sec`. That cache holds **which entities were relevant at one
-instant**, so an entity spawned since is in nobody's cached set — and two of the
-guarantees `_evaluate` makes are not heuristics that may wait:
-
-- an observer always receives what it **owns**;
-- anything **`always_relevant`** always goes.
-
-Both are now pinned into a cached answer before it is returned, because the window is
-not small. In a game where players respawn, split or fire projectiles it is a quarter
-of a second of an entity that exists only by prediction. And on a host that ticks
-faster than the wall clock — every headless test, every fast-forwarded replay — the
-age never reaches the interval at all and the entity is **never sent once**.
-
-What makes it hard to see: the position looks right the whole time, because the owning
-client is predicting it. Only what cannot be predicted goes missing — mass, health,
-ammunition, a team change — and it goes missing silently. It was found in
-`dot-2d-hungry`, where a monster respawned by the server kept its client-side mass
-frozen at the value the spawn message carried while the server's climbed, with the two
-positions agreeing to a hundredth of a unit.
-
-The pin returns a new dictionary rather than mutating the cached one: an entry written
-into the cache would survive the expiry that is supposed to re-evaluate it.
-
-## Two builds on one wire
-
-**A server and a client built from different dot-* sources can play, as long as neither lacks something the other REQUIRES.** That was not true before 2026-09-26 and the change that made it true is the last coordinated protocol break in this family: every client and server built before it must be rebuilt once, and none after it should need to be for a message change again.
-
-**Wire ids are derived from the type's name** (`DotNetMessageRegistry.wire_id_for`: the first 32 bits of its SHA-256), not assigned by sorting the registered names. Sorting made two processes agree without negotiating only while they registered exactly the same set; one added type renumbered every type after it, and the schema hash over the whole set refused the join. A derived id is the same number in every build that has the type.
-
-**Every message body is framed with its length in bits** — `id (32) | varint bit length | align | body` — so a receiver without the type skips exactly that message and carries on, mid-batch included, and a receiver with an older version of a type reads what it knows and skips the rest. A body that ends early is not a truncation any more; the length was checked. Bits, not bytes, because a body ending mid-byte is padded with zeroes that look exactly like a one-bit field set to false; `DotNetReader.limit_bits` bounds the body reader exactly so `has_more()` can mean "the sender wrote nothing further".
-
-**Why derived ids and not the negotiated per-peer table this was first specified as.** A negotiated table has to reach the receiver before the first message that uses it, and here nothing can guarantee that: every game encodes its events with `messages.encode` and routes them through its own link, around the manager. A message decoded against a table that has not arrived is dropped or read as the wrong type, silently. A derived id cannot be misread in any order. It costs 20 bits per event or request; snapshots carry no message id.
-
-**The table is still exchanged, for what only it can do.** `DotNetManager` sends `messages.schema_payload()` through `send_fn` as RELIABLE — a server in `add_peer`, a client in `start()`, and `announce_schema(peer)` for a host whose route was not up yet — and the receiver's `decode` adopts it (reserved id 0). A type registered `required` (the default: a game's own event and request types are the game) that the peer does not know refuses the pair with a sentence, *"This server's game needs a newer game client."*, on `peer_schema_refused`; nothing that peer sends is decoded after it. **dot-net cannot drop a peer — it owns no socket — so the host must**: dot-game's `DotGameNetcode` kicks with `error.message`, and a game building its own manager connects the signal itself. An optional type the peer lacks is skipped there and costs nothing. Two names whose derived ids collide are refused at registration, or at adoption when only the peer has one of them.
-
-`schema_hash()` covers **only the required names** now: what must match, printed as twelve characters, so a peer with one extra optional type no longer reads as incompatible.
-
-**The rule for a message author**, because derived ids no longer protect you from it: **append fields, never reorder, retype, re-width or remove one**, and read a field added after the type first shipped only `if reader.has_more()`, so a message from an older sender keeps the field's default. A change that cannot be an append is a **new type with a new name** — renaming a type is making one, because its id is its name — registered beside the old until nothing sends the old one. `netcode_demo`'s `[mismatched schemas]` is the proof: an old and a new registry, an unknown type skipped either side of a known one in one batch, an appended field crossing both ways, and a required type refused from both ends and through the manager.
-
-## Wire format notes
-
-- Bits are written LSB-first within each byte, bytes in order. **This is the wire
-  format**; changing it is a protocol break.
-- `write_bytes`/`write_string` byte-align first, so bulk data copies in one call
-  rather than shifting per bit. Alignment costs ≤7 bits.
-- Quaternions use smallest-three: 2 bits for the dropped index plus three components
-  in ±1/√2. 29 bits at 9-bit components, against 128 for four raw floats, accurate to
-  well under a degree.
-- Positions **clamp** at the world bounds; angles **wrap**. Clamping a position is
-  visibly wrong at the edge; wrapping one teleports across the map.
-- `read_quaternion` guards `sqrt(max(0, …))` — quantisation can push the sum of
-  squares past 1, and `sqrt` of a small negative is NaN that propagates into every
-  derived transform.
-
-## Batching, budget, interest — the three-stage funnel
-
-```
-all entities
-  → interest.relevant_for()     what this client may know about
-  → interest.prioritise()       cap at max_entities_per_snapshot
-  → budget.accumulate()         order by accumulated priority
-  → write until the byte budget runs out
-```
-
-An entity dropped by the budget stays dirty — `write_state` updates the record, not
-`collect_dirty` — so it goes out next tick rather than being silently skipped.
-
-## Acked baselines: what the server believes each client has
-
-`DotNetBehaviour.PeerView`, one per peer per behaviour. Three fields, because a
-snapshot goes out unreliably and being *sent* is not being *received*:
-
-- `acked` — confirmed by the peer.
-- `pending` — sent since, unconfirmed, oldest first.
-- `believed` — `acked` with `pending` laid over it. Dirty tracking compares against
-  this, so a property is sent once rather than every tick while its ack is in flight.
-
-When a snapshot is confirmed lost its entry leaves `pending` without reaching
-`acked`, `believed` is rebuilt without it, and the properties it carried go dirty
-again. That is the whole loss-recovery mechanism: no retransmit queue, no timers,
-and nothing extra on the wire — the next snapshot was going out anyway.
-
-**Acks are optional and the host carries them.** dot-net owns no client-to-server
-channel (it does not carry inputs either), so `encode_ack()` hands you four bytes to
-put inside the input packet you already send, and `receive_ack_payload()` takes them
-on the server. Wire it and a lost property is re-sent; do not, and an unconfirmed
-send is assumed delivered once it ages out of `ack_window_snapshots` — exactly what
-this addon did before, so nothing regresses by leaving it alone.
-
-**The entity a peer predicts is held to what that peer has confirmed.** For every other entity a property is sent once and then trusted to arrive, because a lost one is only late. For the owner's own predicted entity a lost one is worse than late: its client reads a property's absence as the server's word that it is unchanged and rewinds to the value it last received, so a stale value there is a correction toward the wrong place. `collect_dirty`'s `until_acked` keeps such a property owed until the peer confirms it. See #17.
-
-**A client acks only on the fully-applied path.** `receive_snapshot` abandons the
-rest of a packet when it meets an entity it has not been told to spawn — it cannot
-skip a variable-length body without the declarations — and acking that would strand
-every entity after it at a value the peer never received.
-
-## The GDScript traps that apply here
-
-Same as the rest of the family, plus one specific to this repo:
-
-- **Fan-out**: bare statement calls plus a *member counter*, not a signal count. See
-  the root CLAUDE.md.
-- **`var x := something_returning_Variant()`** is a parse error under the project's
-  warning settings. Write `var x: Variant = …`. Three of these blocked the demo from
-  loading, and a script that fails to load makes a headless run hang rather than
-  error visibly.
-
-## A full server's snapshots (2026-10-08, `g2g-capacity-1`)
-
-Measured with game-g2gfast `tools/load_probe -- surf_mesa 32` (32 admitted players running, 128 ticks, 32 snapshots a second; only the probe's row totals are trustworthy, because `LOAD_PHASES` times every call and its per-phase figures are mostly the timer). Snapshots averaged 12.4 ms a tick; now 8.0-8.8, with every peer sent byte-for-byte what it was (19,886 B/s each, unchanged):
-
-- **Encoded once per snapshot for each distinct set of properties** (`DotNetBehaviour.write_state` / `_encode` / `_signature`). Inside a snapshot each property is read once, so a set of properties is the same bits for every peer it goes to, and for a moving player that set is the same for every peer but its owner. The bits are laid into each peer's packet with `DotNetWriter.write_bit_run` at whatever bit it is at; the per-peer record (believed, last sent, pending) is still per peer, and the recorded values are one dictionary shared by every peer's pending entry, which nothing writes to. A set out of declaration order is encoded fresh, since a bitmask could not tell two orders apart. 12.4 -> 9.5 ms. **A set with anything byte-aligned in it is encoded per bit offset and copied, never shifted** (`DotNetVar.may_align`: strings, bytes, custom codecs): a string aligns before its bytes, so its padding depends on the bit of a byte the encoding starts at, and the first version, which encoded every set at bit 0 and shifted it into place, sent game-playground's NPC weapon id as garbage (its `headless_net` caught it; netcode_demo's "bit runs" now lays a string-bearing run and a plain one in at all eight offsets). Everything else is one copy shifted into place (`DotNetWriter.write_shifted_run`); encoding every set per offset instead gave back a fifth of the saving.
-- **`collect_dirty` written out** rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per property: about thirteen thousand iterations a snapshot at 32 players, where the call costs more than the comparison. Same rules in the same order (spawn-only still never kept owed). 9.5 -> 8.8 ms.
-- **`trim_pending` returns on its oldest entry** when that is inside the window, which it nearly always is.
-- **`DotNetConfig.stagger_snapshots`** (off by default): peer `p` is sent its snapshot on the ticks where `p % ticks_per_snapshot() == tick % ticks_per_snapshot()`, so at 128 ticks and 32 snapshots no one tick builds all of them. Every peer still hears from the server at the same rate, a fixed number of ticks apart. The probe at 32 players: p99 46.6 -> 22.7 ms, worst 53.7 -> 30.5, mean 16.3 -> 17.3 (sharing is among a quarter of the peers). Lag-compensation history is recorded every tick when on. `netcode_demo`'s "staggered snapshots" runs both ways (4 checks).
-
-What is left is not the network: the game half of a 32-player tick is 8.3 ms on its own, over a 7.8 ms budget at 128, so the next step is the motor's per-player cost (dot-player-controller) or the tick rate (Christian's call).
-
-## Late and repeated snapshots, end to end (2026-10-09)
-
-Over WebSocket "unreliable" is reliable and in order, so until the dual-stack server every client received every snapshot once and in sequence; a native client on ENet gets real UDP. `netcode_demo`'s "reordered and repeated snapshots" runs two real managers with acknowledgements wired through a link that holds snapshots back behind the next one (the one carrying a one-off change always, any other with a seeded 30% chance) and replays stale copies. The late snapshot is ignored by tick, as superseded; the client acknowledges the newer one; the server drops the unconfirmed entry and re-sends; the change arrives 18 ticks later and never goes back, with no decode failures and the position 0.15 m behind. Armed: without the acknowledgement it never arrives (the late snapshot ages out as delivered, which is the documented behaviour of a host that has not wired acks).
-
-**A lost property is owed until confirmed** (`PeerView.relost`, set when an unconfirmed send is dropped as lost, cleared when the peer confirms the value). The first version of the check held back every other snapshot and never converged: the client acknowledges only what it applies and the server re-sent once, in its very next snapshot, which on that link was always a held one. Owed until confirmed, it goes out in each snapshot until one is applied — the rule the predicted entity's state already had, applied to a property only after it has been lost once, so a clean link pays nothing. The check runs both links (jitter and every-other); both deliver the change at tick 72 (the jitter link took 81 before). Armed: without the mark the every-other link never delivers it. Real ENet loss is measured now, through a relay rather than netem: see "Real loss, through a relay".
-
-## Validating changes
-
-```bash
-godot --headless --path . --import
-find . -name '*.gd' -not -path './.godot/*' | while read f; do
-    godot --headless --path . --check-only --script "res://${f#./}"
-done
-
-# 299 checks: wire round-trips, input batches, a receive timeline that a late packet does not
-# pull back, quantisation accuracy, message direction,
-# two builds with different message sets (skipped types, appended fields, a required
-# type refused from both ends), batching and fragmentation, clock convergence, replication and
-# dirty tracking, interest strategies agreeing, budget fairness, interpolation and
-# extrapolation bounds, the render delay in ticks at 128/20 with nothing
-# extrapolated (clean, lossy and on a 120 ms round trip) and a stop drawn where it stopped, rewind/restore, prediction replay against a server
-# simulating the same changing input, a predicted entity the server holds still
-# (clean, and with the snapshot carrying the stop lost), and a server+client
-# integration run with 20% simulated packet loss.
-godot --headless --path . res://examples/netcode_demo.tscn
-
-# 71 checks over DotNetStats and DotNetSnapshot on their own: inferred loss (counted in
-# snapshot periods), reordering vs. duplication, rates on a connection that stopped, rtt
-# percentiles and the bounded sample window, delta/apply round-trips, and
-# baseline isolation.
-godot --headless --path . res://examples/diagnostics_demo.tscn
-
-# 28 checks on the lossy UDP relay against real sockets, and a real ENet pair through it.
-godot --headless --path . res://examples/relay_demo.tscn
-```
-
-The integration test runs both managers in one process over a lossy loopback, which
-is why there are no autoloads and why `DotNetManager.service_scope` exists.
-
-## File map
-
-```
-addons/dot_net/
-  dot_net_manager.gd             Tick loop, snapshot send/receive, message routing.
-  dot_net_api.gd                 API level; see dot-core's DotAddonApi.
-  core/
-    dot_net_clock.gd             Three timelines. Read this first.
-    dot_net_config.gd            All tuning. describe_budget() shows what it costs.
-  wire/
-    dot_net_writer.gd            Bit packing + quantisation.
-    dot_net_reader.gd            The untrusted side.
-    dot_net_message.gd           Base message. Delivery + Direction.
-    dot_net_message_registry.gd  Derived ids, framing, the schema exchange, dispatch.
-    dot_net_packet.gd            Batching, fragmentation, reassembly.
-  replication/
-    dot_net_var.gd               The declaration. Type.CUSTOM is the escape hatch.
-    dot_net_identity.gd          netId, ownership, authority model.
-    dot_net_behaviour.gd         What a game subclasses most.
-    dot_net_registry.gd          netId table. Ids are never reused.
-    dot_net_spawner.gd           Prefab allow-list + factories.
-  snapshot/
-    dot_net_snapshot.gd          A tick's state; delta to/from a baseline.
-    dot_net_interpolator.gd      Render-in-the-past, adaptive buffer.
-  prediction/
-    dot_net_input.gd             Input base + the jitter/replay buffer.
-    dot_net_predictor.gd         Rewind, replay, ease the correction.
-  lagcomp/
-    dot_net_history.gd           Rewind the world to what the shooter saw.
-  interest/
-    dot_net_interest.gd          Base. Subclass this.
-    dot_net_interest_builtin.gd  All — correct for co-op, wrong for competitive.
-    dot_net_interest_distance.gd Radius, with per-tag overrides.
-    dot_net_interest_grid.gd     Spatial hash for large worlds.
-  bandwidth/
-    dot_net_budget.gd            Per-peer budget + starvation-bounded accumulator.
-  stats/
-    dot_net_stats.gd             The counters that turn "feels laggy" into a cause.
-                                 roll() must be called each frame; see below.
-  testing/
-    dot_net_udp_relay.gd         A lossy UDP relay for tests. No class_name; preload by path.
-```
-
-## Things deliberately not here
-
-- **Rollback netcode** (GGPO-style, for fighting games). A different model —
-  everyone predicts everyone, and rollback is per-frame rather than per-correction.
-  The input buffer and determinism requirements are already here; the rollback loop
-  is not.
-- **Reliable delivery over an unreliable transport.** `Delivery.RELIABLE` maps to the
-  transport's own reliability. Implementing acks and retransmits here would duplicate
-  what ENet and WebSocket already do.
-- **Whole-snapshot deltas.** `DotNetSnapshot.delta_to` and `apply_delta` exist and
-  are tested, and the manager deliberately does not use them. Acked baselines are
-  now per *peer* and per *behaviour* (see below), which is what interest management
-  forces: no two peers are sent the same set of entities, so a single world-wide
-  baseline snapshot is not a baseline for anybody. The manager used to build and
-  store one every snapshot tick against the day this landed; nothing ever read it,
-  and it is gone.
-- **Bitfield acknowledgements.** A client acks one tick, the newest it applied in
-  full. Acking the last 32 in a bitmask would let the server confirm a snapshot that
-  arrived *after* a newer one, which single-tick acks write off as lost and re-send.
-  That costs a little bandwidth on a reordering path and nothing on a clean one.
-- **Physics-engine determinism.** Godot's physics is not deterministic across
-  platforms. Games needing exact reconciliation should simulate movement themselves —
-  the demo's `Movement` does.
-- **Matchmaking, lobbies, NAT punchthrough, voice.** Session-level concerns above
-  this layer.
+Open, each with its reason in the linked file: a predicted property with a `max_rate` that stops changing is never rewound (no game sets one) [prediction](docs/prediction.md#open-a-rate-limited-predicted-property); the clock's jitter reads about zero on ENet, so `adaptive_margin` never widens [timelines](docs/timelines.md#open-jitter-and-loss); the adaptive interpolation buffer is sized for jitter, not loss [timelines](docs/timelines.md#open-jitter-and-loss). Deliberately not here (rollback netcode, reliable delivery, whole-snapshot deltas, bitfield acks, physics determinism, matchmaking): [replication](docs/replication.md#deliberately-not-here).

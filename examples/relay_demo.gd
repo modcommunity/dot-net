@@ -15,7 +15,7 @@ const Relay := preload("res://addons/dot_net/testing/dot_net_udp_relay.gd")
 ## real ENet pair through it, which is the reason it exists. The last section is also the
 ## family's only statement of fact about what ENet does with an unreliable packet in this
 ## engine: it is UNSEQUENCED, so a newer one can arrive first, and nothing sent unreliable
-## may assume its order (see CLAUDE.md, "Real loss").
+## may assume its order (see docs/wire.md, "Unreliable means unordered").
 
 ## Every check this suite makes, the last one included. See docs/testing.md.
 const CHECKS := 28
