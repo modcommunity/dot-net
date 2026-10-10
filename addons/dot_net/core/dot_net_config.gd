@@ -124,13 +124,17 @@ extends DotConfig
 ## Also the ceiling on how far behind a client's claim may be. A client claiming a
 ## hit 2 seconds in the past is either on a terrible connection or lying, and past
 ## this the claim is refused rather than honoured.
-@export_range(0.0, 2.0, 0.05) var max_rewind_sec: float = 0.5
+##
+## One second, so a 300-400 ms player (a round trip plus interpolation, about half a
+## second) is compensated in full with room for jitter. 0.5 clamped exactly those
+## players, and the clamp is silent: their hits simply stopped landing.
+@export_range(0.0, 2.0, 0.05) var max_rewind_sec: float = 1.0
 
 ## Seconds of transform history kept per entity.
 ##
 ## Must exceed [member max_rewind_sec] plus the send interval, or a rewind lands
 ## before the oldest sample.
-@export_range(0.1, 5.0, 0.1) var history_sec: float = 1.0
+@export_range(0.1, 5.0, 0.1) var history_sec: float = 1.5
 
 @export_group("World bounds")
 
