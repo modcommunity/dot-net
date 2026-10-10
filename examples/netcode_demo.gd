@@ -25,6 +25,11 @@ class Movement extends DotNetBehaviour:
 	## Input applied this tick, set by the manager or by prediction.
 	var current_input: DemoInput = null
 
+	## Whether a tick moves the entity's node too, as a game's does. The predictor measures
+	## a correction off the node ([method DotNetIdentity.world_position]); off by default
+	## so every section written before it sees the node it always saw.
+	var moves_body: bool = false
+
 	func _register_net_vars() -> void:
 		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION) \
 			.interpolated().with_priority(5.0)
@@ -44,6 +49,13 @@ class Movement extends DotNetBehaviour:
 			velocity.z = current_input.move.y * 10.0
 
 		position += velocity * delta
+		if moves_body:
+			_move_body()
+
+	func _move_body() -> void:
+		var body := get_parent() as Node3D
+		if body != null and body.is_inside_tree():
+			body.global_position = position
 
 	func _net_record_history() -> Dictionary:
 		return {"grounded": grounded}
@@ -208,7 +220,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 299
+const CHECKS := 305
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -265,6 +277,8 @@ func _run() -> void:
 	_test_render_delay()
 	_test_lag_compensation()
 	_test_prediction()
+	_test_correction_offsets()
+	_test_buffer_growth()
 	_test_spawning()
 	_test_freed_entity()
 	_test_acked_baselines()
@@ -2038,6 +2052,134 @@ func _test_prediction() -> void:
 
 	for entity in [server_entity, client_entity, lonely, untouched, holed_server, holed_client]:
 		_out_of_tree(entity)
+
+
+# --- Correction offsets ---------------------------------------------------
+
+## What a renderer adds to a predicted entity so a correction is eased: every one, and
+## added to what is still easing. Nothing in the family read [method
+## DotNetPredictor.visual_offset] until game-g2gfast's `headless_feel` measured a 30 cm
+## correction jumping the eye in one frame.
+func _test_correction_offsets() -> void:
+	print("[correction offsets]")
+	var config := DotNetConfig.new()
+	config.enable_prediction = true
+	var dt := 1.0 / 60.0
+
+	var inputs: Array[DemoInput] = []
+	for tick in range(1, 21):
+		var input := DemoInput.new()
+		input.tick = tick
+		input.delta = dt
+		input.move = Vector2(1.0, 0.0)
+		inputs.append(input)
+
+	var server_entity := _in_tree(_make_entity(&"player", 2))
+	server_entity.is_authoritative = true
+	var server_movement := server_entity.behaviours[0] as Movement
+	var at_10 := {}
+	for input in inputs:
+		server_movement._net_apply_input(input, input.tick)
+		server_movement._net_simulate(input.tick, dt)
+		if input.tick == 10:
+			at_10 = server_movement.snapshot_values().duplicate()
+
+	var client_entity := _in_tree(_make_entity(&"player", 2))
+	client_entity.is_owner = true
+	client_entity.is_authoritative = false
+	var client_movement := client_entity.behaviours[0] as Movement
+	client_movement.moves_body = true
+	var buffer := DotNetInput.Buffer.new(config.input_history_ticks)
+	for input in inputs:
+		buffer.push(input)
+		client_movement._net_apply_input(input, input.tick)
+		client_movement._net_simulate(input.tick, dt)
+
+	var predictor := DotNetPredictor.new(config)
+
+	# Four millimetres: under the reporting epsilon, and the size a replay from a quantised
+	# state moves a player by on every snapshot.
+	client_movement.position += Vector3(0.004, 0.0, 0.0)
+	client_movement._move_body()
+	var _small := predictor.reconcile(client_entity, 10, at_10, buffer, 20, dt)
+	var small := predictor.visual_offset(client_entity.net_id)
+	_check("a correction under the epsilon is not counted (%d)" % int(predictor.describe()["corrections"]),
+		int(predictor.describe()["corrections"]) == 0)
+	_check("and is still eased (offset %.1f mm)" % (small.length() * 1000.0),
+		absf(small.length() - 0.004) < 0.001)
+
+	# A second correction while the first is easing: added to it, not put in its place.
+	client_movement.position += Vector3(0.3, 0.0, 0.0)
+	client_movement._move_body()
+	var _big := predictor.reconcile(client_entity, 10, at_10, buffer, 20, dt)
+	var both := predictor.visual_offset(client_entity.net_id)
+	_check("a second correction adds to what is still easing (%.1f mm, 304 expected)" % (both.length() * 1000.0),
+		absf(both.length() - 0.304) < 0.003)
+
+	for entity in [server_entity, client_entity]:
+		_out_of_tree(entity)
+
+
+# --- The buffer growing ----------------------------------------------------
+
+## A link that turns jittery: the interpolation buffer has to grow, and it must not move
+## the render time backwards to do it -- and once grown it has to cover how late the
+## snapshots actually are. 128 ticks, a snapshot every 4, played tick by tick with the
+## receive timeline on the quickest arrivals, as `DotNetClock` keeps it.
+func _test_buffer_growth() -> void:
+	print("[the buffer growing]")
+	var config := DotNetConfig.new()
+	config.tick_rate = 128
+	config.snapshot_rate = 32
+	config.adaptive_interpolation = true
+	var interpolator := DotNetInterpolator.new(config)
+	var period := config.ticks_per_snapshot()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20261010
+
+	# Snapshot tick -> the tick it arrives on: on time for two seconds, then 0..6 ticks
+	# late with one in twenty never arriving.
+	var arrives := {}
+	for sent in range(0, 128 * 6, period):
+		if sent < 256:
+			arrives[sent] = sent
+		elif rng.randf() >= 0.05:
+			arrives[sent] = sent + rng.randi_range(0, 6)
+
+	var newest := -1
+	var back := 0.0
+	var last_render := -INF
+	var extrapolated := 0
+	for now in range(0, 128 * 6):
+		for sent in arrives:
+			if int(arrives[sent]) == now and int(sent) > newest:
+				newest = int(sent)
+				interpolator.note_lateness(newest, now)
+		interpolator.advance(1.0 / 128.0)
+		var render := float(now) - interpolator.delay_ticks()
+		back = maxf(back, last_render - render)
+		last_render = render
+		if now >= 128 * 4 and render > float(newest):
+			extrapolated += 1
+
+	_check("growing the buffer never moved the render time back (%.2f ticks)" % back, back < 0.001)
+	_check("once grown it covers the lateness: %d of 256 ticks extrapolated (buffer %.1f ticks)" % [
+		extrapolated, interpolator.delay_ticks()], extrapolated == 0)
+	_check("and on time it needs only an interval and a frame (%.1f ticks)" % _settled_delay(config),
+		_settled_delay(config) <= float(period) + 1.5)
+
+
+## The buffer a link that is always on time settles to, in ticks.
+func _settled_delay(config: DotNetConfig) -> float:
+	var interpolator := DotNetInterpolator.new(config)
+	var period := config.ticks_per_snapshot()
+	# Ten seconds: the buffer gives time back at 1% an arrival, by design.
+	for now in range(0, 128 * 10):
+		if now % period == 0:
+			interpolator.note_lateness(now, now)
+		interpolator.advance(1.0 / 128.0)
+	# The shrink is slow by design; ask where it is heading.
+	return float(interpolator.describe()["target_snapshots"]) * float(period)
 
 
 # --- Acked baselines -------------------------------------------------------

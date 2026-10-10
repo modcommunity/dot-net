@@ -119,10 +119,41 @@ var _samples: int = 0
 var _stalls: int = 0
 var _extrapolations: int = 0
 
+## Where the buffer is heading, in snapshots; [member _delay_snapshots] is the buffer
+## drawn with, and follows this at a bounded rate once frames drive it.
+##
+## [b]Two numbers, because growing the buffer at once moves every remote player
+## backwards.[/b] The render time is the receive timeline minus the buffer, so a buffer
+## that jumps from 1.3 snapshots to 2.2 puts the render time back 3.6 ticks in one frame:
+## measured in game-g2gfast's `headless_feel` at 128 ticks, the render timeline stepped
+## back 11 times in eight seconds by up to 3.45 ticks when a 30..80 ms link replaced a
+## steady one -- a runner drawn a third of a metre back and then forward. Followed at
+## [constant GROW_RATE], the render time only ever slows down.
+var _target_snapshots: float = 2.0
+
+## How fast the drawn buffer may follow its target, in ticks of buffer per tick of time.
+## 0.2 means the render timeline runs at 80% speed (or 120%, shrinking) while it moves:
+## a remote player slowed for a moment, never one sent backwards.
+const GROW_RATE := 0.2
+
+## Whether [method advance] has ever been called. Until a host drives the buffer per
+## frame it follows its target at once, as it always did, so a host that samples by hand
+## and never calls [method advance] is not left on the initial buffer for ever.
+var _frame_driven: bool = false
+
+## How late each recent snapshot arrived, in ticks behind the receive timeline, and
+## whether a snapshot was missing just before it. See [method note_lateness].
+const LATENESS_WINDOW := 64
+var _lateness: Array[float] = []
+var _lost: Array[bool] = []
+var _last_late_tick: int = -1
+var _late_fed: bool = false
+
 
 func _init(p_config: DotNetConfig) -> void:
 	config = p_config
 	_delay_snapshots = config.interpolation_buffer
+	_target_snapshots = _delay_snapshots
 
 
 # --- Receiving -------------------------------------------------------------
@@ -156,8 +187,57 @@ func note_arrival() -> void:
 
 	_last_arrival_ms = now
 
+	# A host that also reports lateness adapts from there, once per arrival.
+	if config.adaptive_interpolation and not _late_fed:
+		_adapt()
+
+
+## Notes how late the snapshot for [param tick] arrived: [param received_tick] is the
+## clock's receive timeline once it has seen it ([method DotNetClock.received_tick]),
+## which the quickest arrivals set, so this is the time the packet spent over the
+## quickest, in ticks.
+##
+## [b]What the buffer actually has to cover.[/b] A render time R is drawn between two
+## snapshots only if the one after R has arrived, and that one is up to a snapshot
+## interval past R and arrives as late as its packet was. So the buffer needs the
+## interval, plus how late packets are, plus one more interval when one goes missing --
+## and sizing it from the spread of arrival gaps alone, as it was, measured about two
+## thirds of the way there: 37% of frames extrapolated through 30..80 ms with 5% loss at
+## 128 ticks (game-g2gfast `headless_feel`), and 12% at 64 (game-arena `headless_lossy`).
+func note_lateness(tick: int, received_tick: int) -> void:
+	_late_fed = true
+	var period := _snapshot_ticks()
+
+	_lateness.append(maxf(0.0, float(received_tick - tick)))
+	# A gap of more than one period before this snapshot is one that never came.
+	_lost.append(_last_late_tick >= 0 and float(tick - _last_late_tick) > period * 1.5)
+	_last_late_tick = maxi(_last_late_tick, tick)
+
+	if _lateness.size() > LATENESS_WINDOW:
+		_lateness.remove_at(0)
+		_lost.remove_at(0)
+
 	if config.adaptive_interpolation:
 		_adapt()
+
+
+## The 95th percentile of recent lateness, in ticks.
+func _late_ticks() -> float:
+	if _lateness.is_empty():
+		return 0.0
+	var sorted := _lateness.duplicate()
+	sorted.sort()
+	return sorted[clampi(int(ceilf(0.95 * float(sorted.size() - 1))), 0, sorted.size() - 1)]
+
+
+## Moves the drawn buffer toward its target by at most [constant GROW_RATE] of the time
+## that passed. Called once a frame, before sampling, by
+## [method DotNetManager.interpolate_frame].
+func advance(elapsed_sec: float) -> void:
+	_frame_driven = true
+	var period := maxf(1.0, _snapshot_ticks())
+	var step := GROW_RATE * maxf(0.0, elapsed_sec) * float(maxi(1, config.tick_rate)) / period
+	_delay_snapshots = move_toward(_delay_snapshots, _target_snapshots, step)
 
 
 ## Grows the buffer quickly and shrinks it slowly.
@@ -166,21 +246,36 @@ func note_arrival() -> void:
 ## slightly more latency than necessary. The first is much worse, so the buffer is
 ## quick to add and reluctant to give back.
 func _adapt() -> void:
-	if _arrival_interval_ms <= 0.0:
+	# Lateness alone is enough to size it; the gap estimate needs two arrivals.
+	if _arrival_interval_ms <= 0.0 and _lateness.is_empty():
 		return
 
 	var interval_ms := _snapshot_ticks() / float(maxi(1, config.tick_rate)) * 1000.0
 
 	# Cover the nominal interval plus two jitter deviations, expressed in snapshots.
 	var needed := 1.0 + (_arrival_jitter_ms * 2.0) / maxf(1.0, interval_ms)
+
+	# And, where the host reports it, what lateness says: one interval to the snapshot
+	# after the render time, how late recent ones came, one tick for the frame's fraction,
+	# and one more interval if any recent snapshot went missing. See [method note_lateness].
+	if not _lateness.is_empty():
+		var period := maxf(1.0, _snapshot_ticks())
+		var ticks := period + _late_ticks() + 1.0
+		if _lost.has(true):
+			ticks += period
+		needed = maxf(needed, ticks / period)
+
 	needed = clampf(needed, 1.0, 10.0)
 
 	var before := _delay_snapshots
 
-	if needed > _delay_snapshots:
-		_delay_snapshots = needed
+	if needed > _target_snapshots:
+		_target_snapshots = needed
 	else:
-		_delay_snapshots = lerpf(_delay_snapshots, needed, 0.01)
+		_target_snapshots = lerpf(_target_snapshots, needed, 0.01)
+
+	if not _frame_driven:
+		_delay_snapshots = _target_snapshots
 
 	# [b]Reported on whole snapshots crossed, not on every adjustment.[/b] This runs on
 	# every arrival and the shrink is a 1% lerp, so a line per change is a line twenty
@@ -479,6 +574,9 @@ func describe() -> Dictionary:
 	return {
 		"tracks": _tracks.size(),
 		"delay_snapshots": "%.2f" % _delay_snapshots,
+		"target_snapshots": "%.2f" % _target_snapshots,
+		"late_p95_ticks": "%.1f" % _late_ticks(),
+		"lost_in_window": _lost.count(true),
 		"delay_ticks": "%.2f" % delay_ticks(),
 		"delay_ms": int(delay_ms()),
 		"arrival_ms": int(_arrival_interval_ms),

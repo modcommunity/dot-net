@@ -196,6 +196,14 @@ func reconcile(
 
 	if error > config.reconcile_position_epsilon:
 		_corrections_applied += 1
+
+	# [b]Every move a reconciliation makes is eased, not only the ones it counts.[/b] The
+	# epsilon decides what is a misprediction worth reporting; it is not a size below
+	# which a jump is invisible. A replay starts from the server's QUANTISED state, so on
+	# a link that delivers everything the drawn player still moved a few millimetres on
+	# every snapshot -- 32 times a second at 128 ticks -- and only a correction over a
+	# centimetre was ever offered to a renderer to hide.
+	if error > 0.0:
 		_begin_correction(identity, before, after, error)
 
 	return DotResult.success(replayed)
@@ -225,11 +233,21 @@ func _begin_correction(
 	var position_before: Vector3 = before.get("position", Vector3.ZERO)
 	var position_after: Vector3 = after.get("position", Vector3.ZERO)
 
+	# [b]Added to what is still being eased, not put in its place.[/b] A renderer draws
+	# the entity plus [method visual_offset]; replacing an offset that has not finished
+	# decaying moves the drawing by whatever was left of it, which is the very jump this
+	# exists to hide. At 32 snapshots a second the previous one has always not finished.
+	var offset := visual_offset(identity.net_id) + (position_before - position_after)
+
+	if offset.length() > config.reconcile_snap_distance:
+		_corrections.erase(identity.net_id)
+		return
+
 	_corrections[identity.net_id] = {
 		# The entity is left where the server says it is, and the renderer is
 		# offset by the difference — which then decays to zero. The simulation
 		# stays authoritative while the visuals catch up.
-		"offset": position_before - position_after,
+		"offset": offset,
 		"at_ms": Time.get_ticks_msec(),
 	}
 

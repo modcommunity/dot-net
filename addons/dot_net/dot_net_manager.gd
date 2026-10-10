@@ -521,6 +521,10 @@ func client_tick(tick: int) -> void:
 	predictor.predict(registry.predicted(), tick, clock.tick_duration())
 
 
+## When [method interpolate_frame] last ran, for the interpolation buffer's rate limit.
+var _last_frame_usec: int = 0
+
+
 ## Applies interpolation. Call from [method Node._process], not the tick loop.
 ##
 ## Rendering runs at frame rate and simulation at tick rate; interpolating on the
@@ -549,6 +553,13 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 
 	if alpha < 0.0:
 		alpha = Engine.get_physics_interpolation_fraction()
+
+	# The buffer follows its target at a bounded rate, on the frame's own time, so it
+	# never moves the render time backwards. See DotNetInterpolator._target_snapshots.
+	var now_usec := Time.get_ticks_usec()
+	var elapsed := 0.0 if _last_frame_usec == 0 else float(now_usec - _last_frame_usec) / 1e6
+	_last_frame_usec = now_usec
+	interpolator.advance(minf(elapsed, 0.25))
 
 	# The RECEIVE timeline, not the server's tick: an interpolation delay is counted back
 	# from the newest snapshot this client holds. Counted from the server's tick it lost
@@ -736,6 +747,7 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 
 	interpolator.note_arrival()
 	clock.sync_from_server(tick, stats.rtt_percentile(0.5))
+	interpolator.note_lateness(tick, clock.received_tick())
 
 	for _i in range(count):
 		var net_id := reader.read_uint(DotNetRegistry.ID_BITS)

@@ -19,6 +19,15 @@ Godot's physics is not deterministic across platforms; a game needing exact reco
 - **A hole is replayed on the older input.** When the clock catches up it jumps over ticks that get no command, and the server runs them on the previous one. A tick with no input but inputs on both sides of it (`Buffer.latest_before`, `Buffer.since`) is replayed on the older one. Stopping at the hole left the prediction a catch-up's worth of running short of the server.
 - **Nothing past the newest input is replayed.** Those are ticks the client has not played yet (a lockstep host reconciles before it records the tick), and replaying them predicted them twice.
 
+## Corrections are eased on screen, every one of them
+
+`DotNetPredictor.visual_offset(net_id)` is what a renderer adds to a predicted entity so a correction moves the simulation at once and the drawing over `reconcile_smooth_sec`. Two rules, both since 2026-10-10, when game-g2gfast became the first game to read it (its `headless_feel` measured a 30 cm correction jumping the eye in one frame; eased, 4.2 cm at most):
+
+- **Every move a reconciliation makes is eased, not only the ones it counts.** `reconcile_position_epsilon` decides what is reported as a misprediction (`corrections`, `correction_rate()`); it is not a size below which a jump is invisible. A replay starts from the server's quantised state, so on a link that delivers everything the drawn player moved a few millimetres on every snapshot. Eased, the frame-to-frame speed of the eye at 144 Hz went from 0.92-1.16 of the true speed (5th-95th percentile) to 0.96-1.05.
+- **A new correction is added to what is still easing, not put in its place.** Replacing it moved the drawing by whatever was left of the last one, and at 32 snapshots a second the last one has always not finished. An offset that adds up past `reconcile_snap_distance` is dropped, as a single correction that large always was.
+
+`netcode_demo`'s *correction offsets* (armed with the old `_begin_correction`: a 4 mm correction drew no offset, and a second one replaced the first).
+
 ## What the server said
 
 A snapshot carries an entity whenever it is relevant, with an empty body when nothing changed, and **absent means unchanged**. The client has to believe that:

@@ -76,6 +76,7 @@ Short forms; the reasoning is in the linked file.
 - A game-driven server (`auto_tick = false`) must call `server_tick(tick)` or its clock reads 0 forever. [timelines](docs/timelines.md#drift-and-catch-up)
 - The interpolation buffer is in SNAPSHOTS; `delay_ticks()` is the one conversion, and the render time is `received_tick()` minus it, never `server_tick()` minus it. [timelines](docs/timelines.md#the-render-time)
 - The receive timeline follows the quickest arrivals and goes back only after `SETTLE_SAMPLES` all behind. [timelines](docs/timelines.md#the-receive-timeline)
+- The interpolation buffer is sized from `note_lateness` and grows at `GROW_RATE` through `advance`, never at once: a jump in the buffer is the render time going backwards. Call `interpolate_frame` once a frame. [timelines](docs/timelines.md#the-render-time)
 - Copy interpolated state from `_net_interpolated`; it carries none of `_net_state_applied`'s bookkeeping and never fires for a predicted entity. [timelines](docs/timelines.md#_net_interpolated)
 
 **Prediction**
@@ -83,6 +84,7 @@ Short forms; the reasoning is in the linked file.
 - `_net_simulate` must be deterministic across machines: no wall clock, no unseeded random, no unpredicted state of another player, no physics query against geometry one side lacks, no unordered iteration. `correction_rate()` tells you. [prediction](docs/prediction.md#determinism-is-a-requirement-not-an-aspiration)
 - A replay applies each tick's input and then simulates, exactly as `server_tick` does; a hole between two inputs replays on the older one; nothing past the newest input is replayed. [prediction](docs/prediction.md#reconciliation)
 - A predicted entity rewinds to `authoritative_values()` (absent means unchanged), a remote one is interpolated from `received_values()`. Never feed either from the properties, which hold the client's own prediction or blend. [prediction](docs/prediction.md#what-the-server-said)
+- A renderer adds `predictor.visual_offset(net_id)` to the predicted entity it draws; every reconciliation that moves it is eased and offsets add up. [prediction](docs/prediction.md#corrections-are-eased-on-screen-every-one-of-them)
 - Send the last few inputs in each packet (`write_batch` / `read_batch`, `Buffer.recent`). [prediction](docs/prediction.md#input-batches)
 - Rewind is bounded by `max_rewind_sec` (1 s); a larger claim is clamped. [security](docs/security.md)
 
@@ -112,4 +114,4 @@ Short forms; the reasoning is in the linked file.
 
 ## Known gaps
 
-Open, each with its reason in the linked file: a predicted property with a `max_rate` that stops changing is never rewound (no game sets one) [prediction](docs/prediction.md#open-a-rate-limited-predicted-property); the clock's jitter reads about zero on ENet, so `adaptive_margin` never widens [timelines](docs/timelines.md#open-jitter-and-loss); the adaptive interpolation buffer is sized for jitter, not loss [timelines](docs/timelines.md#open-jitter-and-loss). Deliberately not here (rollback netcode, reliable delivery, whole-snapshot deltas, bitfield acks, physics determinism, matchmaking): [replication](docs/replication.md#deliberately-not-here).
+Open, each with its reason in the linked file: a predicted property with a `max_rate` that stops changing is never rewound (no game sets one) [prediction](docs/prediction.md#open-a-rate-limited-predicted-property); the clock's jitter reads about zero on ENet, so `adaptive_margin` never widens [timelines](docs/timelines.md#open-jitter-and-loss). Deliberately not here (rollback netcode, reliable delivery, whole-snapshot deltas, bitfield acks, physics determinism, matchmaking): [replication](docs/replication.md#deliberately-not-here).
