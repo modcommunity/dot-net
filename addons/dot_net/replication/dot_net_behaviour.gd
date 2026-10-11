@@ -625,12 +625,18 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 	if int(view.pending[0]["tick"]) >= oldest_tick:
 		return
 
-	var kept: Array[Dictionary] = []
+	# The aged-out entries are a prefix (pending is in tick order), so they come off the
+	# front and nothing else is touched. Walking the whole list into a new one was a pass
+	# over every unconfirmed send and a fresh array per entity per peer per snapshot for a
+	# host whose acknowledgements are not arriving, where one entry ages out every
+	# snapshot: 2.9 ms of a 32-player tick (`game-g2gfast tools/load_probe`, no acks).
+	var aged := 0
+	var count := view.pending.size()
 
-	for entry in view.pending:
+	while aged < count:
+		var entry: Dictionary = view.pending[aged]
 		if int(entry["tick"]) >= oldest_tick:
-			kept.append(entry)
-			continue
+			break
 
 		if not view.strict:
 			view.acked.merge(entry["values"], true)
@@ -638,10 +644,14 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 			for property: StringName in entry["values"]:
 				view.relost[property] = true
 
-	if kept.size() == view.pending.size():
-		return
+		aged += 1
 
-	view.pending = kept
+	if aged == count:
+		view.pending.clear()
+	else:
+		for i in aged:
+			view.pending.pop_front()
+
 	# Promoted (not strict) leaves `believed` as it was; see [method sync_peer_acks].
 	if view.strict:
 		_rebuild_believed(view)
