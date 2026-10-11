@@ -564,16 +564,18 @@ func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 	if view.pending.is_empty():
 		return
 
-	var kept: Array[Dictionary] = []
+	# The resolved entries are a prefix (pending is in tick order), so they come off the
+	# front; see [method trim_pending] for why not a rebuilt list.
 	var resolved := 0
+	var count := view.pending.size()
 	var dropped := false
 
-	for entry in view.pending:
+	while resolved < count:
+		var entry: Dictionary = view.pending[resolved]
 		var entry_tick := int(entry["tick"])
 
 		if entry_tick > acked_tick:
-			kept.append(entry)
-			continue
+			break
 
 		resolved += 1
 
@@ -592,7 +594,11 @@ func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 	if resolved == 0:
 		return
 
-	view.pending = kept
+	if resolved == count:
+		view.pending.clear()
+	else:
+		for i in resolved:
+			view.pending.pop_front()
 	# [b]Only a DROP changes what the peer is believed to hold.[/b] `believed` is `acked`
 	# with every pending entry laid over it in tick order, and the entries resolved here
 	# are the oldest ones; promoting them moves their values from the front of that
