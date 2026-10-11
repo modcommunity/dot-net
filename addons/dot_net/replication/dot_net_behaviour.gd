@@ -817,6 +817,22 @@ func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotRes
 		if declaration.change_handler.is_valid():
 			declaration.change_handler.call(previous, value)
 
+	_finish_read(tick, rewind)
+	return DotResult.success(count)
+
+
+## What [method read_state] does for an entity a snapshot listed as unchanged: exactly a read
+## of zero properties. The snapshot names the entity without a body (see
+## [code]docs/wire.md#unchanged-entities[/code]), and every consumer downstream -- the rewind,
+## `_net_state_applied`, the predictor, the interpolator -- has to see what it saw when the
+## same entity came with an empty body, or a game's per-snapshot bookkeeping (and the
+## relevance it infers from it) changes meaning with the wire.
+func apply_unchanged(tick: int, rewind: bool = false) -> void:
+	_read_now.clear()
+	_finish_read(tick, rewind)
+
+
+func _finish_read(tick: int, rewind: bool) -> void:
 	if rewind:
 		# Everything the snapshot left out goes back to what the server last said, BEFORE
 		# `_net_state_applied` — because that hook is where every game in the family
@@ -831,7 +847,6 @@ func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotRes
 				_net_write_property(property, _baseline[property])
 
 	_net_state_applied(tick)
-	return DotResult.success(count)
 
 
 ## The server's whole state for this behaviour as of the snapshot just read, on a receiving

@@ -44,6 +44,21 @@ const SNAPSHOT_PART_TRAILER_BITS := 8
 ## Where a snapshot's 12-bit entity count starts, after the 32-bit tick.
 const SNAPSHOT_COUNT_BIT := 32
 
+## The first byte of a snapshot part's tail when it lists unchanged entities (see
+## [code]docs/wire.md#unchanged-entities[/code]). Read by a client from before the tail as a
+## part trailer, it is part 15 of 1, which that client refuses as a bad trailer rather than
+## misreading; it is never sent to one, but a mistake in that gate fails loudly.
+const UNCHANGED_TAIL_MARK := 0x0F
+
+## A tail is the mark, the runs and an always-present part trailer, so at least this many bits
+## follow the last entity. A part without one has a trailer of 8 bits or nothing, plus under a
+## byte of padding: fewer than this. The receiver tells them apart by what is left.
+const UNCHANGED_TAIL_MIN_BITS := 16
+
+## The most entities one tail may list, on a client reading one. A bound on what a hostile
+## or broken server can make a client loop over, far above any game's relevant set.
+const MAX_UNCHANGED_LISTED := 1 << 16
+
 ## Snapshot ticks remembered for [member _seen_ticks]. More than a part arriving behind its
 ## tick's other parts could plausibly be late by.
 const SEEN_TICKS_KEPT := 16
@@ -191,6 +206,12 @@ var _seen_ticks: Array[int] = []
 ## See [member DotNetConfig.mtu].
 var snapshots_split: int = 0
 var largest_part_bytes: int = 0
+
+## Server side: entities listed as unchanged rather than written with an empty body, in all,
+## and the bytes their headers would have cost (36 bits for a one-behaviour entity, against
+## a few bits per run of ids). See [code]docs/wire.md#unchanged-entities[/code].
+var unchanged_listed: int = 0
+var unchanged_bytes_saved: int = 0
 
 ## Whether the one warning about an entity too big for [member DotNetConfig.mtu] on its own
 ## has been logged. Once per manager: it is a property of the game's declarations, not of
@@ -704,6 +725,13 @@ func _send_to_peer(
 	var written := 0
 	var remaining_bytes := budget.remaining(peer_id)
 
+	# Entities with nothing to say, listed by id at the end of a part rather than written with
+	# an empty body, for a peer that has said it reads the list. See
+	# docs/wire.md#unchanged-entities.
+	var compact := messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
+	var unchanged: PackedInt32Array = []
+	var unchanged_header_bits := 0
+
 	var acked_tick := int(_acks.get(peer_id, 0))
 	var strict := bool(_ack_wired.get(peer_id, false))
 	# Anything sent longer ago than this is resolved one way or the other, so a peer
@@ -715,10 +743,6 @@ func _send_to_peer(
 		for behaviour in identity.behaviours:
 			estimated += behaviour.estimated_bits(peer_id)
 		estimated = (estimated + 7) >> 3
-
-		if written > 0 and estimated > remaining_bytes:
-			budget.note_starved(peer_id)
-			continue
 
 		# The entity this peer predicts. Its client reads a property's absence as "the
 		# server's is unchanged" and rewinds to what it last received, so for this entity
@@ -734,6 +758,27 @@ func _send_to_peer(
 			behaviour.sync_peer_acks(peer_id, acked_tick, strict)
 			behaviour.trim_pending(peer_id, oldest_pending)
 			dirties.append(behaviour.collect_dirty(peer_id, false, predicted_by_peer))
+
+		if compact:
+			var anything := false
+			for dirty: Array in dirties:
+				if not dirty.is_empty():
+					anything = true
+					break
+			if not anything:
+				# Nothing to write, so nothing for the budget or the parts to weigh: it costs
+				# its share of a run of ids. It still counts as served, for the accumulator.
+				unchanged.append(identity.net_id)
+				unchanged_header_bits += DotNetRegistry.ID_BITS + 6 + 6 * identity.behaviours.size()
+				budget.note_sent(peer_id, identity.net_id, 0)
+				continue
+
+		# After the dirty check, not before: an entity with nothing to say is not one the
+		# budget needs to hold back. Resolving acks first for one that is then held back is
+		# harmless -- the same resolution happens next snapshot either way.
+		if written > 0 and estimated > remaining_bytes:
+			budget.note_starved(peer_id)
+			continue
 
 		# Measured only near the end of a part: an entity is rarely more than twice its full
 		# update's estimate plus 32 bytes (only a long string or a custom codec could be), and
@@ -774,15 +819,39 @@ func _send_to_peer(
 		counts[counts.size() - 1] += 1
 		written += 1
 
-	if written == 0:
-		return false
-
 	# A part that ended up empty (only possible as the last, when everything after the cut
 	# was starved) is not sent: a part with no entities would still be a part the client
-	# waits for before it acknowledges the tick.
-	if counts[counts.size() - 1] == 0:
+	# waits for before it acknowledges the tick. The first part is kept even when empty: a
+	# snapshot of nothing still goes out, see below.
+	if parts.size() > 1 and counts[counts.size() - 1] == 0:
 		parts.pop_back()
 		counts.remove_at(counts.size() - 1)
+
+	# [b]A snapshot goes out every snapshot tick, even with nothing in it.[/b] It is the
+	# client's clock: `sync_from_server`, the receive timeline and the interpolation buffer are
+	# all fed from snapshot arrivals, and the acknowledgement that resolves what is pending
+	# rides on a snapshot applied. When every relevant entity was written each time this could
+	# only be empty with nothing relevant; now that unchanged entities cost a few bits, a quiet
+	# world is a small snapshot, never a missing one. Six bytes, read by every client version.
+
+	# The unchanged list goes at the end of the last part when it fits there, else in a part of
+	# its own, else (sixteen parts already) not at all: those entities then miss one refresh,
+	# exactly as a starved entity does.
+	var tail_part := -1
+	var runs := _unchanged_runs(unchanged)
+	if not runs.is_empty():
+		var tail_bits := _unchanged_tail_bits(runs)
+		if parts[parts.size() - 1].bit_length() + tail_bits <= limit_bits + SNAPSHOT_PART_TRAILER_BITS:
+			tail_part = parts.size() - 1
+		elif parts.size() < MAX_SNAPSHOT_PARTS:
+			parts.append(_begin_snapshot_part(tick))
+			counts.append(0)
+			tail_part = parts.size() - 1
+		else:
+			budget.note_starved(peer_id)
+		if tail_part >= 0:
+			unchanged_listed += unchanged.size()
+			unchanged_bytes_saved += maxi(0, (unchanged_header_bits - tail_bits) >> 3)
 
 	var total := parts.size()
 	if total > 1:
@@ -791,8 +860,13 @@ func _send_to_peer(
 	for index in total:
 		var part := parts[index]
 		# Only a split snapshot carries the trailer, so one that fits is byte for byte what
-		# this addon sent before parts existed.
-		if total > 1:
+		# this addon sent before parts existed -- unless it lists unchanged entities, whose tail
+		# always ends in one.
+		if index == tail_part:
+			_write_unchanged_tail(part, runs)
+			part.write_uint(index, 4)
+			part.write_uint(total - 1, 4)
+		elif total > 1:
 			part.write_uint(index, 4)
 			part.write_uint(total - 1, 4)
 
@@ -810,9 +884,98 @@ func _send_to_peer(
 
 		largest_part_bytes = maxi(largest_part_bytes, payload.size())
 		budget.note_packet(peer_id, payload.size())
-		stats.note_sent(payload.size(), count)
+		stats.note_sent(payload.size(), count + (unchanged.size() if index == tail_part else 0))
 
 	return true
+
+
+## [param ids] (in the order they were served) as runs of consecutive ids, sorted:
+## [code][start, length, start, length, ...][/code].
+static func _unchanged_runs(ids: PackedInt32Array) -> PackedInt32Array:
+	var out: PackedInt32Array = []
+	if ids.is_empty():
+		return out
+	var sorted := ids.duplicate()
+	sorted.sort()
+	var start := sorted[0]
+	var length := 1
+	for i in range(1, sorted.size()):
+		var id := sorted[i]
+		if id == start + length:
+			length += 1
+		elif id >= start + length:
+			out.append(start)
+			out.append(length)
+			start = id
+			length = 1
+	out.append(start)
+	out.append(length)
+	return out
+
+
+## Bits [method _write_unchanged_tail] writes for [param runs], plus the part trailer after it.
+static func _unchanged_tail_bits(runs: PackedInt32Array) -> int:
+	var bits := 8 + _gamma_bits(runs.size() >> 1) + SNAPSHOT_PART_TRAILER_BITS
+	var cursor := 0
+	for i in range(0, runs.size(), 2):
+		bits += _gamma_bits(runs[i] - cursor) + _gamma_bits(runs[i + 1] - 1)
+		cursor = runs[i] + runs[i + 1]
+	return bits
+
+
+## The mark, the number of runs, and each run as the gap from the end of the one before and
+## its length less one, all Elias gamma: a contiguous block of ids costs a few bits whatever
+## its size, a scattered set a few bits an entity. See docs/wire.md#unchanged-entities.
+static func _write_unchanged_tail(writer: DotNetWriter, runs: PackedInt32Array) -> void:
+	writer.write_uint(UNCHANGED_TAIL_MARK, 8)
+	_write_gamma(writer, runs.size() >> 1)
+	var cursor := 0
+	for i in range(0, runs.size(), 2):
+		_write_gamma(writer, runs[i] - cursor)
+		_write_gamma(writer, runs[i + 1] - 1)
+		cursor = runs[i] + runs[i + 1]
+
+
+## Elias gamma of [code]value + 1[/code], so zero is one bit: as many zero bits as the number
+## has bits after its leading one, then the number from its leading one down. Written
+## most-significant bit first, one bit at a time, because the reader counts zeros to learn
+## the width.
+static func _write_gamma(writer: DotNetWriter, value: int) -> void:
+	var n := value + 1
+	var width := 0
+	while (n >> (width + 1)) != 0:
+		width += 1
+	if width > 0:
+		writer.write_bits(0, width)
+	for bit in range(width, -1, -1):
+		writer.write_bits((n >> bit) & 1, 1)
+
+
+static func _gamma_bits(value: int) -> int:
+	var n := value + 1
+	var width := 0
+	while (n >> (width + 1)) != 0:
+		width += 1
+	return 2 * width + 1
+
+
+## The reader's half of [method _write_gamma]. -1, with the reader failed or not, for a width
+## past [constant DotNetRegistry.ID_BITS]: no id, gap or run needs more, and a stream of zeros
+## from a broken packet must not become a long loop.
+static func _read_gamma(reader: DotNetReader) -> int:
+	var width := 0
+	while reader.read_bits(1) == 0:
+		if not reader.ok():
+			return -1
+		width += 1
+		if width > DotNetRegistry.ID_BITS:
+			return -1
+	var n := 1
+	for _i in width:
+		n = (n << 1) | reader.read_bits(1)
+	if not reader.ok():
+		return -1
+	return n - 1
 
 
 ## A snapshot part's header: the tick, and a count patched in once the entities are written.
@@ -909,76 +1072,31 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 				)
 			return DotResult.success(tick)
 
-		var values := {}
+		var applied := _apply_entity(identity, tick, reader, behaviour_count)
+		if not applied.ok:
+			stats.note_decode_failure()
+			return applied
 
-		for b in range(behaviour_count):
-			if b >= identity.behaviours.size():
-				stats.note_decode_failure()
-				return DotResult.fail(
-					DotError.CODE_VERSION,
-					"Behaviour count mismatch.",
-					"entity %d: sent %d, local has %d"
-						% [net_id, behaviour_count, identity.behaviours.size()]
-				)
-
-			var behaviour := identity.behaviours[b]
-
-			# A predicted entity's state goes to reconciliation rather than being
-			# applied: applying it directly would undo everything predicted since.
-			#
-			# [b]And what goes is the server's whole state, not the properties.[/b] A
-			# snapshot carries only what changed, and on the owning client the properties
-			# hold its own prediction between snapshots — so reading them back here, which
-			# is what this did, made "the server has nothing new to say" into "the server
-			# agrees with you", and the replay then ran the lead a second time on top of
-			# it. A client the server held still — a server-only freeze, a wall only the
-			# server has, any refusal that changes nothing replicated — walked away at
-			# twice its speed and was never pulled back: 113 units in game-hungario's
-			# naive admin control, 530 in the lobby's. `rewind` puts what the snapshot
-			# left out back to what the server last sent, before the game's
-			# `_net_state_applied` copies the properties into its simulation.
-			if identity.is_predicted():
-				var applied := behaviour.read_state(reader, tick, true)
-				if not applied.ok:
-					stats.note_decode_failure()
-					return applied
-				values.merge(behaviour.authoritative_values(), true)
-			else:
-				var applied2 := behaviour.read_state(reader, tick)
-				if not applied2.ok:
-					stats.note_decode_failure()
-					return applied2
-
-				# [b]What the server last SENT, not what the property holds.[/b] Between
-				# snapshots an interpolated property holds the interpolator's own output —
-				# `apply` writes the blend into it every frame — so reading it back here
-				# handed the interpolator its own half-way value as the server's word for
-				# every property this snapshot did not carry. Anything interpolated that
-				# changed once and then stood still froze part of the way there: a remote
-				# player who turned to 90 degrees was drawn at 82.5 for ever, and one who
-				# stopped was drawn short of where they stopped. The same shape as #17 on
-				# the other path. It hid while the render delay was in the wrong unit
-				# (#18), because a render time past the newest snapshot answers with the
-				# newest values and never a blend.
-				var received := behaviour.received_values()
-				for declaration in behaviour.net_vars:
-					if declaration.interpolate and received.has(declaration.property):
-						values[declaration.property] = received[declaration.property]
-
-		if identity.is_predicted():
-			predictor.reconcile(
-				identity, tick, values, _local_inputs, clock.tick,
-				clock.tick_duration()
-			)
-			_local_inputs.acknowledge(tick)
-		elif not values.is_empty():
-			interpolator.push(net_id, tick, values)
-
-	# Which part this was. Only a split snapshot carries the trailer (see [method
-	# _send_to_peer]); what is left of an unsplit one is under a byte of padding.
+	# Which part this was, and whether it lists unchanged entities. Only a split snapshot, or
+	# one with an unchanged list, has anything after its entities (see [method _send_to_peer]):
+	# what is left of any other is under a byte of padding, a bare trailer is 8 bits more, and
+	# a tail is the mark, the runs and a trailer, at least UNCHANGED_TAIL_MIN_BITS.
 	var part := 0
 	var total := 1
-	if reader.bits_remaining() >= SNAPSHOT_PART_TRAILER_BITS:
+	if reader.bits_remaining() >= UNCHANGED_TAIL_MIN_BITS:
+		var listed := _apply_unchanged_tail(reader, tick)
+		if not listed.ok:
+			stats.note_decode_failure()
+			return listed
+		part = reader.read_uint(4)
+		total = reader.read_uint(4) + 1
+		if not reader.ok() or part >= total:
+			stats.note_decode_failure()
+			return DotResult.fail(
+				DotError.CODE_PARSE, "Bad snapshot part trailer.",
+				"part %d of %d" % [part, total]
+			)
+	elif reader.bits_remaining() >= SNAPSHOT_PART_TRAILER_BITS:
 		part = reader.read_uint(4)
 		total = reader.read_uint(4) + 1
 		if not reader.ok() or total < 2 or part >= total:
@@ -1005,6 +1123,126 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 
 	snapshot_applied.emit(tick)
 	return DotResult.success(tick)
+
+
+## One entity of a snapshot, client side: its body read from [param reader], or, with a null
+## reader, an entity the snapshot listed as unchanged, applied exactly as an empty body would
+## be ([method DotNetBehaviour.apply_unchanged]). Either way the predictor or the interpolator
+## hears about it at this tick, which is what keeps a still entity's rewind and its
+## interpolation samples the same whether the server wrote it out or listed it.
+func _apply_entity(
+	identity: DotNetIdentity, tick: int, reader: DotNetReader, behaviour_count: int
+) -> DotResult:
+	var values := {}
+
+	for b in range(behaviour_count):
+		if b >= identity.behaviours.size():
+			return DotResult.fail(
+				DotError.CODE_VERSION,
+				"Behaviour count mismatch.",
+				"entity %d: sent %d, local has %d"
+					% [identity.net_id, behaviour_count, identity.behaviours.size()]
+			)
+
+		var behaviour := identity.behaviours[b]
+
+		# A predicted entity's state goes to reconciliation rather than being
+		# applied: applying it directly would undo everything predicted since.
+		#
+		# [b]And what goes is the server's whole state, not the properties.[/b] A
+		# snapshot carries only what changed, and on the owning client the properties
+		# hold its own prediction between snapshots — so reading them back here, which
+		# is what this did, made "the server has nothing new to say" into "the server
+		# agrees with you", and the replay then ran the lead a second time on top of
+		# it. A client the server held still — a server-only freeze, a wall only the
+		# server has, any refusal that changes nothing replicated — walked away at
+		# twice its speed and was never pulled back: 113 units in game-hungario's
+		# naive admin control, 530 in the lobby's. `rewind` puts what the snapshot
+		# left out back to what the server last sent, before the game's
+		# `_net_state_applied` copies the properties into its simulation.
+		if identity.is_predicted():
+			var applied: DotResult = DotResult.success(0)
+			if reader == null:
+				behaviour.apply_unchanged(tick, true)
+			else:
+				applied = behaviour.read_state(reader, tick, true)
+			if not applied.ok:
+				return applied
+			values.merge(behaviour.authoritative_values(), true)
+		else:
+			var applied2: DotResult = DotResult.success(0)
+			if reader == null:
+				behaviour.apply_unchanged(tick)
+			else:
+				applied2 = behaviour.read_state(reader, tick)
+			if not applied2.ok:
+				return applied2
+
+			# [b]What the server last SENT, not what the property holds.[/b] Between
+			# snapshots an interpolated property holds the interpolator's own output —
+			# `apply` writes the blend into it every frame — so reading it back here
+			# handed the interpolator its own half-way value as the server's word for
+			# every property this snapshot did not carry. Anything interpolated that
+			# changed once and then stood still froze part of the way there: a remote
+			# player who turned to 90 degrees was drawn at 82.5 for ever, and one who
+			# stopped was drawn short of where they stopped. The same shape as #17 on
+			# the other path. It hid while the render delay was in the wrong unit
+			# (#18), because a render time past the newest snapshot answers with the
+			# newest values and never a blend.
+			var received := behaviour.received_values()
+			for declaration in behaviour.net_vars:
+				if declaration.interpolate and received.has(declaration.property):
+					values[declaration.property] = received[declaration.property]
+
+	if identity.is_predicted():
+		predictor.reconcile(
+			identity, tick, values, _local_inputs, clock.tick,
+			clock.tick_duration()
+		)
+		_local_inputs.acknowledge(tick)
+	elif not values.is_empty():
+		interpolator.push(identity.net_id, tick, values)
+
+	return DotResult.success(tick)
+
+
+## The unchanged list in a snapshot part's tail (see [method _write_unchanged_tail]): every id
+## in it applied as an entity whose body was empty. An id this client does not hold is
+## skipped, which, unlike a body, it can be: there is nothing to step over. Leaves the reader
+## at the part trailer.
+func _apply_unchanged_tail(reader: DotNetReader, tick: int) -> DotResult:
+	var mark := reader.read_uint(8)
+	if not reader.ok() or mark != UNCHANGED_TAIL_MARK:
+		return DotResult.fail(DotError.CODE_PARSE, "Bad snapshot tail.", "mark %d" % mark)
+
+	var run_count := _read_gamma(reader)
+	if run_count < 0 or run_count > MAX_UNCHANGED_LISTED:
+		return DotResult.fail(DotError.CODE_PARSE, "Bad unchanged-entity list.")
+
+	var ids: PackedInt32Array = []
+	var cursor := 0
+	for _r in run_count:
+		var gap := _read_gamma(reader)
+		var length := _read_gamma(reader) + 1
+		if gap < 0 or length < 1 or ids.size() + length > MAX_UNCHANGED_LISTED:
+			return DotResult.fail(DotError.CODE_PARSE, "Bad unchanged-entity run.")
+		var first := cursor + gap
+		if first + length > (1 << DotNetRegistry.ID_BITS):
+			return DotResult.fail(DotError.CODE_PARSE, "Unchanged-entity run out of range.")
+		for id in range(first, first + length):
+			ids.append(id)
+		cursor = first + length
+
+	# Read whole before applying any: a list that turns out truncated must change nothing.
+	for net_id in ids:
+		var identity := registry.get_identity(net_id)
+		if identity == null:
+			continue
+		var applied := _apply_entity(identity, tick, null, identity.behaviours.size())
+		if not applied.ok:
+			return applied
+
+	return DotResult.success(ids.size())
 
 
 # --- Acknowledgements ------------------------------------------------------
@@ -1206,6 +1444,8 @@ func describe() -> Dictionary:
 		d["snapshots_split"] = snapshots_split
 		d["largest_part_bytes"] = largest_part_bytes
 		d["mtu"] = config.mtu if config != null else 0
+		d["unchanged_listed"] = unchanged_listed
+		d["unchanged_bytes_saved"] = unchanged_bytes_saved
 
 	if interpolator != null:
 		d["interpolation"] = interpolator.describe()
@@ -1235,6 +1475,9 @@ func describe_lines() -> PackedStringArray:
 	if is_server and config != null:
 		out.append("snapshots  %d split, largest part %d B of %d" % [
 			snapshots_split, largest_part_bytes, config.mtu
+		])
+		out.append("unchanged  %d listed, %d B of headers saved" % [
+			unchanged_listed, unchanged_bytes_saved
 		])
 
 	if stats != null:

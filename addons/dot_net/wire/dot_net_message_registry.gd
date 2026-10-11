@@ -63,6 +63,22 @@ const MAX_NAME_BYTES := 128
 ## bits must not cause an allocation.
 const MAX_BODY_BITS := 1 << 24
 
+## Wire features beyond the messages, as bits of one varint appended to the schema table.
+##
+## The table already goes to every peer before it matters, and an end built before a field
+## was appended to it reads what it knows and skips the rest, so it is where one end says
+## "I can read this" without a message type of its own. A sender uses a feature only once
+## the peer's table has arrived and named it ([method peer_supports]); an older peer never
+## names one and is sent what it has always read.
+##
+## [constant FEATURE_UNCHANGED_RUNS]: snapshots may list unchanged entities by id instead of
+## writing an empty body for each (see [code]docs/wire.md#unchanged-entities[/code]).
+const FEATURE_UNCHANGED_RUNS := 1
+
+## What this end announces. Every feature this build reads, by default; a test that wants to
+## be an older peer clears it before the table is sent.
+var features: int = FEATURE_UNCHANGED_RUNS
+
 ## A peer's schema table arrived and was compatible.
 signal peer_adopted(peer_id: int)
 
@@ -306,6 +322,9 @@ func schema_payload() -> PackedByteArray:
 		body.write_uint(int(entry["direction"]), 2)
 		body.write_uint(int(entry["delivery"]), 2)
 
+	# Appended after the table shipped, so an older reader stops before it.
+	body.write_varint(features)
+
 	var writer := DotNetWriter.new()
 	_frame(writer, SCHEMA_ID, body)
 	return writer.to_bytes()
@@ -346,6 +365,13 @@ func adopt_peer_schema(peer_id: int, reader: DotNetReader, is_server: bool) -> D
 
 		names[name] = {"required": required, "direction": direction, "delivery": delivery}
 
+	# A table from before features were appended has nothing more, and offers none.
+	var peer_features := 0
+	if reader.has_more():
+		peer_features = reader.read_varint()
+		if not reader.ok() or peer_features < 0:
+			peer_features = 0
+
 	# Ids a peer means by a DIFFERENT name than this end does. Astronomically unlikely and
 	# checkable only here, where both names are finally side by side.
 	var blocked := {}
@@ -368,7 +394,7 @@ func adopt_peer_schema(peer_id: int, reader: DotNetReader, is_server: bool) -> D
 			missing_here.append(name)
 	missing_here.sort()
 
-	_peers[peer_id] = {"names": names, "blocked": blocked}
+	_peers[peer_id] = {"names": names, "blocked": blocked, "features": peer_features}
 
 	var refusal := explain(missing_there, missing_here, conflicts, is_server)
 
@@ -458,6 +484,17 @@ func peer_has(peer_id: int, type_name: StringName) -> bool:
 	if not _peers.has(peer_id):
 		return true
 	return (_peers[peer_id]["names"] as Dictionary).has(String(type_name))
+
+
+## Whether a peer has said it reads a wire [param feature] (a [code]FEATURE_*[/code] bit).
+##
+## False until its table arrives, unlike [method peer_has]: a feature changes what a packet
+## means, and a peer that cannot read one misreads the packet rather than skipping a
+## message, so the answer before the table is "no".
+func peer_supports(peer_id: int, feature: int) -> bool:
+	if not _peers.has(peer_id):
+		return false
+	return (int(_peers[peer_id].get("features", 0)) & feature) == feature
 
 
 func is_refused(peer_id: int) -> bool:

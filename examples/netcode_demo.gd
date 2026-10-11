@@ -113,6 +113,33 @@ class Interpolated extends DotNetBehaviour:
 		rendered = position
 
 
+## A [Movement] that records every snapshot that told it anything, as a game's per-snapshot
+## bookkeeping does (`last_state_tick`, a relevance check, a redraw).
+class Counted extends Movement:
+	var applied: int = 0
+	var last_applied: int = -1
+
+	func _net_state_applied(tick: int) -> void:
+		applied += 1
+		last_applied = tick
+
+
+## Relevant unless excluded, by net id. What "it walked out of view" is to a test.
+class ExcludeInterest extends DotNetInterest:
+	var excluded := {}
+
+	func _init() -> void:
+		strategy_name = "all-but"
+		evaluation_interval_sec = 0.0
+
+	func _is_relevant(
+		_observer: DotNetIdentity,
+		entity: DotNetIdentity,
+		_context: Dictionary
+	) -> bool:
+		return not excluded.has(entity.net_id)
+
+
 ## A player's controls.
 class DemoInput extends DotNetInput:
 	var move: Vector2 = Vector2.ZERO
@@ -220,7 +247,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 325
+const CHECKS := 342
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -286,6 +313,7 @@ func _run() -> void:
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
 	_test_snapshot_parts()
+	_test_unchanged_entities()
 	_test_input_batches()
 	await _test_integration()
 
@@ -2391,6 +2419,27 @@ func _test_standing_still() -> void:
 		float(moving["worst"]) < 0.05
 	)
 
+	# The same hold, with the server listing the entity as unchanged rather than writing an
+	# empty body for it. The client must reconcile on every snapshot exactly as before:
+	# reconcile is where its inputs are acknowledged and where the hold is enforced, so a
+	# listed entity that skipped it would walk away again (#17).
+	var listed := _standing_still_run(false, false, 0, true)
+	_check(
+		"listed as unchanged: pulled back all the same (worst %.2f m)" % float(listed["worst"]),
+		float(listed["worst"]) <= held_bound
+	)
+	_check(
+		"listed: every snapshot still reconciles it (%d of %d)"
+			% [int(listed["replays"]), int(listed["snapshots"])],
+		int(listed["replays"]) == int(listed["snapshots"]) and int(listed["snapshots"]) > 0
+			and int(listed["stale"]) == 0
+	)
+	_check(
+		"listed: and held still it costs less than its header (%d B, was %d)"
+			% [int(listed["tail_bytes"]), int(held["tail_bytes"])],
+		int(listed["tail_bytes"]) < int(held["tail_bytes"])
+	)
+
 
 const STILL_LEAD := 3
 const STILL_INTERVAL := 3
@@ -2407,9 +2456,9 @@ const STILL_STOP_AT := 60
 ## Returns the worst and final gap between where the client predicted the entity at a
 ## tick and where the server had it at that tick, and how many times the client rewound
 ## to a position the server did not have at the snapshot's tick.
-func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int) -> Dictionary:
+func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact: bool = false) -> Dictionary:
 	const TICKS := 120
-	var scope := "still_%d_%d_%d" % [int(server_moves), int(lossy), stop_at]
+	var scope := "still_%d_%d_%d_%d" % [int(server_moves), int(lossy), stop_at, int(compact)]
 
 	var host := DotNetManager.new()
 	host.name = "StillServer_" + scope
@@ -2459,6 +2508,14 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int) -> Dicti
 			lost_ticks.append(now[0])
 			return
 		wire.append({"payload": payload, "tick": now[0]})
+
+	# The client's schema reaches the server only when asked for: it is what tells the server
+	# this client reads unchanged lists (docs/wire.md#unchanged-entities). Without it the
+	# runs below are the format every client before the lists reads.
+	if compact:
+		guest.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+			if d != DotNetMessage.Delivery.UNRELIABLE:
+				var _adopted := host.receive(payload, 2)
 
 	var _c := host.start()
 	var _d := guest.start()
@@ -2999,6 +3056,226 @@ func _test_snapshot_parts() -> void:
 	remove_child(watcher)
 	host.free()
 	watcher.free()
+
+
+## [b]An entity with nothing to say is listed, not written.[/b] Every relevant entity used to
+## go out every snapshot with its 24-bit id and a 6-bit count per behaviour even when nothing
+## had changed: about 396 of mg-buses-from-hell's 429 steady bytes, 88 entities of headers.
+## A client that announces [constant DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS] is sent
+## those as runs of ids in the part's tail and applies each exactly as an empty body, so
+## `_net_state_applied`, the interpolator and relevance all read as before. Armed, each fix
+## reverted in turn: the send side off sends 149 B against 149 B and writes all 30; the
+## receive side ignoring the list fires the hook for 1 of 30, splits fail to apply, and
+## [method _test_standing_still]'s listed run walks 19.5 m off (#17's shape); the old early
+## return sends 0 B to a peer with nothing relevant and its acknowledgement stays at 9.
+func _test_unchanged_entities() -> void:
+	print("")
+	print("[unchanged entities]")
+
+	const ENTITIES := 30
+
+	var host := _parts_manager("QuietServer", true, 1200)
+	var fresh := _parts_manager("QuietClient", false, 1200)
+	var legacy := _parts_manager("QuietLegacy", false, 1200)
+	legacy.local_peer_id = 3
+	# A client from before the lists: it announces no features, as its table had none.
+	legacy.messages.features = 0
+	var exclude := ExcludeInterest.new()
+	host.interest = exclude
+
+	var sent := {2: [], 3: []}
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		var to: DotNetManager = fresh if peer_id == 2 else legacy
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := to.receive(payload, 1)
+			return
+		(sent[peer_id] as Array).append(payload)
+	fresh.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 2)
+	legacy.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 3)
+
+	host.start()
+	fresh.start()
+	legacy.start()
+	host.add_peer(2)
+	host.add_peer(3)
+	for m in [host, fresh, legacy]:
+		(m as DotNetManager).spawner.register_factory(&"counted", _build_counted)
+
+	_check("the new client says it reads unchanged lists, the old one does not",
+		host.messages.peer_supports(2, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
+			and not host.messages.peer_supports(3, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS))
+
+	var on_server: Array[Counted] = []
+	var on_fresh: Array[Counted] = []
+	var on_legacy: Array[Counted] = []
+	for i in ENTITIES:
+		# Owned by nobody here, so both clients interpolate them.
+		var spawned: DotNetIdentity = host.spawner.spawn(&"counted", 9, Transform3D.IDENTITY, 0).value
+		# Out of view means out at once, not after the boundary's grace period.
+		spawned.interest_linger_sec = 0.0
+		var _f := fresh.spawner.spawn_remote(&"counted", spawned.net_id, 9, Transform3D.IDENTITY, 0)
+		var _l := legacy.spawner.spawn_remote(&"counted", spawned.net_id, 9, Transform3D.IDENTITY, 0)
+		on_server.append(spawned.behaviours[0] as Counted)
+		on_fresh.append(fresh.registry.get_identity(spawned.net_id).behaviours[0] as Counted)
+		on_legacy.append(legacy.registry.get_identity(spawned.net_id).behaviours[0] as Counted)
+
+	var deliver := func(tick: int) -> void:
+		host.server_tick(tick)
+		for payload: PackedByteArray in sent[2]:
+			var _r := fresh.receive_snapshot(payload)
+		for payload: PackedByteArray in sent[3]:
+			var _r := legacy.receive_snapshot(payload)
+		var _a := host.receive_ack_payload(2, fresh.encode_ack())
+		var _b := host.receive_ack_payload(3, legacy.encode_ack())
+
+	var sizes := func(peer: int) -> int:
+		var n := 0
+		for payload: PackedByteArray in sent[peer]:
+			n += payload.size()
+		return n
+
+	var all_at := func(list: Array[Counted], tick: int) -> int:
+		var n := 0
+		for c in list:
+			if c.last_applied == tick:
+				n += 1
+		return n
+
+	# Everything once, then only entity 0 moves.
+	for i in ENTITIES:
+		on_server[i].position = Vector3(1.0 + i, 0, 0)
+	deliver.call(3)
+	sent[2].clear()
+	sent[3].clear()
+	on_server[0].position = Vector3(50, 0, 0)
+	deliver.call(6)
+
+	var compact_bytes: int = sizes.call(2)
+	var legacy_bytes: int = sizes.call(3)
+	# 29 entities of 36 bits is 130 bytes of headers; the list of them is a few bits.
+	_check("29 unchanged entities cost a few bits, not 130 B (%d B, old format %d B)"
+			% [compact_bytes, legacy_bytes],
+		compact_bytes + 120 <= legacy_bytes)
+	_check("and only the moving entity is written (%d)" % _part_count(sent[2][0]),
+		sent[2].size() == 1 and _part_count(sent[2][0]) == 1)
+	_check("every entity's per-snapshot hook fired at the new tick (%d of %d)"
+			% [all_at.call(on_fresh, 6), ENTITIES],
+		all_at.call(on_fresh, 6) == ENTITIES)
+	_check("as it does on the old format (%d of %d)" % [all_at.call(on_legacy, 6), ENTITIES],
+		all_at.call(on_legacy, 6) == ENTITIES)
+	var tracked := 0
+	for i in ENTITIES:
+		var track: Variant = fresh.interpolator._tracks.get(on_fresh[i].identity.net_id)
+		if track != null and int(track.newest_tick()) == 6:
+			tracked += 1
+	_check("the interpolator holds a sample at that tick for each (%d)" % tracked, tracked == ENTITIES)
+	_check("and both acknowledge it (%d, %d)" % [fresh.ack_tick(), legacy.ack_tick()],
+		fresh.ack_tick() == 6 and legacy.ack_tick() == 6)
+
+	# Out of view: neither written nor listed, so it hears nothing, on either format.
+	exclude.excluded[on_server[5].identity.net_id] = true
+	sent[2].clear()
+	sent[3].clear()
+	deliver.call(9)
+	_check("an entity that left relevance is not listed (last %d, others %d of %d)"
+			% [on_fresh[5].last_applied, all_at.call(on_fresh, 9), ENTITIES - 1],
+		on_fresh[5].last_applied == 6 and all_at.call(on_fresh, 9) == ENTITIES - 1
+			and on_legacy[5].last_applied == 6)
+
+	# Nothing relevant at all: a snapshot still goes, for the clock and the acknowledgement.
+	for c in on_server:
+		exclude.excluded[c.identity.net_id] = true
+	sent[2].clear()
+	sent[3].clear()
+	deliver.call(12)
+	_check("with nothing relevant a header-only snapshot is still sent (%d B, %d B)"
+			% [sizes.call(2), sizes.call(3)],
+		sent[2].size() == 1 and sent[3].size() == 1 and _part_count(sent[2][0]) == 0
+			and (sent[2][0] as PackedByteArray).size() == 6 and (sent[3][0] as PackedByteArray).size() == 6)
+	_check("and it feeds the clock and is acknowledged (%d, %d)" % [fresh.ack_tick(), legacy.ack_tick()],
+		fresh.ack_tick() == 12 and legacy.ack_tick() == 12 and fresh.clock.received_tick() >= 12)
+	exclude.excluded.clear()
+
+	# Over the MTU with a list: every part applies and the tick is acknowledged.
+	host.config.mtu = 96
+	for i in range(0, ENTITIES, 3):
+		on_server[i].position = Vector3(500.0 + i, 0, 0)
+	sent[2].clear()
+	sent[3].clear()
+	var failures := fresh.stats.decode_failures
+	deliver.call(15)
+	_check("split with a list: %d parts, all applied, tick acknowledged (%d)" % [sent[2].size(), fresh.ack_tick()],
+		sent[2].size() > 1 and fresh.ack_tick() == 15 and all_at.call(on_fresh, 15) == ENTITIES
+			and fresh.stats.decode_failures == failures)
+	host.config.mtu = 1200
+
+	# An old client handed a tail by mistake refuses it as a bad part trailer, not a misread.
+	var mark := DotNetManager.UNCHANGED_TAIL_MARK
+	_check("the tail's mark reads to an old client as an impossible trailer",
+		(mark & 0xF) >= (mark >> 4) + 1)
+
+	# The run codec, against sets a contiguous block, a scatter and a mix.
+	var codec_ok := true
+	var sets := [[1, 2, 3, 4, 5], [7, 100, 4000, 16000000], [3, 4, 9, 10, 11, 12, 40], [1]]
+	for ids_set: Array in sets:
+		var ids := PackedInt32Array(ids_set)
+		var runs := DotNetManager._unchanged_runs(ids)
+		var w := DotNetWriter.new()
+		DotNetManager._write_unchanged_tail(w, runs)
+		var r := w.to_reader()
+		var got: Array = []
+		var _m := r.read_uint(8)
+		var count := DotNetManager._read_gamma(r)
+		var cursor := 0
+		for _k in count:
+			var first := cursor + DotNetManager._read_gamma(r)
+			var length := DotNetManager._read_gamma(r) + 1
+			for id in range(first, first + length):
+				got.append(id)
+			cursor = first + length
+		if got != ids_set or w.bit_length() + DotNetManager.SNAPSHOT_PART_TRAILER_BITS \
+				!= DotNetManager._unchanged_tail_bits(runs):
+			codec_ok = false
+	_check("unchanged runs round-trip, and their size is known before writing", codec_ok)
+
+	# A truncated list changes nothing and is a decode failure.
+	var bad := DotNetWriter.new()
+	bad.write_uint(20, 32)
+	bad.write_uint(0, 12)
+	bad.write_uint(DotNetManager.UNCHANGED_TAIL_MARK, 8)
+	DotNetManager._write_gamma(bad, 1)
+	DotNetManager._write_gamma(bad, on_fresh[0].identity.net_id)
+	bad.write_bits(0, 12)
+	var before := on_fresh[0].applied
+	var refused := fresh.receive_snapshot(bad.to_bytes())
+	_check("a truncated list is refused and applies nothing",
+		not refused.ok and on_fresh[0].applied == before)
+
+	host.stop()
+	fresh.stop()
+	legacy.stop()
+	for m in [host, fresh, legacy]:
+		remove_child(m)
+		(m as DotNetManager).free()
+
+
+func _build_counted(_context: Dictionary) -> Node:
+	var identity := _make_entity(&"counted", 0)
+	var body := identity.get_parent()
+	var old := identity.behaviours[0]
+	body.remove_child(old)
+	old.free()
+	var counted := Counted.new()
+	counted.name = "Movement"
+	body.add_child(counted)
+	identity.behaviours = [counted]
+	counted.identity = identity
+	counted._bind(DotNetConfig.new())
+	return body
 
 
 func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:

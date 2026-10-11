@@ -32,7 +32,7 @@ When a snapshot is confirmed lost its entry leaves `pending` without reaching `a
 
 Two cases keep a property in every snapshot until the peer confirms its current value, rather than sending once and trusting it:
 
-- **The entity a peer owns and predicts** (`owner_peer_id == peer` and `Authority.SHARED`): `collect_dirty(..., until_acked = true)`. Its client reads a property's absence as "unchanged" and rewinds to the value last received ([prediction.md](prediction.md#what-the-server-said)), so a stale value there is a correction toward the wrong place, every snapshot for a round trip. A property that changes every snapshot costs nothing extra; an entity held still costs its header.
+- **The entity a peer owns and predicts** (`owner_peer_id == peer` and `Authority.SHARED`): `collect_dirty(..., until_acked = true)`. Its client reads a property's absence as "unchanged" and rewinds to the value last received ([prediction.md](prediction.md#what-the-server-said)), so a stale value there is a correction toward the wrong place, every snapshot for a round trip. A property that changes every snapshot costs nothing extra; an entity held still and confirmed costs its share of a run of ids ([wire.md](wire.md#unchanged-entities)), or its 36-bit header to a client that does not read the list.
 - **A property lost once** (`PeerView.relost`, set when an unconfirmed send is dropped as lost, cleared on confirmation). Re-sending once, in the very next snapshot, never converged on a link that held back every other snapshot. A clean link pays nothing.
 
 ## The interest cache is a cache of one instant
@@ -59,6 +59,8 @@ Measured with 32 players at 128 ticks (game-g2gfast's `tools/load_probe`), nearl
 - **`collect_dirty` is written out** rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per property, and `DotNetVar.differs` is inlined for a declaration with no epsilon; at 32 players the calls cost more than the comparisons. Same rules, same order.
 - **`trim_pending` returns on its oldest entry** when that is inside the window, and otherwise pops the aged-out prefix off the front rather than rebuilding the list. A host without acks ages one entry out per snapshot, and the rebuild was 2.9 of 8.8 ms at 32 players.
 - **`DotNetConfig.stagger_snapshots`** (off by default): peer `p` gets its snapshot on ticks where `p % ticks_per_snapshot() == tick % ticks_per_snapshot()`, so no one tick builds all of them. Every peer still hears at the same rate. Lag-compensation history is recorded every tick when it is on.
+
+On the wire, an entity with nothing dirty for this peer is listed by id in the part's tail rather than written with an empty body, for a client that reads the list ([wire.md](wire.md#unchanged-entities)); it costs the budget nothing and resets its accumulator as a sent one does.
 
 What is left after that is the game half of the tick, not the network.
 

@@ -18,7 +18,7 @@ Read the family [CLAUDE.md](../../CLAUDE.md) first; this file is only what is sp
 | [docs/timelines.md](docs/timelines.md) | `DotNetClock`, the interpolator, anything about when something is drawn or which tick a command is for |
 | [docs/prediction.md](docs/prediction.md) | `_net_simulate`, `DotNetPredictor`, `DotNetInput`, reconciliation, lag compensation |
 | [docs/replication.md](docs/replication.md) | `DotNetVar`, `DotNetBehaviour`, acked baselines, interest, the budget, snapshot cost |
-| [docs/wire.md](docs/wire.md) | the bit format, message ids, framing, the schema exchange, changing a message, unreliable delivery, snapshot parts and the MTU |
+| [docs/wire.md](docs/wire.md) | the bit format, message ids, framing, the schema exchange, changing a message, unreliable delivery, snapshot parts and the MTU, unchanged entities |
 | [docs/security.md](docs/security.md) | anything a client sends, spawns, message direction, the reader |
 | [docs/testing.md](docs/testing.md) | the three suites, the UDP relay, adding a check |
 | [docs/history.md](docs/history.md) | a netcode bug that "cannot be happening"; the numbered bug list the code comments cite |
@@ -106,6 +106,7 @@ Short forms; the reasoning is in the linked file.
 - A required type the peer lacks raises `peer_schema_refused`; **the host must drop the peer** (dot-net owns no socket). [wire](docs/wire.md#the-schema-exchange)
 - Godot's ENet sends UNRELIABLE as unsequenced: nothing sent unreliable may assume order. [wire](docs/wire.md#unreliable-means-unordered)
 - A snapshot over `config.mtu` goes out in parts, each applying alone; a client acks a tick only when every part is in, and a part of an older tick than one already read is superseded. [wire](docs/wire.md#snapshot-parts)
+- An entity with nothing dirty is listed by id in the part's tail, not written, only to a client whose schema says `FEATURE_UNCHANGED_RUNS`; the client applies it as an empty body, so `_net_state_applied` still fires per snapshot. A snapshot goes out every snapshot tick, even empty. [wire](docs/wire.md#unchanged-entities)
 - Clients send inputs, never state; `_sanitise()` runs on the server after decode; message direction is checked against the transport's sender. [security](docs/security.md)
 
 **GDScript**
