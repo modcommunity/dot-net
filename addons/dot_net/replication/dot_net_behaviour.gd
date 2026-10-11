@@ -358,8 +358,16 @@ func collect_dirty(
 			out.append(declaration)
 			continue
 
-		var dirty := not believed.has(property) \
-			or declaration.differs(believed[property], current)
+		# `differs` inlined for the common declaration, with no epsilon: there it is
+		# exactly "a different type, or not equal" (see [method DotNetVar.differs]).
+		var dirty: bool
+		if not believed.has(property):
+			dirty = true
+		elif declaration.epsilon <= 0.0:
+			var old: Variant = believed[property]
+			dirty = typeof(old) != typeof(current) or old != current
+		else:
+			dirty = declaration.differs(believed[property], current)
 
 		# "Spawn only" means "do not pay for it every snapshot", not "never update": sent
 		# when it changes, and never kept owed until acknowledged as the predicted entity's
