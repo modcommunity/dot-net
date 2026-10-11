@@ -89,6 +89,25 @@ var _accumulator: float = 0.0
 ## Scale applied to tick duration while correcting drift. 1.0 is no correction.
 var _drift_scale: float = 1.0
 
+## Ticks the drawing is behind (+) or ahead (-) of where one tick per physics frame would put
+## it, after physics frames that ran no tick or two. See [method render_alpha].
+var _slip: float = 0.0
+
+## Ticks the receive timeline moved by re-anchoring (not by advancing) that the drawing has
+## not followed yet, negative when it moved forward. See [method receive_slip].
+var _receive_slip: float = 0.0
+
+## How fast the drawing follows a re-anchored receive timeline: ticks of slip taken up per
+## tick of time. 0.2 is the interpolation buffer's own [code]GROW_RATE[/code]: everything
+## remote runs at 80% or 120% speed for a moment instead of jumping.
+const RECEIVE_RECOVERY := 0.2
+
+## How fast a slip is taken up, in ticks per tick of time: twice the most slips drift can
+## make ([constant MAX_DRIFT_RATE]), so they never pile up, and little enough to read as a
+## slight change of speed: the drawing runs a tenth slow or fast for ten ticks, not a tick
+## at once.
+const SLIP_RECOVERY := 0.1
+
 ## The newest snapshot tick, as the quickest recent arrivals place it, advanced locally:
 ## the RECEIVE timeline. [method server_tick] is this plus the flight time; the render
 ## timeline is this less the interpolation delay.
@@ -177,6 +196,15 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 	if not is_authority and _synced:
 		_received_tick += steps
 
+	# A physics frame that ran other than one tick moves what is drawn by the tick it gained
+	# or lost, and the slip left from before is taken up by this frame's time. A tick number
+	# that jumped (a snap, a catch-up) is a jump whatever is drawn, so not a slip.
+	if not is_authority:
+		_receive_slip = move_toward(_receive_slip, 0.0, RECEIVE_RECOVERY * float(tick_rate) * delta)
+		_slip = move_toward(_slip, 0.0, SLIP_RECOVERY * float(tick_rate) * delta)
+		if steps != 1 and absi(steps - 1) <= 1:
+			_slip = clampf(_slip + float(1 - steps), -1.0, 1.0)
+
 	if _accumulator >= step:
 		# Still behind after the cap. Discard the backlog rather than carrying it
 		# into the next frame, where it would produce another oversized burst.
@@ -213,6 +241,65 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 ## simulation", which a diagnostic or a fixed-step consumer may still want.
 func alpha() -> float:
 	return clampf(_accumulator / tick_duration(), 0.0, 1.0)
+
+
+## What to add to [method received_tick] for anything DRAWN on the receive timeline (an
+## interpolation buffer's render time), in ticks: the re-anchoring it has not followed yet,
+## taken up at [constant RECEIVE_RECOVERY] (within the frame as well, from the engine's
+## physics fraction).
+##
+## [b]The receive timeline moves in whole ticks[/b] when a packet comes quicker than any
+## before it (forward at once) or a window of them all came slower (back one). Drawn from it
+## as it is, every remote entity jumps a tick forward or back at that moment: game-arena's
+## `headless_feel` counted 2 to 4 frames a window drawn behind the frame before after its
+## link's delay changed, by a tick each. The timeline itself, and the buffer sizing that
+## reads it, still move at once; only what is drawn follows gently.
+func receive_slip(physics_fraction: float = -1.0, physics_delta: float = -1.0) -> float:
+	if _receive_slip == 0.0:
+		return 0.0
+	if physics_fraction < 0.0:
+		physics_fraction = Engine.get_physics_interpolation_fraction()
+	if physics_delta <= 0.0:
+		physics_delta = 1.0 / float(maxi(1, Engine.physics_ticks_per_second))
+	return move_toward(_receive_slip, 0.0,
+		RECEIVE_RECOVERY * float(tick_rate) * clampf(physics_fraction, 0.0, 1.0) * physics_delta)
+
+
+## How far through the newest tick's step a frame drawn NOW is, in ticks, for anything
+## drawn between this clock's last two ticks: the engine's physics fraction ([param
+## physics_fraction] of a [param physics_delta]-second physics frame, both from the engine
+## when left negative), plus what is left of the last slip. Usually 0..1; from -1 to 2
+## while a slip is taken up.
+##
+## [b]A slip is a physics frame that ran no tick, or two.[/b] The engine's fraction is through
+## a PHYSICS frame, which is a fraction through a tick only while every physics frame runs
+## exactly one. A client's clock stretches or shrinks its ticks while it settles on the
+## server (drift, up to [constant MAX_DRIFT_RATE]), so now and then a physics frame runs none
+## and a later one two. Drawn at the engine's fraction alone, the frame after one with none
+## goes back over the step it just drew (the eye stands still) and the frame after one with
+## two skips a step (it moves double): measured in game-arena's `headless_feel` at 60 Hz
+## against 64 ticks while the clock settled, 8 frames in 5 s 10 to 15 cm off their motion,
+## every one after a physics frame that ran 0 or 2 ticks. So a slip moves this by the tick
+## the frame gained or lost, which keeps the drawing where it was, and that is taken back at
+## [constant SLIP_RECOVERY]: the drawing runs a tenth slow or fast for ten ticks instead of
+## jumping one.
+##
+## Past 1 the frame is later than the newest tick (a renderer extrapolates along the last
+## step, an interpolation buffer samples there); below 0 it is between the two before it.
+## [b]Not a fraction of the clock's own accumulator[/b], which would be continuous too but puts
+## the drawing anywhere up to a tick past the newest tick all the time, not only after a slip:
+## tried, it extrapolated through every landing and wall.
+func render_alpha(physics_fraction: float = -1.0, physics_delta: float = -1.0) -> float:
+	if physics_fraction < 0.0:
+		physics_fraction = Engine.get_physics_interpolation_fraction()
+	var frac := clampf(physics_fraction, 0.0, 1.0)
+	if _slip == 0.0:
+		return frac
+	# Taken up within the frame as well as across frames, so the drawing is continuous at
+	# every physics frame and not just on average.
+	if physics_delta <= 0.0:
+		physics_delta = 1.0 / float(maxi(1, Engine.physics_ticks_per_second))
+	return frac + move_toward(_slip, 0.0, SLIP_RECOVERY * float(tick_rate) * frac * physics_delta)
 
 
 # --- Client synchronisation ------------------------------------------------
@@ -303,12 +390,14 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 	if anchor or absi(ahead) > snap_threshold_ticks():
 		# The first sample, or a different session: nothing to filter against.
 		_received_tick = sampled
+		_receive_slip = 0.0
 		_settle_open = false
 		return
 
 	if ahead >= 0:
 		# As quick as any packet has come: the server is at least this far along.
 		_received_tick = sampled
+		_receive_slip -= float(ahead)
 		_settle_open = false
 		return
 
@@ -322,6 +411,7 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 
 	if _settle_count >= SETTLE_SAMPLES:
 		_received_tick -= 1
+		_receive_slip += 1.0
 		_settle_open = false
 
 
@@ -463,6 +553,8 @@ func reset(start_tick: int = 0) -> void:
 	tick = start_tick
 	_accumulator = 0.0
 	_drift_scale = 1.0
+	_slip = 0.0
+	_receive_slip = 0.0
 	_synced = false
 	_synced_with_rtt = false
 	_rtt_samples.clear()

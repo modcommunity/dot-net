@@ -247,7 +247,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 342
+const CHECKS := 345
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -306,6 +306,7 @@ func _run() -> void:
 	_test_prediction()
 	_test_correction_offsets()
 	_test_buffer_growth()
+	_test_drawing_through_slips()
 	_test_spawning()
 	_test_freed_entity()
 	_test_acked_baselines()
@@ -2196,6 +2197,125 @@ func _test_buffer_growth() -> void:
 		extrapolated, interpolator.delay_ticks()], extrapolated == 0)
 	_check("and on time it needs about an interval (%.1f ticks)" % _settled_delay(config),
 		_settled_delay(config) <= float(period) + 1.5)
+
+
+## What is drawn between ticks stays continuous through the three things that move a
+## client's timelines in jumps: a physics frame that ran no tick or two (the clock drifting),
+## the receive timeline re-anchoring a tick at a time, and a snapshot stream resuming after an
+## extrapolation. Each is played at 144 frames a second against 64 ticks, and each against
+## its control: the same frames drawn the way they were before (the engine's fraction alone,
+## the receive timeline as it is, no easing), which has to show the jump these remove.
+func _test_drawing_through_slips() -> void:
+	print("")
+	print("[drawing through slips]")
+	var frame := 1.0 / 144.0
+	var physics := 1.0 / 64.0
+
+	# 1. Drift. The clock runs its ticks 4% long, so about one physics frame in 25 runs none.
+	var clock := DotNetClock.new(64, false)
+	clock.set("_drift_scale", 1.04)
+	var t := 0.0
+	var physics_time := 0.0
+	var drawn: Array[float] = []
+	var naive: Array[float] = []
+	for _i in range(144 * 3):
+		t += frame
+		while physics_time + physics <= t:
+			physics_time += physics
+			var _steps := clock.advance(physics)
+		var frac := (t - physics_time) / physics
+		drawn.append(float(clock.tick) - 1.0 + clock.render_alpha(frac, physics))
+		naive.append(float(clock.tick) - 1.0 + frac)
+	var worst := _worst_step_change(drawn)
+	var naive_worst := _worst_step_change(naive)
+	_check("a drifting clock draws evenly: no frame's step a tenth of a tick off (%.3f; the engine's fraction alone %.2f)" % [
+		worst, naive_worst], worst < 0.1 and naive_worst > 0.5)
+
+	# 2. The receive timeline re-anchors: three ticks forward at once, then one back.
+	var receiving := DotNetClock.new(64, false)
+	receiving.set("_synced", true)
+	t = 0.0
+	physics_time = 0.0
+	drawn.clear()
+	naive.clear()
+	for i in range(144 * 3):
+		t += frame
+		while physics_time + physics <= t:
+			physics_time += physics
+			var _steps := receiving.advance(physics)
+		if i == 144:
+			receiving.call("_follow_arrival", receiving.received_tick() + 3, false)
+		if i == 288:
+			for _n in range(DotNetClock.SETTLE_SAMPLES):
+				receiving.call("_follow_arrival", receiving.received_tick() - 2, false)
+		var frac := (t - physics_time) / physics
+		drawn.append(float(receiving.received_tick()) + receiving.render_alpha(frac, physics) \
+			+ receiving.receive_slip(frac, physics))
+		naive.append(float(receiving.received_tick()) + frac)
+	worst = _worst_step_change(drawn)
+	naive_worst = _worst_step_change(naive)
+	_check("a re-anchored receive timeline is followed gently (%.3f a frame; as it is %.2f)" % [
+		worst, naive_worst], worst < 0.12 and naive_worst > 0.9)
+
+	# 3. A snapshot stream stalls for ten ticks while a runner turns, and resumes.
+	var config := DotNetConfig.new()
+	config.tick_rate = 64
+	config.snapshot_rate = 32
+	config.adaptive_interpolation = false
+	config.interpolation_buffer = 1.0
+	var eased := _resume_steps(config, true)
+	var snapped := _resume_steps(config, false)
+	_check("a resumed stream is eased back, not snapped (worst %.1f mm a frame; snapped %.1f mm)" % [
+		eased * 1000.0, snapped * 1000.0], eased < snapped / 3.0 and snapped > 0.03)
+
+
+## The largest change between one frame's step and the next in [param timeline].
+static func _worst_step_change(timeline: Array[float]) -> float:
+	var worst := 0.0
+	for i in range(2, timeline.size()):
+		worst = maxf(worst, absf((timeline[i] - timeline[i - 1]) - (timeline[i - 1] - timeline[i - 2])))
+	return worst
+
+
+## A runner on a 4 m circle at 9 m/s, its snapshots stalled for ten ticks and then all
+## arriving at once, drawn through `apply` at 144 Hz: the largest change between one frame's
+## step and the next. [param frames] drives `advance`, which is what turns the easing on.
+func _resume_steps(config: DotNetConfig, frames: bool) -> float:
+	var watcher := Interpolated.new()
+	watcher.name = "Net"
+	var host := Node3D.new()
+	host.name = "Resumed"
+	add_child(host)
+	host.add_child(watcher)
+	var identity := DotNetIdentity.new()
+	identity.name = "Identity"
+	identity.owner_peer_id = 5
+	host.add_child(identity)
+	var registry := DotNetRegistry.new(false, 1)
+	registry.register(identity, 91, 0, config)
+
+	var interpolator := DotNetInterpolator.new(config)
+	var omega := 9.0 / 4.0 / 64.0
+	var at := func(tick: int) -> Vector3:
+		return Vector3(cos(float(tick) * omega), 0.0, sin(float(tick) * omega)) * 4.0
+	var pushed := -2
+	var positions: Array[Vector3] = []
+	for i in range(144 * 3):
+		var now := float(i) * 64.0 / 144.0
+		var stalled := now >= 120.0 and now < 130.0
+		while not stalled and pushed + 2 <= int(now):
+			pushed += 2
+			interpolator.push(91, pushed, {"position": at.call(pushed)})
+		if frames:
+			interpolator.advance(1.0 / 144.0)
+		interpolator.apply(identity, now)
+		positions.append(watcher.rendered)
+
+	host.queue_free()
+	var worst := 0.0
+	for i in range(144, positions.size()):
+		worst = maxf(worst, ((positions[i] - positions[i - 1]) - (positions[i - 1] - positions[i - 2])).length())
+	return worst
 
 
 ## The buffer a link that is always on time settles to, in ticks.

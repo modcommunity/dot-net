@@ -600,12 +600,14 @@ var _last_frame_usec: int = 0
 ## remote players stepped at the tick rate no matter how smoothly they were
 ## interpolated. Calling this once a frame was necessary and never sufficient.
 ##
-## [param alpha] is how far this frame sits into the current physics step. Left
-## negative it comes from the engine, which is the right answer whenever the host
-## advances the clock once per physics frame — [b]and only while the engine's physics
-## rate equals the tick rate[/b], because otherwise a fraction through a physics frame
-## is not a fraction through a tick. A client puts itself on the server's rate when it
-## learns it; see `G2GNetBridge._adopt_tick_rate`.
+## [param alpha] is how far this frame sits into the current tick. Left negative it is
+## [method DotNetClock.render_alpha]: the engine's fraction of the physics frame, plus what
+## is left of the last slip. That needs the host to advance the clock once per physics
+## frame [b]with the engine's physics rate equal to the tick rate[/b] (a client puts itself
+## on the server's rate when it learns it; see `G2GNetBridge._adopt_tick_rate`), and it
+## stays right while the clock drifts, where the engine's fraction alone did not: after a
+## physics frame that ran no tick the render time went back a tick, and after one that ran
+## two forward two (see render_alpha).
 ##
 ## A suite that steps by hand and wants the old behaviour passes 0.0.
 func interpolate_frame(alpha: float = -1.0) -> void:
@@ -613,7 +615,7 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 		return
 
 	if alpha < 0.0:
-		alpha = Engine.get_physics_interpolation_fraction()
+		alpha = clock.render_alpha()
 
 	# The buffer follows its target at a bounded rate, on the frame's own time, so it
 	# never moves the render time backwards. See DotNetInterpolator._target_snapshots.
@@ -625,7 +627,14 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 	# The RECEIVE timeline, not the server's tick: an interpolation delay is counted back
 	# from the newest snapshot this client holds. Counted from the server's tick it lost
 	# the flight time out of the buffer -- see `DotNetClock.render_tick`.
-	var server_tick_now := float(clock.received_tick()) + clampf(alpha, 0.0, 1.0)
+	# -1 to 2, not 0 to 1: the clock's render alpha carries a slip (a physics frame that ran
+	# no tick or two) for a moment, and the render time has to keep it or it steps a tick
+	# back or forward (see DotNetClock.render_alpha). The receive timeline moved with the
+	# same ticks the slip counts.
+	# And what the receive timeline moved by re-anchoring that the drawing has not followed
+	# yet (DotNetClock.receive_slip): a whole tick at once otherwise.
+	var server_tick_now := float(clock.received_tick()) + clampf(alpha, -1.0, 2.0) \
+		+ clock.receive_slip()
 
 	for identity in registry.all():
 		interpolator.apply(identity, server_tick_now)

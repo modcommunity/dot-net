@@ -78,6 +78,7 @@ Short forms; the reasoning is in the linked file.
 - The receive timeline follows the quickest arrivals and goes back only after `SETTLE_SAMPLES` all behind. [timelines](docs/timelines.md#the-receive-timeline)
 - The interpolation buffer is sized from `note_lateness` and grows at `GROW_RATE` through `advance`, never at once: a jump in the buffer is the render time going backwards. Call `interpolate_frame` once a frame. [timelines](docs/timelines.md#the-render-time)
 - Copy interpolated state from `_net_interpolated`; it carries none of `_net_state_applied`'s bookkeeping and never fires for a predicted entity. [timelines](docs/timelines.md#_net_interpolated)
+- Draw a predicted entity at `clock.render_alpha()` (-1..2 after a slip), never the engine's fraction alone; `interpolate_frame` adds `receive_slip()`, and `apply` eases a resumed stream. A suite that recomputes the render time adds both. [timelines](docs/timelines.md#drawing-through-slips)
 
 **Prediction**
 

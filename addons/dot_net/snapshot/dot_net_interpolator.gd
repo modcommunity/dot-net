@@ -41,6 +41,12 @@ class Track extends RefCounted:
 	var samples: Array[Dictionary] = []
 	## Last values written to the entity, so a change is only applied once.
 	var applied: Dictionary = {}
+	## What [method DotNetInterpolator.apply] still adds to each position it draws: the
+	## part of a jump out of an extrapolation not yet eased away. property -> Vector3/2.
+	var offsets: Dictionary = {}
+	## The two samples the last drawn frame extrapolated from, or empty when it was
+	## between two samples. See [method DotNetInterpolator._ease_resume].
+	var ahead_from: Array[Dictionary] = []
 
 	func _init(p_net_id: int) -> void:
 		net_id = p_net_id
@@ -135,6 +141,24 @@ var _target_snapshots: float = 2.0
 ## 0.2 means the render timeline runs at 80% speed (or 120%, shrinking) while it moves:
 ## a remote player slowed for a moment, never one sent backwards.
 const GROW_RATE := 0.2
+
+## The last frame's length, from [method advance]: what eases a resumed stream. Zero until
+## a host drives frames, which leaves the easing off.
+var _frame_elapsed: float = 0.0
+
+## How long a jump out of an extrapolation takes to ease away, in seconds (the time constant
+## of an exponential: 63% gone after this, 95% after three times it).
+##
+## [b]Without it a resumed stream was a snap.[/b] Extrapolating past the newest snapshot
+## guesses along a straight line; when the next one lands the drawing jumps to where it says,
+## and the guess was off by however far the entity turned. Measured in game-arena's
+## `headless_feel` over 5% loss, 30..80 ms: 33 of 864 frames drew a runner more than 2 cm off
+## its motion, the worst 17 cm in one frame; eased, the same distance is covered over a tenth
+## of a second, a few millimetres a frame.
+const RESUME_EASE_SEC := 0.06
+
+## A jump larger than this, in metres, is a teleport and is drawn at once.
+const RESUME_EASE_MAX := 1.5
 
 ## Whether [method advance] has ever been called. Until a host drives the buffer per
 ## frame it follows its target at once, as it always did, so a host that samples by hand
@@ -235,6 +259,7 @@ func _late_ticks() -> float:
 ## [method DotNetManager.interpolate_frame].
 func advance(elapsed_sec: float) -> void:
 	_frame_driven = true
+	_frame_elapsed = maxf(0.0, elapsed_sec)
 	var period := maxf(1.0, _snapshot_ticks())
 	var step := GROW_RATE * maxf(0.0, elapsed_sec) * float(maxi(1, config.tick_rate)) / period
 	_delay_snapshots = move_toward(_delay_snapshots, _target_snapshots, step)
@@ -377,7 +402,20 @@ func _extrapolate(track: Track, render_tick: float) -> Dictionary:
 
 	_extrapolations += 1
 
-	var previous: Dictionary = track.samples[track.samples.size() - 2]
+	return _continue(newest, track.samples[track.samples.size() - 2], render_tick)
+
+
+## The straight line through [param previous] and [param newest], at [param render_tick]:
+## positions only, and none past `max_extrapolation_sec` (held at the newest). What
+## [method _extrapolate] draws, counted nowhere, so [method _ease_resume] can ask what an
+## extrapolation from two samples would have drawn now.
+func _continue(newest: Dictionary, previous: Dictionary, render_tick: float) -> Dictionary:
+	var values: Dictionary = newest["values"]
+	var ahead_ticks := render_tick - float(newest["tick"])
+	var max_ticks := config.max_extrapolation_sec * float(config.tick_rate)
+	if ahead_ticks <= 0.0 or ahead_ticks > max_ticks:
+		return values.duplicate()
+
 	var previous_values: Dictionary = previous["values"]
 	var span := float(newest["tick"]) - float(previous["tick"])
 
@@ -472,6 +510,7 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 	var values := sample(identity.net_id, server_tick)
 	if values.is_empty():
 		return
+	values = _ease_resume(_tracks.get(identity.net_id), values, float(server_tick) - delay_ticks())
 
 	for behaviour in identity.behaviours:
 		var wrote := false
@@ -494,6 +533,55 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 		# fraction did its work above, inside the blend.
 		if wrote:
 			behaviour._net_interpolated(int(server_tick))
+
+
+## Draws [param values] with what is left of any jump out of an extrapolation added, and
+## notes what this frame extrapolated from. Positions (Vector3, Vector2) only.
+##
+## [b]The jump is measured exactly[/b]: what the extrapolation the last frame drew would draw
+## now, less what is drawn now. Between two samples the drawing is continuous on its own
+## (a straight line through each pair, meeting at every sample), and into an extrapolation
+## it is too (the line goes on); only leaving one, or the newest sample changing under it,
+## jumps. Off until a host drives frames ([method advance]), and for a jump the size of a
+## teleport.
+func _ease_resume(track: Track, values: Dictionary, render_tick: float) -> Dictionary:
+	if track == null or _frame_elapsed <= 0.0:
+		return values
+
+	var ahead := track.samples.size() >= 2 and render_tick >= float(track.newest_tick())
+	var newest: Dictionary = track.samples[track.samples.size() - 1] if ahead else {}
+
+	if not track.ahead_from.is_empty() and (not ahead or newest["tick"] != track.ahead_from[0]["tick"]):
+		var was := _continue(track.ahead_from[0], track.ahead_from[1], render_tick)
+		for property in values:
+			var now: Variant = values[property]
+			var then: Variant = was.get(property)
+			if (now is Vector3 and then is Vector3) or (now is Vector2 and then is Vector2):
+				var jump: Variant = then - now
+				var total: Variant = track.offsets.get(property, now * 0.0) + jump
+				if total.length() <= RESUME_EASE_MAX:
+					track.offsets[property] = total
+				else:
+					track.offsets.erase(property)
+
+	track.ahead_from.clear()
+	if ahead:
+		track.ahead_from.append(newest)
+		track.ahead_from.append(track.samples[track.samples.size() - 2])
+
+	if track.offsets.is_empty():
+		return values
+
+	var keep := exp(-_frame_elapsed / RESUME_EASE_SEC)
+	var out := values.duplicate()
+	for property in track.offsets.keys():
+		var offset: Variant = track.offsets[property] * keep
+		if offset.length() < 0.0005 or not out.has(property):
+			track.offsets.erase(property)
+			continue
+		track.offsets[property] = offset
+		out[property] = out[property] + offset
+	return out
 
 
 # --- Housekeeping ----------------------------------------------------------
