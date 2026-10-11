@@ -220,7 +220,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 305
+const CHECKS := 306
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -2232,6 +2232,21 @@ func _test_acked_baselines() -> void:
 		if declaration.property == &"health":
 			eight_capped = true
 	_check("a rate limit is per peer, not global", eight_capped)
+	# And it does hold back the peer just served. write_state records a send time only for
+	# a rate-limited property (nothing else reads one), so this is what says it still does.
+	# Armed: with no send time recorded, peer 7 is sent health again at once.
+	capped.position = Vector3(9, 9, 9)
+	var seven_health := false
+	var seven_position := false
+	for declaration in capped.collect_dirty(7, false):
+		if declaration.property == &"health":
+			seven_health = true
+		if declaration.property == &"position":
+			seven_position = true
+	_check(
+		"a rate-limited change waits for the peer just sent it; the rest does not",
+		not seven_health and seven_position
+	)
 
 	# --- A lost snapshot is re-sent, once acknowledgements are wired ---------
 

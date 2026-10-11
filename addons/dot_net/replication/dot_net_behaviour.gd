@@ -203,6 +203,10 @@ var _encoded: Dictionary = {}
 ## Declaration -> its index in [member net_vars], built once [method _bind] has the list.
 var _index_of: Dictionary = {}
 
+## Bit i set when declaration i may byte-align ([method DotNetVar.may_align]); laid against
+## a [method _signature] in [method write_state].
+var _align_mask: int = 0
+
 
 func begin_snapshot_reads() -> void:
 	_snapshot_reads.clear()
@@ -267,8 +271,11 @@ func _bind(config: DotNetConfig) -> void:
 		declaration.bind_config(config)
 
 	_index_of.clear()
+	_align_mask = 0
 	for i in range(net_vars.size()):
 		_index_of[net_vars[i]] = i
+		if i < 62 and net_vars[i].may_align():
+			_align_mask |= 1 << i
 
 	_registered = true
 
@@ -431,7 +438,6 @@ func write_state(
 	tick: int = 0
 ) -> void:
 	var view := _view_for(peer_id)
-	var now := Time.get_ticks_msec()
 
 	# [b]Encoded once per snapshot for each distinct set of properties, not once per peer.[/b]
 	# Inside a snapshot every property is read once (see [member _snapshot_reads]), so the
@@ -448,23 +454,27 @@ func write_state(
 	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
 	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
 	var pad := writer.bit_length() & 7
+	var key := _signature(declarations) if _snapshot_reads_open else -1
 	var aligned := false
-	for declaration in declarations:
-		if declaration.may_align():
-			aligned = true
-			break
+	if key >= 0:
+		# The set's bitmask against the byte-aligned declarations', rather than a call
+		# per declaration per peer.
+		aligned = (key & _align_mask) != 0
+	else:
+		for declaration in declarations:
+			if declaration.may_align():
+				aligned = true
+				break
 	var at := pad if aligned else 0
 
-	if _snapshot_reads_open:
-		var key := _signature(declarations)
-		if key >= 0:
-			var at_pad: Dictionary = _encoded.get(at, {})
-			if at_pad.has(key):
-				encoded = at_pad[key]
-			else:
-				encoded = _encode(declarations, at)
-				at_pad[key] = encoded
-				_encoded[at] = at_pad
+	if key >= 0:
+		var at_pad: Dictionary = _encoded.get(at, {})
+		if at_pad.has(key):
+			encoded = at_pad[key]
+		else:
+			encoded = _encode(declarations, at)
+			at_pad[key] = encoded
+			_encoded[at] = at_pad
 
 	if encoded.is_empty():
 		encoded = _encode(declarations, at)
@@ -478,9 +488,15 @@ func write_state(
 	if recorded.is_empty():
 		return
 
-	for property: StringName in recorded:
-		view.believed[property] = recorded[property]
-		view.last_sent_ms[property] = now
+	# One merge rather than a loop of assignments, and a send time only for what is
+	# rate-limited, since nothing else reads one ([member DotNetVar.max_rate]): at 32
+	# players this loop ran for every property of every entity for every peer.
+	view.believed.merge(recorded, true)
+	var rated: Array = encoded[3]
+	if not rated.is_empty():
+		var now := Time.get_ticks_msec()
+		for property: StringName in rated:
+			view.last_sent_ms[property] = now
 
 	if tick <= 0:
 		# Untracked: assume delivered, which is the only assumption available when
@@ -491,7 +507,8 @@ func write_state(
 	view.pending.append({"tick": tick, "values": recorded})
 
 
-## The encoding of [param declarations], as [code][bytes, end bit, recorded][/code], begun
+## The encoding of [param declarations], as [code][bytes, end bit, recorded, rate-limited
+## properties][/code], begun
 ## [param pad] zero bits into its first byte.
 ##
 ## An index per property rather than a full bitmask: with a handful of properties the
@@ -500,6 +517,7 @@ func write_state(
 func _encode(declarations: Array[DotNetVar], pad: int = 0) -> Array:
 	var scratch := DotNetWriter.new(64)
 	var recorded := {}
+	var rated: Array[StringName] = []
 
 	if pad > 0:
 		scratch.write_bits(0, pad)
@@ -518,8 +536,10 @@ func _encode(declarations: Array[DotNetVar], pad: int = 0) -> Array:
 		scratch.write_uint(index, 6)
 		declaration.write(scratch, value)
 		recorded[declaration.property] = value
+		if declaration.max_rate > 0.0:
+			rated.append(declaration.property)
 
-	return [scratch.to_bytes(), scratch.bit_length(), recorded]
+	return [scratch.to_bytes(), scratch.bit_length(), recorded, rated]
 
 
 ## [param declarations] as a bitmask of their indices, or -1 when it cannot stand for them:
