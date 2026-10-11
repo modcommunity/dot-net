@@ -108,6 +108,13 @@ const RECEIVE_RECOVERY := 0.2
 ## at once.
 const SLIP_RECOVERY := 0.1
 
+## How fast slips are taken up now: [constant SLIP_RECOVERY], or twice what the drift makes
+## while it is faster than [constant MAX_DRIFT_RATE] (raising a reported lead, up to
+## [constant LEAD_RAISE_RATE]). Slower than the drift makes them, they pile up to the clamp
+## and the tick past it is drawn as a jump: game-arena's `headless_feel` caught one, 3-5 cm in
+## one frame, at 20% loss while the clock ran 8% fast.
+var _slip_recovery: float = SLIP_RECOVERY
+
 ## The newest snapshot tick, as the quickest recent arrivals place it, advanced locally:
 ## the RECEIVE timeline. [method server_tick] is this plus the flight time; the render
 ## timeline is this less the interpolation delay.
@@ -157,6 +164,74 @@ var _synced_with_rtt: bool = false
 var _snap_count: int = 0
 var _catch_up_count: int = 0
 
+# --- The input lead the server reports ---------------------------------------
+#
+# Once the server says how early this client's commands reach it ([method note_input_lead]),
+# the input timeline is steered by that, not by the round trip. See
+# docs/timelines.md#the-input-lead-the-server-reports.
+
+## How early (ticks) a command should reach the server, at the worst arrival of the last
+## [constant LEAD_WINDOW_SECONDS]. [code]DotNetConfig.input_lead_slack_ticks[/code].
+var lead_slack_ticks: int = 2
+
+## Seconds of reports the lead is held at the most of. Long enough to see a link's jitter
+## many times over (32 reports at 32 snapshots a second); short enough that a link which got
+## quicker gives the latency back within a couple of seconds (the window, then slowing at
+## [constant MAX_DRIFT_RATE]).
+const LEAD_WINDOW_SECONDS := 1.0
+
+## The most a tick is shortened to raise the lead, as a fraction of its length: 12% faster
+## for a moment. A latency rise is a few ticks, so it is gained in a fraction of a second, and
+## the drawing (which [method render_alpha] keeps continuous through the extra ticks) runs an
+## eighth fast instead of jumping. Slowing stays at [constant MAX_DRIFT_RATE]: a lead that is
+## too large costs latency, not commands.
+const LEAD_RAISE_RATE := 0.12
+
+## Fraction of the lead's error corrected per tick (a time constant of ten ticks), capped at
+## the rates above.
+const LEAD_GAIN := 0.1
+
+## A deficit bigger than [constant LEAD_RAISE_RATE] can gain in this long jumps instead
+## ([member _catch_up_count]): a stall, not a link getting slower, and every tick of smoothing
+## it would be a command the server throws away. About 60 ms of lead at any tick rate.
+const LEAD_SMOOTH_SECONDS := 0.5
+
+## The most a report may put the input timeline past where the round trip would: the lead
+## from the round trip, another flight time, and this many ticks. A sanity bound, not a
+## setting: measured leads sit below the round trip's (game-arena at 40 ms each way: 4-5
+## ticks against 8). It stops a clock from running away from reports about commands it did
+## not stamp: a host (a test, so far) that stamps its own lead instead of [method input_tick]
+## sees each report ask one tick more than the clock has, forever.
+const LEAD_CAP_TICKS := 4
+
+## Input ticks whose lead is remembered: far more than a round trip's worth at any rate.
+const LEAD_HISTORY := 512
+
+## Local time, in ticks at this clock's nominal rate: what [method advance] has been handed,
+## never scaled by the drift and including the ticks a stall dropped.
+var _local_ticks: float = 0.0
+
+## For each input tick produced, by [code]tick % LEAD_HISTORY[/code]: the tick, and how far
+## ahead of [member _local_ticks] it was when it was produced (and sent).
+var _lead_tick: PackedInt64Array = []
+var _lead_at: PackedFloat64Array = []
+
+## Reports in the window, as [code]Vector2(local ticks when it came, lead needed)[/code], and
+## the most of them: the input timeline is steered to [code]_local_ticks + _lead_target[/code].
+var _lead_samples: Array[Vector2] = []
+var _lead_target: float = 0.0
+
+## Whether a report has come: from then on the lead is the server's, not the round trip's.
+var _lead_live: bool = false
+
+## Ticks the receive timeline has run past real time because the drift shortened or
+## lengthened the ticks it advances by, not yet taken back. See [method _steer_lead].
+var _receive_excess: float = 0.0
+
+var _lead_reports: int = 0
+var _lead_late_reports: int = 0
+var _last_arrival_lead: int = 0
+
 
 func _init(p_tick_rate: int = 60, p_is_authority: bool = false) -> void:
 	tick_rate = maxi(1, p_tick_rate)
@@ -180,6 +255,11 @@ func tick_duration() -> float:
 func advance(delta: float, max_ticks: int = 8) -> int:
 	_accumulator += delta
 
+	if not is_authority:
+		_local_ticks += delta * float(tick_rate)
+		if _lead_live and _synced:
+			_steer_lead(delta)
+
 	# The drift scale stretches or compresses a tick, so a client can run slightly
 	# fast or slow without its tick number ever jumping.
 	var step := tick_duration() * (_drift_scale if not is_authority else 1.0)
@@ -201,7 +281,8 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 	# that jumped (a snap, a catch-up) is a jump whatever is drawn, so not a slip.
 	if not is_authority:
 		_receive_slip = move_toward(_receive_slip, 0.0, RECEIVE_RECOVERY * float(tick_rate) * delta)
-		_slip = move_toward(_slip, 0.0, SLIP_RECOVERY * float(tick_rate) * delta)
+		_slip_recovery = maxf(SLIP_RECOVERY, 2.0 * absf(1.0 / _drift_scale - 1.0))
+		_slip = move_toward(_slip, 0.0, _slip_recovery * float(tick_rate) * delta)
 		if steps != 1 and absi(steps - 1) <= 1:
 			_slip = clampf(_slip + float(1 - steps), -1.0, 1.0)
 
@@ -220,6 +301,12 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 		DotLog.debug(
 			CHANNEL, "dropped ticks to avoid a catch-up spiral", {"ticks": dropped}
 		)
+
+	# Every command this frame produced goes out now, so each is measured from where the
+	# timeline stands at the end of the frame, less the ticks produced after it.
+	if not is_authority:
+		for produced in range(tick - steps + 1, tick + 1):
+			_note_produced(produced)
 
 	return steps
 
@@ -299,7 +386,7 @@ func render_alpha(physics_fraction: float = -1.0, physics_delta: float = -1.0) -
 	# every physics frame and not just on average.
 	if physics_delta <= 0.0:
 		physics_delta = 1.0 / float(maxi(1, Engine.physics_ticks_per_second))
-	return frac + move_toward(_slip, 0.0, SLIP_RECOVERY * float(tick_rate) * frac * physics_delta)
+	return frac + move_toward(_slip, 0.0, _slip_recovery * float(tick_rate) * frac * physics_delta)
 
 
 # --- Client synchronisation ------------------------------------------------
@@ -317,6 +404,19 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 
 	var first := not _synced or (not _synced_with_rtt and _rtt_ms > 0.0)
 	_follow_arrival(server_tick, first)
+
+	if _lead_live and not first:
+		# The input timeline is the server's report's to steer ([method _steer_lead], every
+		# frame). The round trip still places the receive timeline, and a different session
+		# still snaps.
+		var behind := int(roundf(_lead_position())) - tick
+		if absi(behind) > snap_threshold_ticks():
+			_snap_count += 1
+			DotLog.warn(CHANNEL, "clock snapped; predicted state is stale",
+				{"error_ticks": behind, "snaps": _snap_count})
+			tick += behind
+			_drift_scale = 1.0
+		return
 
 	var target := server_tick() + _target_lead()
 	var error := target - tick
@@ -413,6 +513,154 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 		_received_tick -= 1
 		_receive_slip += 1.0
 		_settle_open = false
+
+
+## What the server said about this client's commands: the one for [param input_tick] was the
+## latest to arrive in the last period, [param arrival_lead] ticks before the server needed
+## it (0 just in time, below 0 late). Called by [method DotNetManager.receive_snapshot] for a
+## server that reports it.
+##
+## [b]Why the server has to say it.[/b] Before this, the lead was half the round trip plus a
+## margin, and the round trip a game feeds is ENet's smoothed one (an eighth of each new
+## sample) through a median of sixteen: when the path got 30 ms slower each way, the lead
+## followed over seconds and every command meanwhile reached the server after its tick. In
+## game-arena's `headless_feel` (40 to 70 ms each way): 97-120 late in 5 s, 47-61 prediction
+## corrections, the eye going backwards on 63-85 frames.
+##
+## [b]Measured against the time the command was sent, not the tick it is now.[/b] The lead it
+## needed is the lead it was sent with ([member _lead_at]), less what it arrived with, plus
+## [member lead_slack_ticks]. That already counts every correction made since it was sent, so
+## a report a round trip old never makes the clock correct twice. Nothing about the
+## downlink is in it either: the receive timeline is for drawing, the lead only for commands.
+func note_input_lead(input_tick: int, arrival_lead: int) -> void:
+	if is_authority or not _synced or _lead_tick.is_empty():
+		return
+	var slot := posmod(input_tick, LEAD_HISTORY)
+	if _lead_tick[slot] != input_tick:
+		# Not a tick this clock produced, or one long gone: nothing to measure it against.
+		return
+
+	var needed := _lead_at[slot] - float(arrival_lead) + float(lead_slack_ticks)
+	_lead_samples.append(Vector2(_local_ticks, needed))
+	_lead_reports += 1
+	_last_arrival_lead = arrival_lead
+	if arrival_lead < 0:
+		_lead_late_reports += 1
+	_trim_lead_samples()
+
+	if not _lead_live:
+		_lead_live = true
+		_receive_excess = 0.0
+		DotLog.info(CHANNEL, "input lead follows the server's reports",
+			{"lead": tick - server_tick(), "arrival_lead": arrival_lead})
+
+
+## Ticks the input timeline is behind (+) or ahead (-) of where it is being steered: the
+## reported lead once there is one ([method is_lead_reported]), the round trip's before. What
+## a suite asks to see the clock settle.
+func lead_error() -> float:
+	if _lead_live:
+		return _lead_position() - (float(tick) + _accumulator / tick_duration())
+	return float(server_tick() + _target_lead() - tick)
+
+
+## Whether the input timeline is steered by the server's reports ([method note_input_lead])
+## rather than by the round trip.
+func is_lead_reported() -> bool:
+	return _lead_live
+
+
+## The lead the input timeline is steered to, in ticks ahead of local time: the most needed
+## by any report in the last [constant LEAD_WINDOW_SECONDS]. 0 before the first report.
+func reported_lead() -> float:
+	return _lead_target
+
+
+## Reports taken, and how many said a command had come late.
+func lead_reports() -> int:
+	return _lead_reports
+
+
+func late_lead_reports() -> int:
+	return _lead_late_reports
+
+
+func _trim_lead_samples() -> void:
+	var oldest := _local_ticks - LEAD_WINDOW_SECONDS * float(tick_rate)
+	while not _lead_samples.is_empty() and _lead_samples[0].x < oldest:
+		_lead_samples.pop_front()
+	if _lead_samples.is_empty():
+		# Nothing reported for a whole window (a server that went quiet): hold the last.
+		return
+	var most := _lead_samples[0].y
+	for sample in _lead_samples:
+		most = maxf(most, sample.y)
+	_lead_target = most
+
+
+## Where the input timeline is steered to: local time plus the reported lead, but never past
+## [constant LEAD_CAP_TICKS] beyond a second flight time over the round trip's own lead.
+func _lead_position() -> float:
+	var reported := _local_ticks + _lead_target
+	var cap := float(server_tick() + _target_lead() + one_way_ticks() + LEAD_CAP_TICKS)
+	return minf(reported, cap)
+
+
+## Remembers how far ahead of local time [param produced] was sent, at the end of the frame
+## that produced it: what a report about it is measured against.
+func _note_produced(produced: int) -> void:
+	if _lead_tick.is_empty():
+		_lead_tick.resize(LEAD_HISTORY)
+		_lead_tick.fill(-1)
+		_lead_at.resize(LEAD_HISTORY)
+	var slot := posmod(produced, LEAD_HISTORY)
+	_lead_tick[slot] = produced
+	# In the units [method _steer_lead] steers: the timeline's continuous position (the tick
+	# and the fraction of the next one already run) ahead of local time. The tick alone is up
+	# to a tick behind that, and a report measured against it settled a tick short of the
+	# slack asked for.
+	_lead_at[slot] = float(produced) + _accumulator / tick_duration() - _local_ticks
+
+
+## Steers the input timeline to the reported lead, once a frame: shorter ticks while it is
+## short of it (up to [constant LEAD_RAISE_RATE]), longer while past it (up to [constant
+## MAX_DRIFT_RATE]), a jump forward for a deficit too big to gain in [constant
+## LEAD_SMOOTH_SECONDS].
+##
+## [b]And the receive timeline is held to real time while it does.[/b] It advances by the
+## same ticks as the input timeline, so ticks 12% short would carry it 12% ahead of the
+## snapshots, where it waits a whole [constant SETTLE_SAMPLES] a tick to come back and
+## everything remote is extrapolated meanwhile. What the drift adds to it is taken back a
+## tick at a time through [member _receive_slip], which the drawing follows at [constant
+## RECEIVE_RECOVERY].
+func _steer_lead(delta: float) -> void:
+	_trim_lead_samples()
+	var at := float(tick) + _accumulator / tick_duration()
+	var error := _lead_position() - at
+
+	if error > LEAD_RAISE_RATE * LEAD_SMOOTH_SECONDS * float(tick_rate):
+		var jump := int(ceilf(error))
+		_catch_up_count += 1
+		DotLog.debug(CHANNEL, "clock caught up to the reported lead",
+			{"behind_ticks": jump, "catch_ups": _catch_up_count})
+		tick += jump
+		_drift_scale = 1.0
+		return
+
+	var correction := clampf(error * LEAD_GAIN, -MAX_DRIFT_RATE, LEAD_RAISE_RATE)
+	_drift_scale = 1.0 - correction
+
+	# Ticks this frame will run beyond real time: delta / (duration * scale) of them against
+	# delta / duration.
+	_receive_excess += delta * float(tick_rate) * (1.0 / _drift_scale - 1.0)
+	while _receive_excess >= 1.0:
+		_receive_excess -= 1.0
+		_received_tick -= 1
+		_receive_slip += 1.0
+	while _receive_excess <= -1.0:
+		_receive_excess += 1.0
+		_received_tick += 1
+		_receive_slip -= 1.0
 
 
 ## How far behind its target the input timeline may fall before it jumps forward, in ticks.
@@ -554,6 +802,7 @@ func reset(start_tick: int = 0) -> void:
 	_accumulator = 0.0
 	_drift_scale = 1.0
 	_slip = 0.0
+	_slip_recovery = SLIP_RECOVERY
 	_receive_slip = 0.0
 	_synced = false
 	_synced_with_rtt = false
@@ -562,6 +811,13 @@ func reset(start_tick: int = 0) -> void:
 	_jitter_ms = 0.0
 	_received_tick = 0
 	_settle_open = false
+	_local_ticks = 0.0
+	_lead_tick.clear()
+	_lead_at.clear()
+	_lead_samples.clear()
+	_lead_target = 0.0
+	_lead_live = false
+	_receive_excess = 0.0
 
 
 func describe() -> Dictionary:
@@ -577,4 +833,17 @@ func describe() -> Dictionary:
 		"jitter_ms": int(_jitter_ms),
 		"drift": "%.2f%%" % drift_percent(),
 		"snaps": _snap_count,
+		"catch_ups": _catch_up_count,
+		"lead_reported": _lead_live,
+		"last_arrival_lead": _last_arrival_lead,
+		"lead_reports": _lead_reports,
+		"late_reports": _lead_late_reports,
 	}
+
+
+## One line on where the input lead comes from, for a `net_status`.
+func describe_lead() -> String:
+	if _lead_live:
+		return "%d ticks, from the server's reports: the last said %d early (%d reports, %d late)" % [
+			tick - server_tick(), _last_arrival_lead, _lead_reports, _lead_late_reports]
+	return "%d ticks, from the round trip (the server does not report it)" % _target_lead()

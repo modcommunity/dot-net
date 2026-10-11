@@ -247,7 +247,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 345
+const CHECKS := 357
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -316,6 +316,7 @@ func _run() -> void:
 	_test_snapshot_parts()
 	_test_unchanged_entities()
 	_test_input_batches()
+	_test_input_lead()
 	await _test_integration()
 
 	print("")
@@ -3508,6 +3509,201 @@ func _test_input_batches() -> void:
 		lost_then.push(input)
 	_check("a packet lost before tick 14 is covered by the next one",
 		lost_then.take(14) != null and lost_then.take(15) != null)
+
+
+## The server says how early each client's commands arrive, and the clock steers by it.
+##
+## One server, two clients on the same simulated link: one that reads the report and one from
+## before it (its table names no features). Every 1/60 s frame the server takes what has
+## arrived and runs a tick, and each client takes its snapshots, advances its clock and sends
+## a command for every tick it ran. The link is 40 ms each way, then 70, then 40 again. The
+## round trip a game feeds the clock is modelled on ENet's: it moves an eighth of the way to
+## the truth every half second.
+##
+## Armed: the client from before the report is the control (with its lead from the modelled
+## round trip, nearly every one of the 240 ticks after the rise had its command late: 469
+## counted, each late and then starved); with the receive timeline not held to real time while the clock runs fast
+## (no [code]_receive_excess[/code]), it was still 6 ticks past the newest snapshot a second
+## and a half after the rise, against the control's 3; it is 4.
+func _test_input_lead() -> void:
+	print("")
+	print("[the input lead the server reports]")
+
+	var host := _parts_manager("LeadServer", true, 1200)
+	var fresh := _parts_manager("LeadClient", false, 1200)
+	var legacy := _parts_manager("LeadLegacy", false, 1200)
+	legacy.local_peer_id = 3
+	legacy.messages.features = DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS
+	# Twenty snapshots a second, as most games here send: the receive timeline steps back a
+	# tick only after sixteen arrivals behind it, so a timeline the drift carried ahead stays
+	# there for most of a second a tick.
+	for m in [host, fresh, legacy]:
+		(m as DotNetManager).config.snapshot_rate = 20
+
+	var clients := {2: fresh, 3: legacy}
+	# [arrival ms, payload] in flight, each direction, each client.
+	var down := {2: [], 3: []}
+	var up := {2: [], 3: []}
+	var link := {"one_way": 40.0, "now": 0.0}
+
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := (clients[peer_id] as DotNetManager).receive(payload, 1)
+			return
+		(down[peer_id] as Array).append([float(link["now"]) + float(link["one_way"]), payload])
+	fresh.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 2)
+	legacy.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 3)
+
+	host.start()
+	fresh.start()
+	legacy.start()
+	host.add_peer(2)
+	host.add_peer(3)
+
+	_check("the new client says it reads the input lead, the old one does not",
+		host.messages.peer_supports(2, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
+			and not host.messages.peer_supports(3, DotNetMessageRegistry.FEATURE_INPUT_LEAD))
+
+	var frame_ms := 1000.0 / 60.0
+	var state := {"frame": 0, "enet_rtt": 80.0, "legacy_bytes": 0, "legacy_snapshots": 0}
+	# Per client, over a phase: late or missing commands, when the last one was, the real lead's
+	# range, and how far the receive timeline ran past the newest snapshot that had arrived.
+	var phase := {}
+
+	var run := func(seconds: float) -> void:
+		# Cleared, not reassigned: a lambda's captured variable is its own copy of the reference.
+		phase.clear()
+		for peer in [2, 3]:
+			phase[peer] = {"missed_at_start": host.input_buffer_for(peer).late_count
+				+ host.input_buffer_for(peer).starved_count, "last_miss_ms": -1.0,
+				"lead_min": 1 << 30, "lead_max": -(1 << 30), "ahead_max": -(1 << 30), "newest": -1}
+		var started := float(link["now"])
+		var frames := int(seconds * 60.0)
+		for _f in frames:
+			var now := float(state["frame"]) * frame_ms
+			link["now"] = now
+			state["frame"] = int(state["frame"]) + 1
+			# ENet's smoothed round trip: an eighth of the way to the truth every half second.
+			if int(state["frame"]) % 30 == 0:
+				state["enet_rtt"] = float(state["enet_rtt"]) + (2.0 * float(link["one_way"]) - float(state["enet_rtt"])) / 8.0
+
+			# The server: what has arrived, then one tick.
+			for peer in [2, 3]:
+				var queue: Array = up[peer]
+				var buffer := host.input_buffer_for(peer)
+				while not queue.is_empty() and float(queue[0][0]) <= now:
+					var _pushed := buffer.push(queue.pop_front()[1])
+			host.server_tick(int(state["frame"]))
+
+			for peer in [2, 3]:
+				var client: DotNetManager = clients[peer]
+				var queue: Array = down[peer]
+				var p: Dictionary = phase[peer]
+				while not queue.is_empty() and float(queue[0][0]) <= now:
+					var payload: PackedByteArray = queue.pop_front()[1]
+					if peer == 3:
+						state["legacy_bytes"] = int(state["legacy_bytes"]) + payload.size()
+						state["legacy_snapshots"] = int(state["legacy_snapshots"]) + 1
+					client.stats.note_rtt(float(state["enet_rtt"]))
+					var _r := client.receive_snapshot(payload)
+					p["newest"] = maxi(int(p["newest"]), DotNetReader.new(payload).read_uint(32))
+				var ticks := client.clock.advance(1.0 / 60.0)
+				for i in ticks:
+					if not client.clock.is_synced():
+						continue
+					var input := DemoInput.new()
+					input.tick = client.clock.tick - (ticks - 1 - i)
+					input.delta = 1.0 / 60.0
+					(up[peer] as Array).append([now + float(link["one_way"]), input])
+				if client.clock.is_synced():
+					var lead := client.clock.tick - int(state["frame"])
+					p["lead_min"] = mini(int(p["lead_min"]), lead)
+					p["lead_max"] = maxi(int(p["lead_max"]), lead)
+					# From a second and a half in: a link that slows leaves a gap in the
+					# snapshots, which the timeline runs on through (as it should) until the
+					# next one; what is measured is whether it comes back.
+					if int(p["newest"]) >= 0 and now - started >= 1500.0:
+						p["ahead_max"] = maxi(int(p["ahead_max"]), client.clock.received_tick() - int(p["newest"]))
+				var buffer := host.input_buffer_for(peer)
+				if buffer.late_count + buffer.starved_count > int(p.get("missed_seen", p["missed_at_start"])):
+					p["missed_seen"] = buffer.late_count + buffer.starved_count
+					p["last_miss_ms"] = now - started
+
+	var missed := func(peer: int) -> int:
+		var buffer := host.input_buffer_for(peer)
+		return buffer.late_count + buffer.starved_count - int(phase[peer]["missed_at_start"])
+
+	var describe := func(peer: int) -> String:
+		var p: Dictionary = phase[peer]
+		return "%d late or missing, the last %s; real lead %d..%d ticks; receive timeline at most %d past the newest snapshot" % [
+			missed.call(peer), "never" if float(p["last_miss_ms"]) < 0.0 else "%.2f s in" % (float(p["last_miss_ms"]) / 1000.0),
+			int(p["lead_min"]), int(p["lead_max"]), int(p["ahead_max"])]
+
+	run.call(3.0)
+	run.call(2.0)
+	print("    40 ms, settled:  reported %s" % describe.call(2))
+	print("                     control  %s" % describe.call(3))
+	var settled_fresh := int(phase[2]["lead_max"])
+	_check("settled, both clients' commands are on time (%d, %d)" % [missed.call(2), missed.call(3)],
+		missed.call(2) == 0 and missed.call(3) == 0)
+	_check("and the reported client's arrive the slack it asks for early (%d ticks, asked %d)"
+			% [int(fresh.clock.describe()["last_arrival_lead"]), fresh.config.input_lead_slack_ticks],
+		int(fresh.clock.describe()["last_arrival_lead"]) == fresh.config.input_lead_slack_ticks)
+	_check("the old client's snapshots carry no report: 6 bytes each, as before (%d over %d)"
+			% [int(state["legacy_bytes"]), int(state["legacy_snapshots"])],
+		int(state["legacy_bytes"]) == 6 * int(state["legacy_snapshots"]))
+	_check("the new client steers by the reports, the old one by the round trip",
+		fresh.clock.is_lead_reported() and not legacy.clock.is_lead_reported())
+
+	link["one_way"] = 70.0
+	run.call(4.0)
+	print("    40 to 70 ms:     reported %s" % describe.call(2))
+	print("                     control  %s" % describe.call(3))
+	_check("the link slowing by 30 ms each way costs the reported client at most 4 commands (%d)" % missed.call(2),
+		missed.call(2) <= 4)
+	_check("and none after the first half second (last %s)" % ("never" if float(phase[2]["last_miss_ms"]) < 0.0
+			else "%.2f s in" % (float(phase[2]["last_miss_ms"]) / 1000.0)),
+		float(phase[2]["last_miss_ms"]) < 500.0)
+	_check("the control, from the round trip, loses many more (%d)" % missed.call(3),
+		missed.call(3) >= 20)
+	_check("running fast leaves the receive timeline no further past the snapshots than the control's (%d, %d)"
+			% [int(phase[2]["ahead_max"]), int(phase[3]["ahead_max"])],
+		int(phase[2]["ahead_max"]) <= int(phase[3]["ahead_max"]) + 1)
+	var slow_lead := int(phase[2]["lead_max"])
+
+	link["one_way"] = 40.0
+	run.call(4.0)
+	print("    70 to 40 ms:     reported %s" % describe.call(2))
+	print("                     control  %s" % describe.call(3))
+	_check("a link getting quicker costs no command (%d)" % missed.call(2), missed.call(2) == 0)
+	_check("and the lead is given back, to what it was at 40 ms (%d, was %d, at 40 ms %d)"
+			% [int(phase[2]["lead_min"]), slow_lead, settled_fresh],
+		int(phase[2]["lead_min"]) <= settled_fresh and slow_lead > settled_fresh)
+
+	for m in [host, fresh, legacy]:
+		(m as DotNetManager).stop()
+		(m as DotNetManager).queue_free()
+
+	# A host that stamps its own lead (every game's headless_net harness stamps `_tick + 2`)
+	# hears about commands the clock did not stamp: each report asks a tick more than the clock
+	# has given, whatever it gives. Capped, it stops (7 ticks ahead); uncapped it ran 29 ahead in 10 s.
+	var stray := DotNetClock.new(60)
+	stray.sync_from_server(100, 20.0)
+	var server_at := 100
+	var stray_lead := 0
+	for f in 600:
+		var _ticks := stray.advance(1.0 / 60.0)
+		server_at += 1
+		stray.sync_from_server(server_at, 20.0)
+		# The command the host sent for the server's tick plus two, there one tick early.
+		stray.note_input_lead(server_at + 2, 1)
+		stray_lead = stray.tick - server_at
+	_check("a clock told about commands it did not stamp does not run away (%d ticks ahead)" % stray_lead,
+		stray.is_lead_reported() and stray_lead <= 12)
 
 
 func _test_integration() -> void:

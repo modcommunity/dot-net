@@ -72,12 +72,14 @@ Short forms; the reasoning is in the linked file.
 
 - Input runs ahead of the server, render behind it, and the server tick is only estimated. [timelines](docs/timelines.md#three-timelines-not-one)
 - A client AHEAD is smoothed by scaling tick duration; a client BEHIND by more than the input margin jumps forward at once. Never smooth "behind". [timelines](docs/timelines.md#drift-and-catch-up)
+- Once the server reports the input lead (`FEATURE_INPUT_LEAD`), the input timeline steers to it every frame (up to 12% fast, 5% slow, a jump only past 0.5 s of deficit), measured against when each command was SENT (`_lead_at`), never against now; the receive timeline is held to real time meanwhile (`_receive_excess`). Stamp commands from `input_tick()`; a host stamping its own lead clears `FEATURE_INPUT_LEAD` (the cap only stops a runaway). [timelines](docs/timelines.md#the-input-lead-the-server-reports)
 - `SNAP_THRESHOLD_SECONDS` is a duration, never a tick count. [timelines](docs/timelines.md#drift-and-catch-up)
 - A game-driven server (`auto_tick = false`) must call `server_tick(tick)` or its clock reads 0 forever. [timelines](docs/timelines.md#drift-and-catch-up)
 - The interpolation buffer is in SNAPSHOTS; `delay_ticks()` is the one conversion, and the render time is `received_tick()` minus it, never `server_tick()` minus it. [timelines](docs/timelines.md#the-render-time)
 - The receive timeline follows the quickest arrivals and goes back only after `SETTLE_SAMPLES` all behind. [timelines](docs/timelines.md#the-receive-timeline)
 - The interpolation buffer is sized from `note_lateness` and grows at `GROW_RATE` through `advance`, never at once: a jump in the buffer is the render time going backwards. Call `interpolate_frame` once a frame. [timelines](docs/timelines.md#the-render-time)
 - Copy interpolated state from `_net_interpolated`; it carries none of `_net_state_applied`'s bookkeeping and never fires for a predicted entity. [timelines](docs/timelines.md#_net_interpolated)
+- Slips are taken up at least twice as fast as the drift makes them (`_slip_recovery`), or they pile up to the clamp and draw a jump. [timelines](docs/timelines.md#the-input-lead-the-server-reports)
 - Draw a predicted entity at `clock.render_alpha()` (-1..2 after a slip), never the engine's fraction alone; `interpolate_frame` adds `receive_slip()`, and `apply` eases a resumed stream. A suite that recomputes the render time adds both. [timelines](docs/timelines.md#drawing-through-slips)
 
 **Prediction**
@@ -108,6 +110,7 @@ Short forms; the reasoning is in the linked file.
 - Godot's ENet sends UNRELIABLE as unsequenced: nothing sent unreliable may assume order. [wire](docs/wire.md#unreliable-means-unordered)
 - A snapshot over `config.mtu` goes out in parts, each applying alone; a client acks a tick only when every part is in, and a part of an older tick than one already read is superseded. [wire](docs/wire.md#snapshot-parts)
 - An entity with nothing dirty is listed by id in the part's tail, not written, only to a client whose schema says `FEATURE_UNCHANGED_RUNS`; the client applies it as an empty body, so `_net_state_applied` still fires per snapshot. A snapshot goes out every snapshot tick, even empty. [wire](docs/wire.md#unchanged-entities)
+- The input lead rides at the end of every snapshot part, after a (possibly empty) unchanged tail, only to a peer naming `FEATURE_INPUT_LEAD`; the server measures arrival in `Buffer.push`. The client-to-server packet is untouched (`ACK_BYTES`). [wire](docs/wire.md#the-input-lead)
 - Clients send inputs, never state; `_sanitise()` runs on the server after decode; message direction is checked against the transport's sender. [security](docs/security.md)
 
 **GDScript**
@@ -117,4 +120,4 @@ Short forms; the reasoning is in the linked file.
 
 ## Known gaps
 
-Open, each with its reason in the linked file: a predicted property with a `max_rate` that stops changing is never rewound (no game sets one) [prediction](docs/prediction.md#open-a-rate-limited-predicted-property); the clock's jitter reads about zero on ENet, so `adaptive_margin` never widens [timelines](docs/timelines.md#open-jitter-and-loss). Deliberately not here (rollback netcode, reliable delivery, whole-snapshot deltas, bitfield acks, physics determinism, matchmaking): [replication](docs/replication.md#deliberately-not-here).
+Open, each with its reason in the linked file: a predicted property with a `max_rate` that stops changing is never rewound (no game sets one) [prediction](docs/prediction.md#open-a-rate-limited-predicted-property); the clock's jitter reads about zero on ENet, so `adaptive_margin` never widens, which matters only before the first input-lead report or against a server without one [timelines](docs/timelines.md#open-jitter-and-loss). Deliberately not here (rollback netcode, reliable delivery, whole-snapshot deltas, bitfield acks, physics determinism, matchmaking): [replication](docs/replication.md#deliberately-not-here).

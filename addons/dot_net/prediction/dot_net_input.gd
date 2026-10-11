@@ -205,11 +205,38 @@ class Buffer extends RefCounted:
 	## Inputs discarded for duplicating one already held.
 	var duplicate_count: int = 0
 
+	## Server side: the newest input tick ever offered to [method push], late ones included.
+	var _newest_tick: int = -1
+
+	## Server side: the least [i]arrival lead[/i] seen since [method take_lead_sample] last
+	## took it, and the input tick it was measured on. The arrival lead is how many ticks
+	## before it was needed an input newer than any before it arrived: its tick less the next
+	## tick to simulate, so 0 is just in time and below 0 is late. What the server tells the
+	## client in its snapshots, so the client's clock can keep its commands a little early
+	## whatever the link does (docs/timelines.md#the-input-lead-the-server-reports).
+	var _lead_min: int = LEAD_NONE
+	var _lead_input_tick: int = -1
+
+	## No arrival measured since the last sample was taken.
+	const LEAD_NONE := 1 << 30
+
 	func _init(p_capacity: int = 120) -> void:
 		capacity = p_capacity
 
 	## Adds an input, keeping the buffer ordered and bounded.
 	func push(input: DotNetInput) -> DotResult:
+		# Measured on arrival, and only for an input newer than any before it: a resent copy
+		# says nothing about when its tick was needed, and the newest input in a packet is
+		# the one that came as late as the packet did. Not until the first tick has been
+		# simulated, before which "the next tick to simulate" means nothing.
+		if input.tick > _newest_tick:
+			_newest_tick = input.tick
+			if _last_consumed_tick >= 0:
+				var lead := input.tick - (_last_consumed_tick + 1)
+				if lead < _lead_min:
+					_lead_min = lead
+					_lead_input_tick = input.tick
+
 		if input.tick <= _last_consumed_tick:
 			# The tick it applies to is already simulated. Applying it now would
 			# rewrite history the server has already sent to everyone.
@@ -325,6 +352,18 @@ class Buffer extends RefCounted:
 	func clear() -> void:
 		_inputs.clear()
 		_last_consumed_tick = -1
+		_newest_tick = -1
+		_lead_min = LEAD_NONE
+		_lead_input_tick = -1
+
+	## The least arrival lead since the last call, as [code]Vector2i(lead, input_tick)[/code],
+	## and starts the next measurement; [code]Vector2i(LEAD_NONE, -1)[/code] when no new input
+	## has arrived since. Server side; [DotNetManager] sends it to a client that reads it.
+	func take_lead_sample() -> Vector2i:
+		var out := Vector2i(_lead_min, _lead_input_tick)
+		_lead_min = LEAD_NONE
+		_lead_input_tick = -1
+		return out
 
 	## How many ticks of input are queued ahead of the simulation.
 	##

@@ -53,6 +53,13 @@ extends DotConfig
 ## Grow the input margin from measured jitter.
 @export var adaptive_input_margin: bool = true
 
+## Ticks early a client's commands should reach the server, once the server says how early
+## they do (a server and client that both read [code]FEATURE_INPUT_LEAD[/code]). Replaces the
+## two settings above from the first report on: the lead is then measured, not estimated
+## from the round trip. The least over the last second is held at this, so it is the margin
+## over the worst arrival seen, not over the average. See [DotNetClock].
+@export_range(0, 20, 1) var input_lead_slack_ticks: int = 2
+
 @export_group("Interpolation")
 
 ## Snapshots of delay before rendering — a count of SNAPSHOTS, not of ticks.

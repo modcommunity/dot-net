@@ -62,3 +62,12 @@ Godot's ENet sends `TRANSFER_MODE_UNRELIABLE` **unsequenced**: through a real lo
 - **A snapshot goes out every snapshot tick, even with nothing in it** (six bytes: tick and a zero count). It is the client's clock and its acknowledgement; before the list a peer with nothing relevant was sent nothing.
 - `unchanged_listed` and `unchanged_bytes_saved` on the server's manager; `describe_lines()` prints both. A host whose client never routes its schema to the server (a test loopback wired after `start()`) keeps the old format without a sign beyond those staying zero.
 
+## The input lead
+
+**A snapshot part may end with how early the client's commands are reaching the server**, for its clock to steer by ([timelines.md](timelines.md#the-input-lead-the-server-reports)).
+
+- **After a tail's trailer**: the least arrival lead of the period and the input tick it was measured on less the snapshot's tick, twelve bits each, signed. A part that has no unchanged list carries an empty one (the mark, zero runs, the trailer: 17 bits), so a part with a lead always has the tail form and the receiver reads it when at least 24 bits follow the trailer; anything else there is under a byte of padding. 41 bits a part at most.
+- **In every part of the snapshot**, so a lost part does not lose it; the client takes the same report more than once and it changes nothing. A peer that sent nothing new in the period gets none.
+- **Only to a client whose schema says `FEATURE_INPUT_LEAD`** (`peer_supports`). Every other peer gets the format before, byte for byte (`netcode_demo`: an empty snapshot to the old client is still six bytes). A client from before reads its features and never names the bit.
+- **The client to server direction is unchanged**: the four-byte acknowledgement every game's input packet starts with (`ACK_BYTES`) and the input batch after it. The server measures arrival in `DotNetInput.Buffer.push`, which every bridge already calls.
+- `input_leads_sent` on the server's manager, and the clock's `describe_lead()` on a client (`net_status` prints both).

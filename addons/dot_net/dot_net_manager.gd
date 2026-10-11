@@ -59,6 +59,14 @@ const UNCHANGED_TAIL_MIN_BITS := 16
 ## or broken server can make a client loop over, far above any game's relevant set.
 const MAX_UNCHANGED_LISTED := 1 << 16
 
+## The input lead a snapshot part may end with, after its trailer: the least arrival lead
+## (signed) and the input tick it was measured on less the snapshot's tick (signed), twelve
+## bits each. Only to a client whose schema says [constant
+## DotNetMessageRegistry.FEATURE_INPUT_LEAD], and only after a tail, so a part carrying one
+## always has the tail form. See [code]docs/wire.md#the-input-lead[/code].
+const INPUT_LEAD_FIELD_BITS := 12
+const INPUT_LEAD_BITS := 2 * INPUT_LEAD_FIELD_BITS
+
 ## Snapshot ticks remembered for [member _seen_ticks]. More than a part arriving behind its
 ## tick's other parts could plausibly be late by.
 const SEEN_TICKS_KEPT := 16
@@ -213,6 +221,10 @@ var largest_part_bytes: int = 0
 var unchanged_listed: int = 0
 var unchanged_bytes_saved: int = 0
 
+## Server side: snapshot parts that carried a client's input lead. See
+## [code]docs/wire.md#the-input-lead[/code].
+var input_leads_sent: int = 0
+
 ## Whether the one warning about an entity too big for [member DotNetConfig.mtu] on its own
 ## has been logged. Once per manager: it is a property of the game's declarations, not of
 ## a moment, and a warning per snapshot would be twenty a second.
@@ -263,6 +275,7 @@ func setup() -> DotResult:
 	clock = DotNetClock.new(config.tick_rate, is_server)
 	clock.input_margin_ticks = config.input_margin_ticks
 	clock.adaptive_margin = config.adaptive_input_margin
+	clock.lead_slack_ticks = config.input_lead_slack_ticks
 
 	registry = DotNetRegistry.new(is_server, local_peer_id)
 	messages = DotNetMessageRegistry.new()
@@ -725,6 +738,17 @@ func _send_to_peer(
 	# the bit it starts at, so a written entity cannot be moved to another packet afterwards.
 	var limit_bits := config.mtu * 8 - SNAPSHOT_PART_TRAILER_BITS
 
+	# How early this peer's commands have been arriving, for its clock to steer by: in every
+	# part, so a lost part does not lose it, behind an empty tail where the part has none.
+	# Taken whether or not it is sent, so a sample never describes more than one period.
+	var lead := Vector2i(DotNetInput.Buffer.LEAD_NONE, -1)
+	if _input_buffers.has(peer_id):
+		lead = (_input_buffers[peer_id] as DotNetInput.Buffer).take_lead_sample()
+	var send_lead := lead.x != DotNetInput.Buffer.LEAD_NONE \
+		and messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
+	if send_lead:
+		limit_bits -= _unchanged_tail_bits(PackedInt32Array()) + INPUT_LEAD_BITS
+
 	var parts: Array[DotNetWriter] = []
 	var counts: PackedInt32Array = []
 	var writer := _begin_snapshot_part(tick)
@@ -875,9 +899,19 @@ func _send_to_peer(
 			_write_unchanged_tail(part, runs)
 			part.write_uint(index, 4)
 			part.write_uint(total - 1, 4)
+		elif send_lead:
+			_write_unchanged_tail(part, PackedInt32Array())
+			part.write_uint(index, 4)
+			part.write_uint(total - 1, 4)
 		elif total > 1:
 			part.write_uint(index, 4)
 			part.write_uint(total - 1, 4)
+
+		if send_lead:
+			var span := 1 << (INPUT_LEAD_FIELD_BITS - 1)
+			part.write_int(clampi(lead.x, -span, span - 1), INPUT_LEAD_FIELD_BITS)
+			part.write_int(clampi(lead.y - tick, -span, span - 1), INPUT_LEAD_FIELD_BITS)
+			input_leads_sent += 1
 
 		var payload := part.to_bytes()
 
@@ -1105,6 +1139,14 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 				DotError.CODE_PARSE, "Bad snapshot part trailer.",
 				"part %d of %d" % [part, total]
 			)
+		# What follows a tail's trailer is under a byte of padding, or the input lead: how
+		# early this client's commands are reaching the server. See [method
+		# DotNetClock.note_input_lead].
+		if reader.bits_remaining() >= INPUT_LEAD_BITS:
+			var arrival := reader.read_int(INPUT_LEAD_FIELD_BITS)
+			var input_tick := tick + reader.read_int(INPUT_LEAD_FIELD_BITS)
+			if reader.ok():
+				clock.note_input_lead(input_tick, arrival)
 	elif reader.bits_remaining() >= SNAPSHOT_PART_TRAILER_BITS:
 		part = reader.read_uint(4)
 		total = reader.read_uint(4) + 1
@@ -1455,6 +1497,7 @@ func describe() -> Dictionary:
 		d["mtu"] = config.mtu if config != null else 0
 		d["unchanged_listed"] = unchanged_listed
 		d["unchanged_bytes_saved"] = unchanged_bytes_saved
+		d["input_leads_sent"] = input_leads_sent
 
 	if interpolator != null:
 		d["interpolation"] = interpolator.describe()
@@ -1480,6 +1523,8 @@ func describe_lines() -> PackedStringArray:
 		out.append("rtt        %d ms, jitter %d ms" % [
 			int(clock.rtt_ms()), int(clock.jitter_ms())
 		])
+		if not is_server:
+			out.append("lead       %s" % clock.describe_lead())
 
 	if is_server and config != null:
 		out.append("snapshots  %d split, largest part %d B of %d" % [
@@ -1488,6 +1533,7 @@ func describe_lines() -> PackedStringArray:
 		out.append("unchanged  %d listed, %d B of headers saved" % [
 			unchanged_listed, unchanged_bytes_saved
 		])
+		out.append("leads      %d sent to clients" % input_leads_sent)
 
 	if stats != null:
 		out.append("")

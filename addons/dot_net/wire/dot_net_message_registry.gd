@@ -75,9 +75,14 @@ const MAX_BODY_BITS := 1 << 24
 ## writing an empty body for each (see [code]docs/wire.md#unchanged-entities[/code]).
 const FEATURE_UNCHANGED_RUNS := 1
 
+## [constant FEATURE_INPUT_LEAD]: snapshots may end with how early this client's commands are
+## reaching the server, which its clock steers by (see
+## [code]docs/timelines.md#the-input-lead-the-server-reports[/code]).
+const FEATURE_INPUT_LEAD := 2
+
 ## What this end announces. Every feature this build reads, by default; a test that wants to
 ## be an older peer clears it before the table is sent.
-var features: int = FEATURE_UNCHANGED_RUNS
+var features: int = FEATURE_UNCHANGED_RUNS | FEATURE_INPUT_LEAD
 
 ## A peer's schema table arrived and was compatible.
 signal peer_adopted(peer_id: int)
