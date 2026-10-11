@@ -27,6 +27,7 @@ The numbered bug list. Code comments cite these numbers (`#17`), so the numberin
 24. **The interpolation delay was counted back from the server's tick**, so the flight time came out of it and nearly every frame on a 120 ms round trip was extrapolated. Never shows on a loopback.
 25. **Nothing resent an input.** The buffer's comment said clients resend recent inputs; none did. Input batches added.
 26. **A replay stopped at a hole the clock's catch-up had made**, leaving the prediction metres short; the first fix replayed past the newest input and predicted ticks twice.
+27. **`DotNetConfig.mtu` was declared and read by nothing**, so the only bound on a snapshot was an entity count. mg-buses-from-hell's round-start snapshot (88 crates and buses all falling, about 16.6 bytes each) was 1450 to 1478 bytes, over the 1392 that Godot's ENet peer carries in one unreliable packet; ENet fragmented it, and losing either fragment lost the snapshot, so a native client lost about twice as many of the snapshots that mattered most. Nothing failed: a lost snapshot is one stale frame, and the only sign was ENet's once-per-process "above the MTU" warning in a dot-server-deploy suite. Snapshots are cut into parts at `mtu` now ([wire.md](wire.md#snapshot-parts)).
 
 Not numbered, kept for recognition:
 

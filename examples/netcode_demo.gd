@@ -220,7 +220,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 306
+const CHECKS := 325
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -285,6 +285,7 @@ func _run() -> void:
 	_test_standing_still()
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
+	_test_snapshot_parts()
 	_test_input_batches()
 	await _test_integration()
 
@@ -2789,6 +2790,259 @@ func _reorder_run(every_other: bool) -> void:
 	remove_child(watcher)
 	host.free()
 	watcher.free()
+
+
+## A snapshot bigger than [member DotNetConfig.mtu] goes out in parts, each applying alone.
+##
+## Godot's ENet peer fragments an unreliable packet over its MTU, and losing any fragment
+## loses the packet: a game whose snapshots ran past it (mg-buses-from-hell, at a round's
+## spawn) lost about twice as many on a native client, and nothing here measured a size.
+## Every check below is armed: [member DotNetConfig.mtu] was declared and read by nothing.
+func _test_snapshot_parts() -> void:
+	print("")
+	print("[snapshot parts]")
+
+	const ENTITIES := 40
+	const MTU := 256
+
+	var host := _parts_manager("PartsServer", true, MTU)
+	var watcher := _parts_manager("PartsClient", false, MTU)
+
+	var sent: Array[PackedByteArray] = []
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if peer_id != 2:
+			return
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := watcher.receive(payload, 1)
+			return
+		sent.append(payload)
+
+	host.start()
+	watcher.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	watcher.spawner.register_factory(&"player", _build_player)
+
+	var on_server: Array[Movement] = []
+	var on_client: Array[Movement] = []
+	for i in ENTITIES:
+		var spawned := host.spawner.spawn(&"player", 3, Transform3D.IDENTITY, 0)
+		var server_entity: DotNetIdentity = spawned.value
+		var _mirror := watcher.spawner.spawn_remote(&"player", server_entity.net_id, 3, Transform3D.IDENTITY, 0)
+		on_server.append(server_entity.behaviours[0] as Movement)
+		on_client.append(watcher.registry.get_identity(server_entity.net_id).behaviours[0] as Movement)
+
+	var deliver := func(payload: PackedByteArray) -> void:
+		var _r := watcher.receive_snapshot(payload)
+		var _a := host.receive_ack_payload(2, watcher.encode_ack())
+
+	var at := func(m: Movement) -> float:
+		return float((m.received_values().get(&"position", Vector3.ZERO) as Vector3).x)
+
+	# --- Over the MTU: parts, each under it, every entity in exactly one ---------
+
+	for i in ENTITIES:
+		on_server[i].position = Vector3(1.0 + i, 0, 0)
+	host.server_tick(3)
+	var first := sent.duplicate()
+	sent.clear()
+
+	var largest := 0
+	var total_bytes := 0
+	var total_entities := 0
+	for payload in first:
+		largest = maxi(largest, payload.size())
+		total_bytes += payload.size()
+		total_entities += _part_count(payload)
+	_check("a snapshot over the MTU is sent in parts (%d)" % first.size(), first.size() > 1)
+	_check("every part is within the MTU (largest %d of %d)" % [largest, MTU], largest <= MTU)
+	_check("each entity is in one part (%d of %d)" % [total_entities, ENTITIES], total_entities == ENTITIES)
+	_check("parts are full, not one entity each (%d B in %d)" % [total_bytes, first.size()],
+		first.size() * MTU < total_bytes + MTU * 2)
+
+	for payload in first:
+		deliver.call(payload)
+	var arrived := 0
+	for i in ENTITIES:
+		if absf(at.call(on_client[i]) - (1.0 + i)) < 0.02:
+			arrived += 1
+	_check("every part applies: all %d entities arrive (%d)" % [ENTITIES, arrived], arrived == ENTITIES)
+	_check("the whole tick is acknowledged once every part is in (%d)" % watcher.ack_tick(),
+		watcher.ack_tick() == 3)
+	_check("a second part is not a repeated or late snapshot to the stats (%d)" % watcher.stats.out_of_order,
+		watcher.stats.out_of_order == 0 and watcher.stats.snapshots_lost == 0)
+	_check("and the decode is clean (%d)" % watcher.stats.decode_failures,
+		watcher.stats.decode_failures == 0)
+
+	# --- A lost part loses its own entities and nothing else -------------------
+
+	for i in ENTITIES:
+		on_server[i].position = Vector3(100.0 + i, 0, 0)
+	host.server_tick(6)
+	var second := sent.duplicate()
+	sent.clear()
+	var lost_count := _part_count(second[1]) if second.size() > 1 else -1
+	for index in second.size():
+		if index != 1:
+			deliver.call(second[index])
+	var moved := 0
+	var stayed := 0
+	for i in ENTITIES:
+		var x: float = at.call(on_client[i])
+		if absf(x - (100.0 + i)) < 0.02:
+			moved += 1
+		elif absf(x - (1.0 + i)) < 0.02:
+			stayed += 1
+	_check("with part 1 lost, the other parts' entities still arrive (%d moved)" % moved,
+		moved == ENTITIES - lost_count)
+	_check("only the lost part's entities are stale (%d of %d)" % [stayed, lost_count],
+		lost_count > 0 and stayed == lost_count)
+	_check("a tick with a part missing is not acknowledged (%d)" % watcher.ack_tick(),
+		watcher.ack_tick() == 3)
+
+	# A late copy of the lost part, after a newer tick: superseded, not applied.
+	on_server[0].position = Vector3(200.0, 0, 0)
+	host.server_tick(9)
+	for payload in sent:
+		deliver.call(payload)
+	sent.clear()
+	_check("the next, complete tick is acknowledged (%d)" % watcher.ack_tick(), watcher.ack_tick() == 9)
+	var current := func() -> int:
+		var n := 0
+		for i in range(1, ENTITIES):
+			if absf(at.call(on_client[i]) - (100.0 + i)) < 0.02:
+				n += 1
+		return n
+	var before_late: int = current.call()
+	deliver.call(second[1])
+	var after_late: int = current.call()
+	_check("a late part of an older tick is superseded (%d, was %d)" % [after_late, before_late],
+		after_late == before_late and before_late < ENTITIES - 1)
+
+	# The acknowledgement of 9 resolves 6 as lost, so what part 1 carried goes again.
+	host.server_tick(12)
+	for payload in sent:
+		deliver.call(payload)
+	sent.clear()
+	var caught_up := 0
+	for i in range(1, ENTITIES):
+		if absf(at.call(on_client[i]) - (100.0 + i)) < 0.02:
+			caught_up += 1
+	_check("the lost part's entities are re-sent and arrive (%d of %d)" % [caught_up, ENTITIES - 1],
+		caught_up == ENTITIES - 1)
+
+	# A part of an older tick that turns up after a part of a newer, still incomplete one
+	# is superseded too: entities are not in the same part every tick (the order is the
+	# priority accumulator's), so it can carry an entity the newer part already moved.
+	for i in ENTITIES:
+		on_server[i].position = Vector3(400.0 + i, 0, 0)
+	host.server_tick(13)
+	var older := sent.duplicate()
+	sent.clear()
+	for i in ENTITIES:
+		on_server[i].position = Vector3(500.0 + i, 0, 0)
+	host.server_tick(14)
+	var newer := sent.duplicate()
+	sent.clear()
+	deliver.call(newer[0])
+	deliver.call(older[older.size() - 1])
+	var went_back := 0
+	for i in ENTITIES:
+		if absf(at.call(on_client[i]) - (400.0 + i)) < 0.02:
+			went_back += 1
+	_check("an older part after a newer incomplete tick is not applied (%d)" % went_back,
+		older.size() > 1 and newer.size() > 1 and went_back == 0)
+	for index in range(1, newer.size()):
+		deliver.call(newer[index])
+
+	# --- Under the MTU: one packet, byte for byte the format before parts --------
+
+	host.config.mtu = 8192
+	for i in ENTITIES:
+		on_server[i].position = Vector3(300.0 + i, 0, 0)
+	host.server_tick(15)
+	_check("under the MTU a snapshot is one packet (%d)" % sent.size(), sent.size() == 1)
+	if sent.size() == 1:
+		var whole := sent[0]
+		var reader := DotNetReader.new(whole)
+		var _tick := reader.read_uint(32)
+		var count := reader.read_uint(12)
+		# Walk the entities with the client's own declarations, then look at what is left.
+		var _applied := watcher.receive_snapshot(whole)
+		_check("and it carries no part trailer (%d entities, %d B)" % [count, whole.size()],
+			count == ENTITIES and whole.size() * 8 - _bits_before_trailer(whole, watcher) < 8)
+	sent.clear()
+
+	# --- More than sixteen parts' worth: the rest waits, nothing is malformed ----
+
+	host.config.mtu = MTU
+	host.config.max_entities_per_snapshot = 0
+	for i in 200:
+		var spawned := host.spawner.spawn(&"player", 3, Transform3D.IDENTITY, 0)
+		var extra: DotNetIdentity = spawned.value
+		var _mirror := watcher.spawner.spawn_remote(&"player", extra.net_id, 3, Transform3D.IDENTITY, 0)
+	host.server_tick(18)
+	var widest := 0
+	for payload in sent:
+		widest = maxi(widest, payload.size())
+	_check("a snapshot is cut into at most %d parts (%d)" % [DotNetManager.MAX_SNAPSHOT_PARTS, sent.size()],
+		sent.size() == DotNetManager.MAX_SNAPSHOT_PARTS and widest <= MTU)
+	var failures_before := watcher.stats.decode_failures
+	for payload in sent:
+		deliver.call(payload)
+	_check("and every one of them decodes", watcher.stats.decode_failures == failures_before)
+	sent.clear()
+
+	host.stop()
+	watcher.stop()
+	remove_child(host)
+	remove_child(watcher)
+	host.free()
+	watcher.free()
+
+
+func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:
+	var manager := DotNetManager.new()
+	manager.name = label
+	manager.is_server = server
+	manager.service_scope = StringName(label.to_lower())
+	manager.local_peer_id = 1 if server else 2
+	manager.auto_tick = false
+	manager.config_file = ""
+	manager.config = DotNetConfig.new()
+	manager.config.tick_rate = 60
+	# A snapshot every tick, so each server_tick below is one snapshot.
+	manager.config.snapshot_rate = 60
+	manager.config.mtu = mtu
+	manager.config.per_client_budget = 0
+	add_child(manager)
+	var _s := manager.setup()
+	# Every entity spawned is relevant at once, not after the interest cache expires.
+	manager.interest.evaluation_interval_sec = 0.0
+	return manager
+
+
+## The entity count in a snapshot part's header.
+func _part_count(payload: PackedByteArray) -> int:
+	var reader := DotNetReader.new(payload)
+	var _tick := reader.read_uint(32)
+	return reader.read_uint(12)
+
+
+## Where a snapshot's entities end, read with [param client]'s declarations.
+func _bits_before_trailer(payload: PackedByteArray, client: DotNetManager) -> int:
+	var reader := DotNetReader.new(payload)
+	var _tick := reader.read_uint(32)
+	var count := reader.read_uint(12)
+	for _i in count:
+		var net_id := reader.read_uint(DotNetRegistry.ID_BITS)
+		var behaviours := reader.read_uint(6)
+		var identity := client.registry.get_identity(net_id)
+		if identity == null:
+			return -1
+		for b in behaviours:
+			var _r := identity.behaviours[b].read_state(reader, 0)
+	return reader.bit_position()
 
 
 ## Every packet carries the last few inputs, so one lost packet costs no tick.

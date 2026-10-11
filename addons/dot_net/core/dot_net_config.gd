@@ -165,7 +165,14 @@ extends DotConfig
 
 @export_group("Bandwidth")
 
-## Payload bytes per packet before fragmenting.
+## The largest snapshot payload [DotNetManager] hands to [member DotNetManager.send_fn].
+##
+## A snapshot that would be bigger is sent as several parts, each a snapshot of its own
+## entities that applies without the others, so a lost part loses only what was in it
+## (docs/wire.md#snapshot-parts). Leave room for the host's own framing under the path's
+## real limit: Godot's ENet peer carries 1392 bytes in one unreliable packet and fragments
+## anything bigger, and an RPC adds about twenty bytes of its own. 1200 also stays under
+## IPv6's 1280. Messages are not cut by this: [DotNetPacket] has its own.
 @export_range(256, 8192, 64) var mtu: int = 1200
 
 ## Bytes per second sent to one client. 0 is unlimited.

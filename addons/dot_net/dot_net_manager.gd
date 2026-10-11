@@ -34,6 +34,20 @@ extends Node
 const CHANNEL := "net"
 const SERVICE := &"dot_net_manager"
 
+## The most parts one snapshot is cut into, and the reason the part trailer is four bits a
+## field. Entities that would need a seventeenth wait for the next snapshot.
+const MAX_SNAPSHOT_PARTS := 16
+
+## A split snapshot's trailer: the part's index and the part count less one, four bits each.
+const SNAPSHOT_PART_TRAILER_BITS := 8
+
+## Where a snapshot's 12-bit entity count starts, after the 32-bit tick.
+const SNAPSHOT_COUNT_BIT := 32
+
+## Snapshot ticks remembered for [member _seen_ticks]. More than a part arriving behind its
+## tick's other parts could plausibly be late by.
+const SEEN_TICKS_KEPT := 16
+
 ## Emitted each simulation tick, after entities have been simulated.
 signal ticked(tick: int)
 
@@ -160,6 +174,28 @@ var _last_snapshot_tick: int = 0
 
 ## Newest snapshot tick applied in full, on a client. What [method ack_tick] reports.
 var _applied_snapshot_tick: int = 0
+
+## Client side: the newest snapshot tick any part of which has been read, which parts of it
+## have been applied in full (a bitmask), and how many parts it was sent in (0 until a part
+## has been read to its end). -1 before any, so a first snapshot at tick 0 is not a repeat.
+## See [method receive_snapshot].
+var _receiving_tick: int = -1
+var _receiving_mask: int = 0
+var _receiving_total: int = 0
+
+## Client side: the last few snapshot ticks seen, so a second part of a tick is not counted
+## by [DotNetStats] as a repeated or a recovered snapshot.
+var _seen_ticks: Array[int] = []
+
+## Server side: snapshots that went out in more than one part, and the largest part sent.
+## See [member DotNetConfig.mtu].
+var snapshots_split: int = 0
+var largest_part_bytes: int = 0
+
+## Whether the one warning about an entity too big for [member DotNetConfig.mtu] on its own
+## has been logged. Once per manager: it is a property of the game's declarations, not of
+## a moment, and a warning per snapshot would be twenty a second.
+var _warned_oversize: bool = false
 
 ## Connected peers, on the server.
 var _peers: Array[int] = []
@@ -341,6 +377,10 @@ func stop() -> void:
 	_ack_wired.clear()
 	_last_snapshot_tick = 0
 	_applied_snapshot_tick = 0
+	_receiving_tick = -1
+	_receiving_mask = 0
+	_receiving_total = 0
+	_seen_ticks.clear()
 
 	if registry != null:
 		registry.clear()
@@ -641,13 +681,25 @@ func _send_to_peer(
 	if not send_fn.is_valid():
 		return false
 
-	var writer := DotNetWriter.new()
-	writer.write_uint(tick, 32)
+	# [b]A snapshot bigger than [member DotNetConfig.mtu] goes out as several parts, each a
+	# whole snapshot of its own entities.[/b] Godot's ENet peer fragments an unreliable packet
+	# over its MTU (1392 bytes of payload) into unreliable fragments, and losing any one of
+	# them loses the whole packet: a two-fragment snapshot is lost about twice as often on a
+	# native client, and the one most often lost is the biggest, the one after a round's
+	# spawn. Cutting it here instead means a lost part loses only the entities in it, which
+	# the acknowledgement path already re-sends. See docs/wire.md#snapshot-parts.
+	#
+	# The cut is decided before an entity is written, from its exact encoded size
+	# ([method DotNetBehaviour.state_bits]), because writing has side effects on the peer's
+	# record that cannot be taken back, and the encoding of anything byte-aligned depends on
+	# the bit it starts at, so a written entity cannot be moved to another packet afterwards.
+	var limit_bits := config.mtu * 8 - SNAPSHOT_PART_TRAILER_BITS
 
-	var count_position := writer.bit_length()
-	# The count is written after the entities, once it is known — writing it first
-	# would mean guessing how many fit in the budget.
-	writer.write_uint(0, 12)
+	var parts: Array[DotNetWriter] = []
+	var counts: PackedInt32Array = []
+	var writer := _begin_snapshot_part(tick)
+	parts.append(writer)
+	counts.append(0)
 
 	var written := 0
 	var remaining_bytes := budget.remaining(peer_id)
@@ -668,8 +720,6 @@ func _send_to_peer(
 			budget.note_starved(peer_id)
 			continue
 
-		var before := writer.byte_length()
-
 		# The entity this peer predicts. Its client reads a property's absence as "the
 		# server's is unchanged" and rewinds to what it last received, so for this entity
 		# alone a property stays owed until the peer has confirmed it — see
@@ -677,41 +727,111 @@ func _send_to_peer(
 		var predicted_by_peer := identity.owner_peer_id == peer_id \
 			and identity.authority == DotNetIdentity.Authority.SHARED
 
-		writer.write_uint(identity.net_id, DotNetRegistry.ID_BITS)
-		writer.write_uint(identity.behaviours.size(), 6)
-
+		var dirties: Array = []
 		for behaviour in identity.behaviours:
 			# Resolve what this peer has confirmed before deciding what is dirty, so
 			# a property whose only send was lost is dirty again and goes out here.
 			behaviour.sync_peer_acks(peer_id, acked_tick, strict)
 			behaviour.trim_pending(peer_id, oldest_pending)
+			dirties.append(behaviour.collect_dirty(peer_id, false, predicted_by_peer))
 
-			var dirty := behaviour.collect_dirty(peer_id, false, predicted_by_peer)
-			behaviour.write_state(writer, dirty, peer_id, tick)
+		# Measured only near the end of a part: an entity is rarely more than twice its full
+		# update's estimate plus 32 bytes (only a long string or a custom codec could be), and
+		# the exact figure is a lookup per behaviour per entity per peer, which at 64 players
+		# is four thousand a snapshot for an answer that is "it fits" nearly every time.
+		if counts[counts.size() - 1] > 0 \
+				and writer.bit_length() + estimated * 16 + 256 > limit_bits \
+				and _entity_end_bit(writer.bit_length(), identity, dirties) > limit_bits:
+			if parts.size() >= MAX_SNAPSHOT_PARTS:
+				# Out of parts: what does not fit waits, exactly as the budget makes it wait,
+				# and the accumulator puts it at the front next time.
+				budget.note_starved(peer_id)
+				continue
+			writer = _begin_snapshot_part(tick)
+			parts.append(writer)
+			counts.append(0)
+
+		var before := writer.byte_length()
+
+		writer.write_uint(identity.net_id, DotNetRegistry.ID_BITS)
+		writer.write_uint(identity.behaviours.size(), 6)
+
+		for b in identity.behaviours.size():
+			identity.behaviours[b].write_state(writer, dirties[b], peer_id, tick)
+
+		if not _warned_oversize and writer.bit_length() > limit_bits:
+			_warned_oversize = true
+			DotLog.warn(CHANNEL, "an entity's state alone is bigger than the snapshot MTU; it is sent oversized", {
+				"net_id": identity.net_id,
+				"prefab": str(identity.prefab_id),
+				"bytes": (writer.bit_length() + 7) >> 3,
+				"mtu": config.mtu,
+			})
 
 		var spent := writer.byte_length() - before
 		remaining_bytes -= spent
 		budget.note_sent(peer_id, identity.net_id, spent)
+		counts[counts.size() - 1] += 1
 		written += 1
 
 	if written == 0:
 		return false
 
-	var payload := writer.to_bytes()
+	# A part that ended up empty (only possible as the last, when everything after the cut
+	# was starved) is not sent: a part with no entities would still be a part the client
+	# waits for before it acknowledges the tick.
+	if counts[counts.size() - 1] == 0:
+		parts.pop_back()
+		counts.remove_at(counts.size() - 1)
 
-	# Patch the count in now that it is known. The header is byte-aligned by
-	# construction, so this is a plain byte edit rather than a bit splice.
-	var count_byte := count_position >> 3
-	if count_byte + 1 < payload.size():
-		payload[count_byte] = written & 0xFF
-		payload[count_byte + 1] = (payload[count_byte + 1] & 0xF0) | ((written >> 8) & 0x0F)
+	var total := parts.size()
+	if total > 1:
+		snapshots_split += 1
 
-	send_fn.call(peer_id, payload, DotNetMessage.Delivery.UNRELIABLE)
+	for index in total:
+		var part := parts[index]
+		# Only a split snapshot carries the trailer, so one that fits is byte for byte what
+		# this addon sent before parts existed.
+		if total > 1:
+			part.write_uint(index, 4)
+			part.write_uint(total - 1, 4)
 
-	budget.note_packet(peer_id, payload.size())
-	stats.note_sent(payload.size(), written)
+		var payload := part.to_bytes()
+
+		# Patch the count in now that it is known. The header is byte-aligned by
+		# construction, so this is a plain byte edit rather than a bit splice.
+		var count_byte := SNAPSHOT_COUNT_BIT >> 3
+		var count := counts[index]
+		if count_byte + 1 < payload.size():
+			payload[count_byte] = count & 0xFF
+			payload[count_byte + 1] = (payload[count_byte + 1] & 0xF0) | ((count >> 8) & 0x0F)
+
+		send_fn.call(peer_id, payload, DotNetMessage.Delivery.UNRELIABLE)
+
+		largest_part_bytes = maxi(largest_part_bytes, payload.size())
+		budget.note_packet(peer_id, payload.size())
+		stats.note_sent(payload.size(), count)
 
 	return true
+
+
+## A snapshot part's header: the tick, and a count patched in once the entities are written.
+## Writing the count first would mean guessing how many fit.
+func _begin_snapshot_part(tick: int) -> DotNetWriter:
+	var writer := DotNetWriter.new()
+	writer.write_uint(tick, 32)
+	writer.write_uint(0, 12)
+	return writer
+
+
+## Where an entity would end if written at [param from_bit] with [param dirties] (one array of
+## declarations per behaviour), exactly. Each behaviour's encoding depends on the bit of a
+## byte it starts at, so they are measured in order.
+func _entity_end_bit(from_bit: int, identity: DotNetIdentity, dirties: Array) -> int:
+	var at := from_bit + DotNetRegistry.ID_BITS + 6
+	for b in identity.behaviours.size():
+		at += identity.behaviours[b].state_bits(dirties[b], at & 7)
+	return at
 
 
 ## Applies a snapshot payload. Client side.
@@ -735,19 +855,39 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 	# In snapshots, not ticks: a gap of one period is no loss at all. Set every time,
 	# because a client adopts the server's tick rate after it started.
 	stats.snapshot_interval_ticks = config.ticks_per_snapshot()
-	stats.note_snapshot(tick)
 
-	if tick <= _applied_snapshot_tick and _applied_snapshot_tick > 0:
-		# Older than one already applied. Snapshots carry state, not events, so a
-		# late one is not merely out of order — it is superseded, and applying it
-		# would write a stale value over a newer one for every property the
-		# interpolator does not own. The clock is not fed from it either: an
-		# arrival time attached to an old tick reads as a sudden lead.
+	# Once per tick, not once per part: the second part of a snapshot is neither a repeat
+	# nor a late arrival making up for a loss. See [member _seen_ticks].
+	if not _seen_ticks.has(tick):
+		_seen_ticks.append(tick)
+		if _seen_ticks.size() > SEEN_TICKS_KEPT:
+			_seen_ticks.pop_front()
+		stats.note_snapshot(tick)
+
+	if tick < _receiving_tick:
+		# Older than one already read. Snapshots carry state, not events, so a late one
+		# is not merely out of order — it is superseded, and applying it would write a
+		# stale value over a newer one for every property the interpolator does not own.
+		# The clock is not fed from it either: an arrival time attached to an old tick
+		# reads as a sudden lead. A late PART of an older tick is superseded the same way;
+		# what it carried is re-sent, because the tick it belongs to is never acknowledged.
 		return DotResult.success(_applied_snapshot_tick)
 
-	interpolator.note_arrival()
-	clock.sync_from_server(tick, stats.rtt_percentile(0.5))
-	interpolator.note_lateness(tick, clock.received_tick())
+	if tick == _receiving_tick and _applied_snapshot_tick == tick:
+		# Every part of this tick is in: anything more is a repeat. (A repeat of one part of
+		# a tick still missing another is applied again, which writes the same values; it
+		# cannot be told from the missing part until its trailer is read.)
+		return DotResult.success(_applied_snapshot_tick)
+
+	if tick > _receiving_tick:
+		_receiving_tick = tick
+		_receiving_mask = 0
+		_receiving_total = 0
+		# The first part of a tick to arrive is the snapshot's arrival, for timing. A
+		# second part is the same send, a few microseconds later.
+		interpolator.note_arrival()
+		clock.sync_from_server(tick, stats.rtt_percentile(0.5))
+		interpolator.note_lateness(tick, clock.received_tick())
 
 	for _i in range(count):
 		var net_id := reader.read_uint(DotNetRegistry.ID_BITS)
@@ -834,12 +974,34 @@ func receive_snapshot(payload: PackedByteArray) -> DotResult:
 		elif not values.is_empty():
 			interpolator.push(net_id, tick, values)
 
-	# Only here, and deliberately not on any early return above. An acknowledgement
-	# tells the server it may stop re-sending everything in this snapshot, so it has
-	# to mean the whole snapshot was applied. The unknown-entity path abandons the
-	# rest of the packet — it cannot skip a variable-length body — and acknowledging
-	# that would strand every entity after it at a value this peer never received.
-	_applied_snapshot_tick = tick
+	# Which part this was. Only a split snapshot carries the trailer (see [method
+	# _send_to_peer]); what is left of an unsplit one is under a byte of padding.
+	var part := 0
+	var total := 1
+	if reader.bits_remaining() >= SNAPSHOT_PART_TRAILER_BITS:
+		part = reader.read_uint(4)
+		total = reader.read_uint(4) + 1
+		if not reader.ok() or total < 2 or part >= total:
+			stats.note_decode_failure()
+			return DotResult.fail(
+				DotError.CODE_PARSE, "Bad snapshot part trailer.",
+				"part %d of %d" % [part, total]
+			)
+
+	_receiving_total = total
+	_receiving_mask |= 1 << part
+
+	# Only here, and deliberately not on any early return above, and only once every part
+	# of the tick is in. An acknowledgement tells the server it may stop re-sending
+	# everything in this snapshot, so it has to mean the whole snapshot was applied. The
+	# unknown-entity path abandons the rest of the packet — it cannot skip a
+	# variable-length body — and acknowledging that would strand every entity after it at
+	# a value this peer never received. A tick with a part missing is never acknowledged,
+	# so on the next acknowledgement the server re-sends what that part carried (and what
+	# the parts that did arrive carried: the ack is one tick, not a list, and the redundant
+	# re-send is the price of keeping it four bytes in every game's input packet).
+	if _receiving_mask == (1 << total) - 1:
+		_applied_snapshot_tick = tick
 
 	snapshot_applied.emit(tick)
 	return DotResult.success(tick)
@@ -1040,6 +1202,11 @@ func describe() -> Dictionary:
 		"interest": interest.describe() if interest != null else {},
 	}
 
+	if is_server:
+		d["snapshots_split"] = snapshots_split
+		d["largest_part_bytes"] = largest_part_bytes
+		d["mtu"] = config.mtu if config != null else 0
+
 	if interpolator != null:
 		d["interpolation"] = interpolator.describe()
 	if predictor != null:
@@ -1063,6 +1230,11 @@ func describe_lines() -> PackedStringArray:
 		])
 		out.append("rtt        %d ms, jitter %d ms" % [
 			int(clock.rtt_ms()), int(clock.jitter_ms())
+		])
+
+	if is_server and config != null:
+		out.append("snapshots  %d split, largest part %d B of %d" % [
+			snapshots_split, largest_part_bytes, config.mtu
 		])
 
 	if stats != null:

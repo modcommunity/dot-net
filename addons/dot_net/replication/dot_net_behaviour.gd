@@ -447,39 +447,11 @@ func write_state(
 	# 32 players). The per-peer half -- what that peer is believed to hold, when it was last
 	# sent, what is unconfirmed -- is still per peer, below; the values recorded are one
 	# dictionary shared by every peer's pending entry, which nothing writes to after this.
-	var encoded: Array = []
-	# [b]One shared copy, shifted into place -- unless something in it is byte-aligned.[/b] A
-	# string or bytes aligns before its bytes, so where its padding falls depends on the bit
-	# of a byte the encoding starts at; such a set is encoded at the bit it will be laid in
-	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
-	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
 	var pad := writer.bit_length() & 7
-	var key := _signature(declarations) if _snapshot_reads_open else -1
-	var aligned := false
-	if key >= 0:
-		# The set's bitmask against the byte-aligned declarations', rather than a call
-		# per declaration per peer.
-		aligned = (key & _align_mask) != 0
-	else:
-		for declaration in declarations:
-			if declaration.may_align():
-				aligned = true
-				break
-	var at := pad if aligned else 0
+	var found := _encoded_for(declarations, pad)
+	var encoded: Array = found[0]
 
-	if key >= 0:
-		var at_pad: Dictionary = _encoded.get(at, {})
-		if at_pad.has(key):
-			encoded = at_pad[key]
-		else:
-			encoded = _encode(declarations, at)
-			at_pad[key] = encoded
-			_encoded[at] = at_pad
-
-	if encoded.is_empty():
-		encoded = _encode(declarations, at)
-
-	if aligned:
+	if bool(found[1]):
 		writer.write_bit_run(encoded[0], pad, int(encoded[1]))
 	else:
 		writer.write_shifted_run(encoded[0], int(encoded[1]))
@@ -505,6 +477,60 @@ func write_state(
 		return
 
 	view.pending.append({"tick": tick, "values": recorded})
+
+
+## Bits [method write_state] would add for [param declarations] to a writer standing
+## [param pad] bits into a byte (its [code]bit_length() & 7[/code]).
+##
+## Exact, not an estimate, and the encoding it measures is the one [method write_state] then
+## copies: inside a snapshot both read the same cache, so asking first costs a lookup. What
+## [DotNetManager] decides where a snapshot is cut into parts with
+## ([member DotNetConfig.mtu]); [method estimated_bits] is a full update's guess and can be
+## several times the real figure, or short of it for a string.
+func state_bits(declarations: Array[DotNetVar], pad: int) -> int:
+	var found := _encoded_for(declarations, pad & 7)
+	var encoded: Array = found[0]
+	if bool(found[1]):
+		return int(encoded[1]) - (pad & 7)
+	return int(encoded[1])
+
+
+## The encoding of [param declarations] for a writer [param pad] bits into a byte, as
+## [code][encoded, aligned][/code]: the [method _encode] result, and whether it was encoded at
+## that bit (copied with [method DotNetWriter.write_bit_run]) or at bit 0 (shifted into place).
+func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
+	var encoded: Array = []
+	# [b]One shared copy, shifted into place -- unless something in it is byte-aligned.[/b] A
+	# string or bytes aligns before its bytes, so where its padding falls depends on the bit
+	# of a byte the encoding starts at; such a set is encoded at the bit it will be laid in
+	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
+	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
+	var key := _signature(declarations) if _snapshot_reads_open else -1
+	var aligned := false
+	if key >= 0:
+		# The set's bitmask against the byte-aligned declarations', rather than a call
+		# per declaration per peer.
+		aligned = (key & _align_mask) != 0
+	else:
+		for declaration in declarations:
+			if declaration.may_align():
+				aligned = true
+				break
+	var at := pad if aligned else 0
+
+	if key >= 0:
+		var at_pad: Dictionary = _encoded.get(at, {})
+		if at_pad.has(key):
+			encoded = at_pad[key]
+		else:
+			encoded = _encode(declarations, at)
+			at_pad[key] = encoded
+			_encoded[at] = at_pad
+
+	if encoded.is_empty():
+		encoded = _encode(declarations, at)
+
+	return [encoded, aligned]
 
 
 ## The encoding of [param declarations], as [code][bytes, end bit, recorded, rate-limited
