@@ -47,7 +47,7 @@ The send side has to make "absent means unchanged" true under loss: see [replica
 
 Each input packet carries the last few inputs, because every lost input packet is otherwise a tick the server runs on the previous command. `DotNetInput.write_batch` / `read_batch` encode them (count, the first tick in full, each later one as a varint step); `Buffer.recent(count, upto_tick)` gives a client its copies from the replay history; `Buffer.last_consumed_tick()` lets a server skip copies it has already simulated rather than count each as late. Duplicates are counted, not applied twice.
 
-Wiring it is each game's bridge, and most send three. mg-look-at-me and dot-game-template still send one input per packet: not yet converted; reason unknown.
+Wiring it is each game's bridge; every game's bridge and the game template batch their inputs, each sending the last five (`INPUT_COPIES`).
 
 ## Inputs are untrusted
 
