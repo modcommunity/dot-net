@@ -41,7 +41,7 @@ Read the family [CLAUDE.md](../../CLAUDE.md) first; this file is only what is sp
 
 ## Running and testing
 
-- The family's two steps ([game-dev/CLAUDE.md](../../CLAUDE.md#validating-anything)), then all three scenes: `netcode_demo.tscn` (everything, including a two-manager integration run under loss), `diagnostics_demo.tscn` (`DotNetStats`, `DotNetSnapshot`), `relay_demo.tscn` (the relay and a real ENet pair). [testing](docs/testing.md)
+- The family's two steps ([game-dev/CLAUDE.md](../../CLAUDE.md#validating-anything)), then all three scenes: `netcode_demo.tscn` (everything, including a two-manager integration run under loss), `diagnostics_demo.tscn` (`DotNetStats`, `DotNetSnapshot`), `relay_demo.tscn` (the relay, a real ENet pair, and ENet's packet throttle). [testing](docs/testing.md)
 - **A dot-net change is not done until the games' `headless_net` suites agree**, and game-arena's `headless_lossy` for anything about loss or timing: most bugs here were found there, by a second peer, a real socket or a real round trip that this repo's suites lacked.
 - The integration test runs both managers in one process, which is why there are no autoloads and why `DotNetManager.service_scope` exists.
 

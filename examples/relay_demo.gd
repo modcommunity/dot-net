@@ -18,7 +18,7 @@ const Relay := preload("res://addons/dot_net/testing/dot_net_udp_relay.gd")
 ## may assume its order (see docs/wire.md, "Unreliable means unordered").
 
 ## Every check this suite makes, the last one included. See docs/testing.md.
-const CHECKS := 28
+const CHECKS := 34
 
 const COUNT := 1000
 
@@ -40,6 +40,7 @@ func _run() -> void:
 	await _section_datagrams()
 	_section_seed()
 	await _section_enet()
+	await _section_throttle()
 
 	_line("")
 	_check("every section ran", _sections_finished == _sections_started,
@@ -383,6 +384,152 @@ func _section_enet() -> void:
 	relay.stop()
 	_line("")
 	_sections_finished += 1
+
+
+# --- 4. ENet's packet throttle -------------------------------------------------------
+
+## Port for this section's server: ENet's port 0 is not every engine's "any port".
+const THROTTLE_PORT := 27393
+
+## [b]A steady path, a reliable burst and long frames: ENet's own throttle drops what the game
+## sends unreliably, at the sender.[/b] dot-core's DotTransportENet turns its deceleration to 0
+## (see its `packet_throttle_deceleration` for the mechanism); the stock pair beside it is the
+## control, built from the bare engine class. Measured 2026-10-12, three runs alike: the stock
+## server's throttle at 0 of 32 and 16 of 180 unreliable packets delivered; DotTransportENet at
+## 32 and all 180. mg-look-at-me's `headless_lossy` holds the same on a real game.
+func _section_throttle() -> void:
+	_sections_started += 1
+	_line("4. ENet's packet throttle: a steady 60 ms, a reliable burst, 300 ms frames")
+
+	if not ClassDB.class_exists("ENetMultiplayerPeer"):
+		_line("    skipped: this build has no ENet")
+		for i in range(6):
+			_check("(skipped)", true)
+		_sections_finished += 1
+		return
+
+	var stock := await _throttle_run(false)
+	var ours := await _throttle_run(true)
+	_line("    stock ENet: %d of %d unreliable delivered, server throttle down to %d; DotTransportENet: %d of %d, down to %d" % [
+		stock["got"], stock["sent"], stock["lowest"], ours["got"], ours["sent"], ours["lowest"]])
+
+	_check("both pairs connect through the relay", stock["connected"] and ours["connected"])
+	_check("the control: ENet's stock throttle falls under the burst",
+		int(stock["lowest"]) < 16, "lowest %d of 32" % stock["lowest"])
+	_check("and drops unreliable packets at the sender, with no loss on the path",
+		int(stock["got"]) < int(stock["sent"]) * 0.8, "%d of %d" % [stock["got"], stock["sent"]])
+	_check("DotTransportENet's throttle never falls", int(ours["lowest"]) == 32, "lowest %d" % ours["lowest"])
+	_check("so every unreliable packet it sends arrives", int(ours["got"]) >= int(ours["sent"]) - 2,
+		"%d of %d" % [ours["got"], ours["sent"]])
+	_check("and it told the far end: the client's own deceleration is 0 too", int(ours["far_deceleration"]) == 0,
+		"%d" % ours["far_deceleration"])
+	_line("")
+	_sections_finished += 1
+
+
+## One pair through a steady 60 ms relay: the server sends one unreliable packet a frame and,
+## for the first two seconds, twenty reliable kilobytes every sixth frame, while every
+## twentieth frame takes 300 ms (both ends, one process: a level being built). [param ours]
+## builds both ends with dot-core's DotTransportENet; otherwise the bare engine class.
+func _throttle_run(ours: bool) -> Dictionary:
+	var out := {"connected": false, "sent": 0, "got": 0, "lowest": 32, "far_deceleration": -1}
+	var server_peer: Object = null
+	var client_peer: Object = null
+	var relay := Relay.new()
+	relay.up.configure(0.0, 60.0, 0.0)
+	relay.down.configure(0.0, 60.0, 0.0)
+
+	if ours:
+		var made: DotResult = DotTransportENet.new().create_server(THROTTLE_PORT, "127.0.0.1")
+		server_peer = made.value if made.ok else null
+	else:
+		server_peer = ClassDB.instantiate("ENetMultiplayerPeer")
+		if int(server_peer.call("create_server", THROTTLE_PORT, 4)) != OK:
+			server_peer = null
+
+	if server_peer == null:
+		return out
+
+	relay.start(0, "127.0.0.1", THROTTLE_PORT)
+
+	if ours:
+		var made: DotResult = DotTransportENet.new().create_client("127.0.0.1", relay.port())
+		client_peer = made.value if made.ok else null
+	else:
+		client_peer = ClassDB.instantiate("ENetMultiplayerPeer")
+		client_peer.call("create_client", "127.0.0.1", relay.port())
+
+	var deadline := Time.get_ticks_msec() + 5000
+	while client_peer != null and Time.get_ticks_msec() < deadline:
+		server_peer.call("poll")
+		client_peer.call("poll")
+		if int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED:
+			out["connected"] = true
+			break
+		await get_tree().process_frame
+
+	if not out["connected"]:
+		relay.stop()
+		server_peer.call("close")
+		return out
+
+	# A few quiet frames: ENet's first round-trip samples, and the throttle settings across.
+	for i in range(20):
+		server_peer.call("poll")
+		client_peer.call("poll")
+		while int(client_peer.call("get_available_packet_count")) > 0:
+			client_peer.call("get_packet")
+		OS.delay_msec(10)
+
+	var throttle_stat := ClassDB.class_get_integer_constant(&"ENetPacketPeer", &"PEER_PACKET_THROTTLE")
+	var deceleration_stat := ClassDB.class_get_integer_constant(&"ENetPacketPeer", &"PEER_PACKET_THROTTLE_DECELERATION")
+	var to_server: Object = client_peer.call("get_peer", 1)
+	var to_client: Object = null
+	for p in (server_peer.call("get_host") as Object).call("get_peers"):
+		to_client = p
+	out["far_deceleration"] = int(to_server.call("get_statistic", deceleration_stat))
+
+	var burst := PackedByteArray()
+	burst.resize(1000)
+	burst[0] = 1
+	var state := PackedByteArray([0, 0, 0, 0])
+
+	for frame in range(1, 181):
+		server_peer.set("transfer_channel", 1)
+		server_peer.call("set_target_peer", 0)
+		server_peer.set("transfer_mode", MultiplayerPeer.TRANSFER_MODE_UNRELIABLE)
+		server_peer.call("put_packet", state)
+		out["sent"] = int(out["sent"]) + 1
+
+		if frame % 6 == 0 and frame <= 120:
+			server_peer.set("transfer_mode", MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+			for i in range(20):
+				server_peer.call("put_packet", burst)
+
+		server_peer.call("poll")
+		client_peer.call("poll")
+		while int(client_peer.call("get_available_packet_count")) > 0:
+			var got: PackedByteArray = client_peer.call("get_packet")
+			if got.size() == state.size():
+				out["got"] = int(out["got"]) + 1
+
+		out["lowest"] = mini(int(out["lowest"]), int(to_client.call("get_statistic", throttle_stat)))
+		OS.delay_msec(300 if frame % 20 == 10 and frame <= 120 else 16)
+
+	# What was still in flight at the end.
+	for i in range(20):
+		server_peer.call("poll")
+		client_peer.call("poll")
+		while int(client_peer.call("get_available_packet_count")) > 0:
+			var got: PackedByteArray = client_peer.call("get_packet")
+			if got.size() == state.size():
+				out["got"] = int(out["got"]) + 1
+		OS.delay_msec(10)
+
+	client_peer.call("close")
+	server_peer.call("close")
+	relay.stop()
+	return out
 
 
 func _drain(peer: Object, reliable: Array[int], unreliable: Array[int]) -> void:
