@@ -247,7 +247,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 357
+const CHECKS := 360
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -287,6 +287,7 @@ func _ready() -> void:
 
 func _run() -> void:
 	_test_config_sizing()
+	_test_count_limits()
 	print("dot-net self-test")
 	print("")
 
@@ -4160,6 +4161,37 @@ func _check(what: String, passed: bool) -> void:
 
 
 ## The input history is a derived quantity and is raised, not warned about.
+## The two counts the wire carries in 6 bits refuse past 63 with an error, rather than a 64th
+## being sent as 0 (DotNetWriter masks silently) and aliasing the first.
+func _test_count_limits() -> void:
+	print("count limits")
+	var errors := EngineErrors.new()
+	OS.add_logger(errors)
+
+	var many := Movement.new()
+	many._bind(DotNetConfig.new())
+	var before := many.net_vars.size()
+	for i in range(70):
+		var _v := many.replicate(StringName("extra_%d" % i), DotNetVar.Type.UINT)
+	_check("a behaviour keeps 63 replicated properties and refuses the rest", many.net_vars.size() == 63 and before < 63)
+
+	var body := Node3D.new()
+	var identity := DotNetIdentity.new()
+	body.add_child(identity)
+	for i in range(66):
+		var b := Movement.new()
+		b.name = "B%d" % i
+		body.add_child(b)
+	identity.entity = body
+	identity._collect_from(body)
+	_check("an entity keeps 63 behaviours and refuses the rest", identity.behaviours.size() == 63)
+
+	OS.remove_logger(errors)
+	_check("each refusal is an error, not silence (%d)" % errors.count(), errors.count() >= 10)
+	many.free()
+	body.free()
+
+
 func _test_config_sizing() -> void:
 	print("config sizing")
 	var config := DotNetConfig.new()

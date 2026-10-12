@@ -237,10 +237,22 @@ func _net_write_property(property: StringName, value: Variant) -> void:
 
 # --- Declaration -----------------------------------------------------------
 
+## How many properties one behaviour may replicate: the count of changed ones and each one's
+## index both travel in 6 bits ([method _encode]), and [DotNetWriter] masks silently, so a 64th
+## would be sent as a count of 0 and the 65th as index 0. Private: the width is the wire's.
+const _MAX_NET_VARS := 63
+
+
 ## Declares a replicated property. Returns the [DotNetVar] for chaining.
+##
+## Past [constant _MAX_NET_VARS] the declaration is refused with an error and returned
+## unregistered (it chains, and replicates nothing), rather than aliasing another property.
 func replicate(property: StringName, type: DotNetVar.Type) -> DotNetVar:
 	var declaration := DotNetVar.make(property, type)
 	declaration.bind_config(_config)
+	if net_vars.size() >= _MAX_NET_VARS:
+		push_error("%s: replicate(%s) refused, a behaviour replicates at most %d properties (6-bit index)." % [name, property, _MAX_NET_VARS])
+		return declaration
 	net_vars.append(declaration)
 	return declaration
 

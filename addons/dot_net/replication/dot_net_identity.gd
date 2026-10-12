@@ -164,6 +164,10 @@ func _collect_behaviours() -> void:
 		behaviour.identity = self
 
 
+## How many behaviours one entity may carry. Private: the width is the wire's.
+const _MAX_BEHAVIOURS := 63
+
+
 ## Walks the subtree, stopping at nested identities.
 ##
 ## A child entity with its own [DotNetIdentity] owns its own behaviours; claiming
@@ -174,7 +178,12 @@ func _collect_from(node: Node) -> void:
 			continue
 
 		if child is DotNetBehaviour:
-			behaviours.append(child as DotNetBehaviour)
+			# The count travels in 6 bits (DotNetManager's snapshot entity header) and the
+			# writer masks silently: a 64th behaviour would be sent as a count of 0.
+			if behaviours.size() >= _MAX_BEHAVIOURS:
+				push_error("%s: behaviour %s refused, an entity carries at most %d (6-bit count)." % [name, child.name, _MAX_BEHAVIOURS])
+			else:
+				behaviours.append(child as DotNetBehaviour)
 
 		_collect_from(child)
 
