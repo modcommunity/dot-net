@@ -100,6 +100,7 @@ Short forms; the reasoning is in the linked file.
 - A property set with anything byte-aligned (`may_align`) is encoded per bit offset, never shifted. [replication](docs/replication.md#what-a-snapshot-costs)
 - Snapshots read each property once, inside `begin_snapshot_reads` / `end_snapshot_reads`. [replication](docs/replication.md#what-a-snapshot-costs)
 - Net ids are never reused; a freed identity is dropped from every table without being typed. [replication](docs/replication.md#identities)
+- `server_tick` simulates, records and sends only identities still registered as themselves: one unregistered by another behaviour mid-tick is skipped, one registered mid-tick waits for the next tick. [history](docs/history.md) #30
 - `local_peer_id` forwards to the registry through a setter: never keep a second copy of it. [replication](docs/replication.md#identities)
 
 **The wire**

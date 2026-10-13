@@ -550,11 +550,28 @@ func server_tick(tick: int) -> void:
 
 	var step := clock.tick_duration()
 
+	# [b]The list was taken before anything ran, and a behaviour can change the world.[/b] A
+	# round that re-lays its map inside a player's `_net_simulate` unregisters the old map's
+	# entities and takes their nodes out of the tree; walking on simulated each of them once
+	# more, against a node with no transform (history.md 30: six `!is_inside_tree()` per
+	# round in mg-deathrun), and recorded and sent them in this tick's snapshot after a
+	# client may already have been told they were gone.
+	var changed := false
 	for identity in identities:
+		if registry.get_identity(identity.net_id) != identity:
+			changed = true
+			continue
 		if not identity.can_simulate():
 			continue
 		for behaviour in identity.behaviours:
 			behaviour._net_simulate(tick, step)
+
+	for identity in identities:
+		if changed:
+			break
+		changed = registry.get_identity(identity.net_id) != identity
+	if changed:
+		identities = _still_registered(identities)
 
 	var period := config.ticks_per_snapshot()
 
@@ -571,6 +588,16 @@ func server_tick(tick: int) -> void:
 		_ticks_since_snapshot = 0
 		history.record(identities, tick)
 		_send_snapshots(tick, identities)
+
+
+## Those of [param identities] still registered as themselves. An entity registered during
+## the tick is not added: it is in the next tick's list, as it always was.
+func _still_registered(identities: Array[DotNetIdentity]) -> Array[DotNetIdentity]:
+	var out: Array[DotNetIdentity] = []
+	for identity in identities:
+		if registry.get_identity(identity.net_id) == identity:
+			out.append(identity)
+	return out
 
 
 ## Hands an input to the entities a peer owns.

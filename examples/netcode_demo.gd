@@ -113,6 +113,24 @@ class Interpolated extends DotNetBehaviour:
 		rendered = position
 
 
+## A [Movement] that counts its own ticks and, once, unregisters another entity and takes it
+## out of the tree from inside its `_net_simulate`: a round re-laying its map mid-tick (#30).
+class Unregisters extends Movement:
+	var host: DotNetManager = null
+	var victim: DotNetIdentity = null
+	var simulated: int = 0
+
+	func _net_simulate(tick: int, delta: float) -> void:
+		simulated += 1
+		super._net_simulate(tick, delta)
+		if victim != null and host != null:
+			var _gone := host.registry.unregister(victim.net_id)
+			var body := victim.get_parent()
+			if body != null and body.get_parent() != null:
+				body.get_parent().remove_child(body)
+			victim = null
+
+
 ## A [Movement] that records every snapshot that told it anything, as a game's per-snapshot
 ## bookkeeping does (`last_state_tick`, a relevance check, a redraw).
 class Counted extends Movement:
@@ -247,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 360
+const CHECKS := 364
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -310,6 +328,7 @@ func _run() -> void:
 	_test_drawing_through_slips()
 	_test_spawning()
 	_test_freed_entity()
+	_test_unregistered_mid_tick()
 	_test_acked_baselines()
 	_test_standing_still()
 	_test_staggered_snapshots()
@@ -3884,6 +3903,74 @@ func _test_freed_entity() -> void:
 	_check("clear() takes the live one too", registry.count() == 0)
 	_check("with no script error from either (%d)" % errors.count(), errors.count() == 0)
 	kept.get_parent().free()
+	_sections_completed += 1
+
+
+## [b]An entity unregistered by another behaviour inside the same server tick[/b] (#30): a
+## round that re-lays its map from a player's `_net_simulate` takes the old map's entities out
+## of the registry and the tree while the manager is still walking the list it took first.
+## Each was simulated once more against a node with no transform, and recorded and sent.
+func _test_unregistered_mid_tick() -> void:
+	_sections_entered += 1
+	print("")
+	print("[unregistered mid-tick]")
+
+	var host := DotNetManager.new()
+	host.name = "MidTickHost"
+	host.is_server = true
+	host.service_scope = &"midtick"
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 60
+	add_child(host)
+	var _ready_now := host.setup()
+
+	var sent := [0]
+	host.send_fn = func(_peer_id: int, _payload: PackedByteArray, d: int) -> void:
+		if d == DotNetMessage.Delivery.UNRELIABLE:
+			sent[0] += 1
+	host.start()
+	host.add_peer(2)
+
+	# The remover first in the registry's order, the victim after it.
+	var remover_identity := _in_tree(_make_entity(&"player", 2))
+	var remover_body := remover_identity.get_parent()
+	var remover := Unregisters.new()
+	remover.name = "Unregisters"
+	remover_body.remove_child(remover_identity)
+	remover_identity.behaviours = [remover]
+	remover.identity = remover_identity
+	remover_body.add_child(remover)
+	remover_body.add_child(remover_identity)
+	var victim_identity := _in_tree(_make_entity(&"player", 2))
+	var victim_movement: Movement = victim_identity.behaviours[0]
+	victim_movement.moves_body = true
+	victim_movement.velocity = Vector3(1.0, 0.0, 0.0)
+	var _a := host.registry.register(remover_identity, 0, 1, host.config)
+	var _b := host.registry.register(victim_identity, 0, 1, host.config)
+	remover_identity.behaviours = [remover]
+	remover.host = host
+	remover.victim = victim_identity
+
+	var errors := EngineErrors.new()
+	OS.add_logger(errors)
+	var before := victim_movement.position
+	host.server_tick(1)
+	OS.remove_logger(errors)
+
+	_check("the remover ran (%d)" % remover.simulated, remover.simulated == 1)
+	_check("an entity unregistered earlier in the tick is not simulated", victim_movement.position == before)
+	_check("with no engine error (%d)" % errors.count(), errors.count() == 0)
+	_check("and the tick's snapshot still went out (%d)" % sent[0], sent[0] >= 1)
+
+	host.stop()
+	remove_child(host)
+	host.free()
+	remover_body.queue_free()
+	victim_identity.get_parent().queue_free()
 	_sections_completed += 1
 
 
