@@ -147,6 +147,14 @@ var _received_tick: int = 0
 const SETTLE_SAMPLES := 16
 var _settle_count: int = 0
 var _settle_open: bool = false
+## [member _stepped_ticks] at the last sample counted into the window: one a frame.
+var _settle_local: float = -1.0
+## Local time as [method advance] has been handed it, without the drops credited: what changes
+## from one frame to the next, and not within one.
+var _stepped_ticks: float = 0.0
+## The window's first sample and local time then: whether a window far behind keeps pace.
+var _settle_first_sample: int = 0
+var _settle_first_local: float = 0.0
 
 var _rtt_ms: float = 0.0
 var _jitter_ms: float = 0.0
@@ -231,6 +239,40 @@ var _receive_excess: float = 0.0
 var _lead_reports: int = 0
 var _lead_late_reports: int = 0
 var _last_arrival_lead: int = 0
+var _floor_count: int = 0
+
+# --- Time the engine dropped -------------------------------------------------
+#
+# The engine runs at most `max_physics_steps_per_frame` physics steps a frame and drops the
+# time past that without a word, so a clock handed only the step's delta never sees it. See
+# docs/timelines.md#time-the-engine-drops.
+
+## Credit the time the engine drops to local time and both timelines, measured from the wall
+## clock at a frame's first physics step ([method note_engine_frame]) and before each snapshot
+## is read ([method note_engine_time]), from the engine's own numbers, at a time scale of 1. A
+## test that drives time by hand clears it and calls the two itself.
+var follow_engine_time: bool = true
+
+## Engine steps of slack before a gap between the wall clock and the steps run counts as
+## dropped time: the engine's own accumulator holds up to a step, its jitter fix moves half a
+## step between frames, and the wall clock is read a little after each frame begins. Time
+## inside it is never credited; a stall is hundreds of steps.
+const DROP_MARGIN_STEPS := 3
+
+var _engine_frame: int = -1
+## The engine's physics step at the last [method advance] the engine drove.
+var _engine_last_step: int = -1
+var _engine_rate: int = 0
+var _engine_wall0: int = 0
+var _engine_physics0: int = 0
+var _engine_prev_wall: int = 0
+var _engine_credited: float = 0.0
+## The input tick when each of the last two frames with a physics step began, newest last: the
+## commands produced since the older are the ones a stall credited now may not have been sent
+## before ([method _credit_dropped]).
+var _engine_frame_ticks: PackedInt64Array = [0, 0]
+var _lost_seconds: float = 0.0
+var _lost_count: int = 0
 
 
 func _init(p_tick_rate: int = 60, p_is_authority: bool = false) -> void:
@@ -256,7 +298,18 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 	_accumulator += delta
 
 	if not is_authority:
+		if Engine.is_in_physics_frame() and Engine.get_physics_frames() != _engine_last_step:
+			# One call a physics step: the engine is what drives this clock.
+			_engine_last_step = Engine.get_physics_frames()
+			_follow_engine()
+		elif follow_engine_time:
+			# Called outside a physics step, or twice in one: a host (a test) driving time by
+			# hand, whose wall clock says nothing about this clock. Forget the reference, so the
+			# hand-driven stretch is never credited as a stall. (Cleared, the host hands the
+			# engine's numbers over itself and keeps its reference.)
+			_engine_frame = -1
 		_local_ticks += delta * float(tick_rate)
+		_stepped_ticks += delta * float(tick_rate)
 		if _lead_live and _synced:
 			_steer_lead(delta)
 
@@ -309,6 +362,181 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 			_note_produced(produced)
 
 	return steps
+
+
+## The engine's frame counter, the wall clock (microseconds), the physics steps it has run
+## (counting the one running now), its physics rate and its step cap, at the first physics step
+## of a frame. [method advance] passes the engine's own while [member follow_engine_time] is set;
+## a test drives it by hand. Wall time no step covers, beyond [constant DROP_MARGIN_STEPS], is
+## time the engine DROPPED, and local time and both timelines move on by it ([method
+## _credit_dropped]).
+##
+## [b]Why the clock has to look at the wall.[/b] The engine runs at most
+## `max_physics_steps_per_frame` steps a frame and drops the rest; [method advance] is handed
+## each step's delta, so local time ran slow by exactly what was dropped. With the reports
+## steering the lead, every report about a command sent after a drop said how much later it
+## had to be, but a round trip later: a first visit in a browser (seconds of loading and
+## shader compiling, then slow frames) stayed behind by the drift times that delay and the
+## server discarded nearly every command as late (game-g2gfast: the player stood on the spawn
+## pad).
+##
+## [b]Two measurements.[/b] The steps a frame runs cover the wall time up to that frame's start,
+## so the gap up to the PREVIOUS frame's start is exact once this frame begins (the engine's
+## accumulator and its jitter fix are inside the margin). And a frame that drops runs exactly
+## its cap, so the gap up to NOW less a whole cap of steps is dropped for certain, which says so
+## before the frame's commands are stamped rather than a frame after. Credited a frame late,
+## every command of the frame between was recorded as that much further ahead than it was, the
+## reports about them asked for the whole stall again as lead, and the clock ran off to its cap.
+func note_engine_frame(frame: int, wall_usec: int, physics_frames: int, physics_rate: int,
+		max_steps: int = 8) -> void:
+	if is_authority or frame == _engine_frame:
+		return
+	# Steps that ran before this frame: the engine counts the step running now.
+	var before := physics_frames - 1
+	if _engine_frame < 0 or physics_rate != _engine_rate or physics_rate <= 0:
+		# The first frame, or the engine's rate changed (a client adopting the server's): a new
+		# reference, nothing to compare against.
+		_engine_frame = frame
+		_engine_rate = physics_rate
+		_engine_wall0 = wall_usec
+		_engine_physics0 = -1
+		_engine_prev_wall = wall_usec
+		_engine_credited = 0.0
+		return
+	_engine_frame = frame
+	if _engine_physics0 < 0:
+		# [b]The reference frame's own steps are not counted.[/b] They cover the time up to its
+		# start, which is the reference: counted, a reference taken on a frame that was catching
+		# up (eight steps after a long one) put the engine eight steps ahead of the wall for good,
+		# and every drop after it was credited 133 ms short.
+		_engine_physics0 = before
+	var settled := float(_engine_prev_wall - _engine_wall0) / 1000000.0 \
+		- float(before - _engine_physics0) / float(physics_rate)
+	_engine_prev_wall = wall_usec
+	# The commands of the last two frames may have gone out after whatever stalled the previous
+	# one: a host flushes a frame's packets at its end, or at the next frame's poll.
+	var sent_after := _engine_frame_ticks[0]
+	_engine_frame_ticks = [_engine_frame_ticks[1], tick]
+	_credit_dropped(maxf(settled, _uncovered(wall_usec, before, physics_rate, max_steps)), sent_after)
+
+
+## The same, at any moment outside a physics step: the wall clock, the physics steps run so far,
+## the physics rate and the step cap. [method sync_from_server] calls it with the engine's own
+## before it reads a snapshot.
+##
+## [b]A stall is usually seen here first.[/b] A host reads its packets in its frame's process,
+## after the physics steps, and a stall (a scene loading, a shader compiling) happens there too.
+## The snapshots read after it say where the server is now; credited only at the next frame's
+## first step, the drop was added again on top of the receive timeline and the floor those
+## snapshots had already moved, and the clock ran a stall ahead and snapped back.
+func note_engine_time(wall_usec: int, physics_frames: int, physics_rate: int,
+		max_steps: int = 8) -> void:
+	if is_authority or _engine_frame < 0 or _engine_physics0 < 0 or physics_rate != _engine_rate:
+		return
+	# This frame's commands go out at its end, after this, and the previous frame's may have
+	# waited for this frame's poll.
+	_credit_dropped(_uncovered(wall_usec, physics_frames, physics_rate, max_steps), _engine_frame_ticks[0])
+
+
+## Hands the engine's own numbers to [method note_engine_frame] inside a physics step, or to
+## [method note_engine_time] outside one, while [member follow_engine_time] is set, time runs
+## at its own speed, and the engine's physics steps are what advance this clock (one [method
+## advance] a step, the latest included).
+func _follow_engine() -> void:
+	if not follow_engine_time or is_authority or Engine.time_scale != 1.0:
+		return
+	if _engine_last_step < 0 or Engine.get_physics_frames() - _engine_last_step > 1:
+		# Only while the engine's physics steps advance this clock: the latest step did. A test
+		# harness that sets `tick` itself and feeds snapshots in one long loop is a stall by the
+		# wall clock; credited as one, the clock moved under it (game-arena's `headless_net`, a
+		# wall route predicted 0.19 m off). Counted in steps, not frames: a client drawing
+		# faster than it steps has frames with none, and a stall in one of them went uncredited
+		# until the snapshots after it had been read.
+		return
+	if Engine.is_in_physics_frame():
+		note_engine_frame(Engine.get_process_frames(), Time.get_ticks_usec(),
+			Engine.get_physics_frames(), Engine.physics_ticks_per_second,
+			Engine.max_physics_steps_per_frame)
+	else:
+		note_engine_time(Time.get_ticks_usec(), Engine.get_physics_frames(),
+			Engine.physics_ticks_per_second, Engine.max_physics_steps_per_frame)
+
+
+## Seconds of wall time since the reference that [param ran] steps (all the steps before the
+## next frame begins) and a whole cap more cannot cover: dropped for certain.
+func _uncovered(wall_usec: int, ran: int, physics_rate: int, max_steps: int) -> float:
+	return float(wall_usec - _engine_wall0) / 1000000.0 \
+		- float(ran - _engine_physics0 + maxi(1, max_steps)) / float(physics_rate)
+
+
+## Credits what of [param gap] (seconds the engine's steps left uncovered since the reference) is
+## past the margin and not credited already. The commands produced after [param sent_after] may
+## not have gone out before the drop.
+##
+## [b]After a stall, those commands are recorded as that much less far ahead.[/b] A report is
+## measured against how far ahead of local time its command was sent ([member _lead_at]), and
+## the lead was recorded when the command was produced, so the time between producing and
+## sending (the rest of the frame) is in every report, and the lead covers it. A STALL between
+## them is not a frame to cover: one command produced before a three-second hitch and sent
+## after it reached the server the whole stall late, its report asked for the stall as lead on
+## top of the credit that had already restored local time, and the clock jumped a stall ahead
+## and snapped back a second later (netcode_demo, 176 ticks at 60). So a drop longer than
+## [constant LEAD_SMOOTH_SECONDS] (a stall, as the steering already counts one) moves those
+## commands' leads back by itself: the last two frames', because a host may flush a frame's
+## packets at the next frame's poll (game-g2gfast at 60, a 2.5 s hitch: the clock 134 ticks
+## ahead and snapped back with only the stalled frame's moved). One that went out before the
+## stall reads as needing less, which the window's most never steers by. A shorter one is a slow frame that will come again, and
+## moving its commands back steered every command of a client on steady slow frames late by
+## the drop (netcode_demo at 128 with 150 ms frames: all of them, 10 ticks late).
+func _credit_dropped(gap: float, sent_after: int) -> void:
+	var lost := gap - _engine_credited - float(DROP_MARGIN_STEPS) / float(_engine_rate)
+	if lost <= 0.0:
+		return
+	_engine_credited += lost
+	_lost_seconds += lost
+	_lost_count += 1
+	if lost > LEAD_SMOOTH_SECONDS and not _lead_tick.is_empty():
+		for t in range(maxi(sent_after + 1, tick - LEAD_HISTORY + 1), tick + 1):
+			var slot := posmod(t, LEAD_HISTORY)
+			if _lead_tick[slot] == t:
+				_lead_at[slot] -= lost * float(tick_rate)
+	# Local time and both timelines move on by it: the steps that would have carried them never
+	# ran. The tick moves here rather than by the steering because before the first report
+	# nothing steers it until the next snapshot, and every command until then was late by the
+	# drop. The receive timeline moves too, as it does for the ticks [method advance] drops: left
+	# behind, the cap on the lead ([method _lead_position]) sat the whole stall back until the
+	# next snapshot.
+	var ticks := lost * float(tick_rate)
+	_local_ticks += ticks
+	if _synced:
+		var whole := floorf(ticks)
+		tick += int(whole)
+		_received_tick += int(whole)
+		_accumulator += (ticks - whole) * tick_duration() * _drift_scale
+		# A window of late samples opened before a stall says nothing about the timeline after
+		# it: one that spanned the credit read as samples keeping pace with local time a second
+		# behind, and anchored the timeline back to the backlog (game-g2gfast at 60).
+		if lost > LEAD_SMOOTH_SECONDS:
+			_settle_open = false
+	if ticks >= 1.0:
+		DotLog.debug(CHANNEL, "the engine dropped time; local time follows the wall clock",
+			{"seconds": snappedf(lost, 0.001), "ticks": snappedf(ticks, 0.1)})
+
+
+## Seconds of wall time the engine dropped that [method note_engine_frame] and [method
+## note_engine_time] credited, and how many times they found any.
+func lost_seconds() -> float:
+	return _lost_seconds
+
+
+func lost_count() -> int:
+	return _lost_count
+
+
+## Times the input timeline was found behind the absolute floor ([method sync_from_server])
+## and jumped, while the reports steered it.
+func floor_count() -> int:
+	return _floor_count
 
 
 ## Interpolation factor between the previous tick and the current one, 0..1.
@@ -400,6 +628,9 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 	if is_authority:
 		return
 
+	# Before the snapshot is read: see [method note_engine_time].
+	_follow_engine()
+
 	_note_rtt(rtt_ms)
 
 	var first := not _synced or (not _synced_with_rtt and _rtt_ms > 0.0)
@@ -407,10 +638,40 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 
 	if _lead_live and not first:
 		# The input timeline is the server's report's to steer ([method _steer_lead], every
-		# frame). The round trip still places the receive timeline, and a different session
-		# still snaps.
+		# frame). The round trip still places the receive timeline and has a say in a snap.
+		#
+		# [b]Never behind the server.[/b] Each report is a round trip old, and a clock that fell
+		# behind faster than they could say (a stall, time the engine dropped) stamped every
+		# command for a tick the server had already simulated until they caught up: with the
+		# absolute catch-up skipped here, a client on slow frames never did (game-g2gfast,
+		# stuck on the spawn pad). A command stamped for a tick no later than the newest
+		# snapshot this client holds is late whatever the link does, so behind that the clock
+		# jumps to the reported lead, or past the floor by the margin if that is further, and
+		# the next reports take it from there.
+		#
+		# [b]Nothing here is from the round trip.[/b] The round trip a game measures around a
+		# stall holds the stall (749 ms on a 100 ms link while g2gfast joined at 128, three
+		# seconds across a three-second hitch): a floor that added a flight time to the receive
+		# timeline fired on every join, and a jump to the round trip's target put the clock a
+		# second ahead, then snapped it back. Local time, which the reported lead is measured
+		# against, follows the wall clock ([method note_engine_frame]), so the reported lead is
+		# right after a stall as soon as the drop is credited.
+		var round_trip := server_tick() + _target_lead()
+		if tick <= _received_tick:
+			var to := maxi(_received_tick + 1 + input_margin_ticks, int(ceilf(_lead_position())))
+			_floor_count += 1
+			_catch_up_count += 1
+			DotLog.debug(CHANNEL, "clock caught up; it was behind the server",
+				{"behind_ticks": to - tick, "floors": _floor_count})
+			tick = to
+			_drift_scale = 1.0
+			return
+		# A different session still snaps, when the round trip agrees on which way: the reported
+		# lead alone can be a stall stale, and snapping back to it undid the floor above on every
+		# snapshot.
 		var behind := int(roundf(_lead_position())) - tick
-		if absi(behind) > snap_threshold_ticks():
+		var snap := snap_threshold_ticks()
+		if (behind > snap and round_trip - tick > snap) or (behind < -snap and round_trip - tick < -snap):
 			_snap_count += 1
 			DotLog.warn(CHANNEL, "clock snapped; predicted state is stale",
 				{"error_ticks": behind, "snaps": _snap_count})
@@ -487,7 +748,7 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 func _follow_arrival(sampled: int, anchor: bool) -> void:
 	var ahead := sampled - _received_tick
 
-	if anchor or absi(ahead) > snap_threshold_ticks():
+	if anchor or ahead > snap_threshold_ticks():
 		# The first sample, or a different session: nothing to filter against.
 		_received_tick = sampled
 		_receive_slip = 0.0
@@ -506,13 +767,36 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 	if not _settle_open:
 		_settle_open = true
 		_settle_count = 0
+		_settle_first_sample = sampled
+		_settle_first_local = _local_ticks
+	elif _stepped_ticks == _settle_local:
+		# [b]One a frame.[/b] A burst read in one frame is one arrival time: the snapshots a stall
+		# held up arrive together, oldest first, behind a timeline the stall was credited to
+		# ([method _credit_dropped]), and counted one by one they were six windows of a path
+		# that had got slower, and one more than a second behind.
+		return
+	_settle_local = _stepped_ticks
 
 	_settle_count += 1
 
 	if _settle_count >= SETTLE_SAMPLES:
+		_settle_open = false
+		if ahead < -snap_threshold_ticks():
+			# More than a second behind for a whole window of frames. [b]Never on one sample,
+			# and never while the samples gain on local time.[/b] The snapshots a stall held up
+			# arrive after the clock has credited the stall ([method _credit_dropped]), oldest
+			# first, and over a socket that hands a frame only part of the backlog they drain for
+			# many frames, each far behind and each newer than the last by more than the frame:
+			# anchored to one of them, the timeline went back the whole stall and the cap on the
+			# lead with it, and the clock snapped back a stall (game-g2gfast at 60 after five
+			# seconds, then 34 jumps forward as the backlog drained). Samples that keep pace
+			# with local time a second behind are a different session, and anchor.
+			if float(sampled - _settle_first_sample) <= _local_ticks - _settle_first_local + 2.0:
+				_received_tick = sampled
+				_receive_slip = 0.0
+			return
 		_received_tick -= 1
 		_receive_slip += 1.0
-		_settle_open = false
 
 
 ## What the server said about this client's commands: the one for [param input_tick] was the
@@ -818,6 +1102,12 @@ func reset(start_tick: int = 0) -> void:
 	_lead_target = 0.0
 	_lead_live = false
 	_receive_excess = 0.0
+	_engine_frame = -1
+	_engine_last_step = -1
+	_engine_credited = 0.0
+	_engine_frame_ticks = [0, 0]
+	_settle_local = -1.0
+	_stepped_ticks = 0.0
 
 
 func describe() -> Dictionary:
@@ -838,6 +1128,8 @@ func describe() -> Dictionary:
 		"last_arrival_lead": _last_arrival_lead,
 		"lead_reports": _lead_reports,
 		"late_reports": _lead_late_reports,
+		"floors": _floor_count,
+		"lost_ms": int(_lost_seconds * 1000.0),
 	}
 
 

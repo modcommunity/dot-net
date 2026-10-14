@@ -265,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 364
+const CHECKS := 376
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -337,6 +337,8 @@ func _run() -> void:
 	_test_unchanged_entities()
 	_test_input_batches()
 	_test_input_lead()
+	_test_dropped_time()
+	await _test_dropped_time_live()
 	await _test_integration()
 
 	print("")
@@ -1559,7 +1561,9 @@ func _test_interpolation() -> void:
 		"one late packet does not pull it back (%d)" % clock.server_tick(),
 		clock.server_tick() == 1010
 	)
+	# A frame apart: a burst read in one frame counts once (see the dropped-time section).
 	for _i in range(DotNetClock.SETTLE_SAMPLES):
+		var _none := clock.advance(0.0001)
 		clock.sync_from_server(1004, 0.0)
 	_check(
 		"a whole window of them does, by one tick (%d)" % clock.server_tick(),
@@ -3724,6 +3728,256 @@ func _test_input_lead() -> void:
 		stray_lead = stray.tick - server_at
 	_check("a clock told about commands it did not stamp does not run away (%d ticks ahead)" % stray_lead,
 		stray.is_lead_reported() and stray_lead <= 12)
+
+
+## A first visit's frames, against a server running in real time: the engine running at most
+## [param cap] steps a frame and dropping the rest, [param stalls] (seconds) at the start, then
+## frames of 60 to 150 ms. [param follow] hands the clock the engine's numbers once a frame, as
+## [method DotNetClock.advance] does inside a real physics frame; without it the clock is handed
+## only the steps' deltas, which is all it had before. Returns what the server saw after the
+## stalls: commands late, ticks with none, and when the last late one arrived.
+func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds: float = 6.0,
+		frame_ms: float = 150.0, read_first: bool = false) -> Dictionary:
+	var host := _parts_manager("DropServer%d" % rate, true, 1200)
+	var guest := _parts_manager("DropClient%d" % rate, false, 1200)
+	for m in [host, guest]:
+		(m as DotNetManager).config.tick_rate = rate
+		(m as DotNetManager).config.snapshot_rate = 32
+		(m as DotNetManager).clock.tick_rate = rate
+	guest.clock.follow_engine_time = false
+
+	var one_way := 50.0
+	var down: Array = []
+	var up: Array = []
+	var link := {"now": 0.0}
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := guest.receive(payload, 1)
+			return
+		down.append([float(link["now"]) + one_way, payload])
+	guest.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 2)
+	host.start()
+	guest.start()
+	host.add_peer(2)
+
+	var buffer := host.input_buffer_for(2)
+	var step_ms := 1000.0 / float(rate)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	# Frames: a second at 60 Hz to settle, the stalls, then slow frames.
+	var frames: Array[float] = []
+	for _i in 60:
+		frames.append(1000.0 / 60.0)
+	var stalls_end := 1000.0
+	for stall in stalls:
+		frames.append(float(stall) * 1000.0)
+		stalls_end += float(stall) * 1000.0
+		for _i in 10:
+			frames.append(1000.0 / 60.0)
+			stalls_end += 1000.0 / 60.0
+	var slow := 0.0
+	while slow < slow_seconds * 1000.0:
+		var ms := frame_ms if frame_ms > 0.0 else rng.randf_range(60.0, 150.0)
+		frames.append(ms)
+		slow += ms
+
+	# In a dictionary: a lambda captures a local by value.
+	var server := {"tick": 0}
+	var acc := 0.0
+	var physics := 0
+	var now := 0.0
+	var out := {"late": 0, "starved": 0, "last_late_ms": -1.0, "measured_from": 0, "ticks": 0}
+	var late_seen := 0
+	var counted := false
+	var run_server := func(until: float) -> void:
+		# The server, in real time.
+		while float(int(server["tick"]) + 1) * step_ms <= until:
+			server["tick"] = int(server["tick"]) + 1
+			link["now"] = float(server["tick"]) * step_ms
+			while not up.is_empty() and float(up[0][0]) <= float(link["now"]):
+				var _pushed := buffer.push(up.pop_front()[1])
+			host.server_tick(int(server["tick"]))
+	for f in frames.size():
+		run_server.call(now)
+		if not counted and now >= stalls_end + 1000.0:
+			# A second after the last stall, what follows is counted.
+			counted = true
+			out["late"] = -buffer.late_count
+			out["starved"] = -buffer.starved_count
+			out["measured_from"] = int(server["tick"])
+		if buffer.late_count > late_seen:
+			late_seen = buffer.late_count
+			if counted:
+				out["last_late_ms"] = now - stalls_end
+		# The engine: this frame's steps cover the time to its start, at most `cap` of them; what
+		# is past the cap is dropped.
+		acc += frames[f - 1] if f > 0 else 0.0
+		var steps := mini(cap, int(acc / step_ms))
+		acc -= float(steps) * step_ms
+		if steps == cap:
+			acc = fmod(acc, step_ms)
+		if read_first and steps > 0:
+			# A host that reads its packets inside its physics step, before the clock's.
+			if follow:
+				guest.clock.note_engine_frame(f, int(now * 1000.0), physics + 1, rate, cap)
+			while not down.is_empty() and float(down[0][0]) <= now:
+				guest.stats.note_rtt(2.0 * one_way + (frames[f - 1] if f > 0 else 0.0))
+				var _r := guest.receive_snapshot(down.pop_front()[1])
+		var produced: Array = []
+		for i in steps:
+			physics += 1
+			if i == 0 and follow:
+				guest.clock.note_engine_frame(f, int(now * 1000.0), physics, rate, cap)
+			var ticks := guest.clock.advance(step_ms / 1000.0)
+			for k in ticks:
+				if not guest.clock.is_synced():
+					continue
+				var input := DemoInput.new()
+				input.tick = guest.clock.tick - (ticks - 1 - k)
+				input.delta = step_ms / 1000.0
+				produced.append(input)
+		# The frame's process: the stall or the slow frame, then its packets, read and sent at the
+		# end of it as a host polls its socket.
+		var end := now + frames[f]
+		run_server.call(end)
+		link["now"] = end
+		while not read_first and not down.is_empty() and float(down[0][0]) <= end:
+			if follow:
+				guest.clock.note_engine_time(int(end * 1000.0), physics, rate, cap)
+			# A transport's round trip waits for the client's next poll, so it holds the frame.
+			guest.stats.note_rtt(2.0 * one_way + frames[f])
+			var _r := guest.receive_snapshot(down.pop_front()[1])
+		for input in produced:
+			up.append([end + one_way, input])
+		now = end
+	out["late"] = int(out["late"]) + buffer.late_count
+	out["starved"] = int(out["starved"]) + buffer.starved_count
+	out["ticks"] = int(server["tick"]) - int(out["measured_from"])
+	out["floors"] = guest.clock.floor_count()
+	out["lost_ms"] = int(guest.clock.lost_seconds() * 1000.0)
+	out["snaps"] = int(guest.clock.describe()["snaps"])
+	for m in [host, guest]:
+		(m as DotNetManager).stop()
+		(m as DotNetManager).queue_free()
+	return out
+
+
+## The stuck-on-the-spawn-pad report (game-g2gfast, 2026-10-14): a browser's first visit stalls
+## for seconds while it loads and compiles shaders, then draws slow frames, and the engine drops
+## every physics step past its cap. Handed only the steps' deltas, the clock never saw the
+## dropped time; the reported lead learnt it a round trip late, and with the absolute catch-up
+## skipped once the reports steered, the client stayed behind and the server discarded nearly
+## every command as late. See docs/timelines.md#time-the-engine-drops.
+func _test_dropped_time() -> void:
+	print("")
+	print("[time the engine drops: a first visit's stalls and slow frames]")
+
+	var describe := func(r: Dictionary) -> String:
+		return "%d late, %d without a command, of %d ticks; last late %s; %d ms dropped, %d floors, %d snaps" % [
+			int(r["late"]), int(r["starved"]), int(r["ticks"]),
+			"never" if float(r["last_late_ms"]) < 0.0 else "%.1f s after the stalls" % (float(r["last_late_ms"]) / 1000.0),
+			int(r["lost_ms"]), int(r["floors"]), int(r["snaps"])]
+
+	for rate in [60, 128]:
+		# The engine's default cap of 8: 133 ms at 60, 62.5 ms at 128, so the slow frames drop
+		# time at 128 every frame and at 60 now and then.
+		var fixed: Dictionary = _first_visit(rate, 8, [3.0, 2.0], true)
+		var blind: Dictionary = _first_visit(rate, 8, [3.0, 2.0], false)
+		print("    %d ticks, cap 8:  wall %s" % [rate, describe.call(fixed)])
+		print("                     steps %s" % describe.call(blind))
+		# Armed: handed only the steps (as every clock was before), 64 of 297 late at 60 and 255
+		# of 633 at 128, with no tick of the 633 commanded in time; the floor alone changes
+		# that by two.
+		_check("%d ticks: after the stalls, at most 2%% of commands late (%d of %d)" % [
+				rate, int(fixed["late"]), int(fixed["ticks"])],
+			int(fixed["late"]) * 50 <= int(fixed["ticks"]))
+		_check("%d ticks: the dropped time was seen (%d ms of at least %d), and nothing snapped (%d)" % [
+				rate, int(fixed["lost_ms"]), 4500, int(fixed["snaps"])],
+			int(fixed["lost_ms"]) >= 4500 and int(fixed["snaps"]) == 0)
+		if rate == 128:
+			_check("128 ticks: a clock handed only the steps loses many more (%d)" % int(blind["late"]),
+				int(blind["late"]) >= 10 * maxi(1, int(fixed["late"])))
+
+	# The floor, on its own: a clock steered by the reports that finds itself behind the server
+	# (a stall it never saw, as every clock was before it looked at the wall) catches up at once.
+	# Armed: before, the reported lead's path returned without looking and the clock stayed 30
+	# ticks behind, every command late, until a report a round trip later said so.
+	var behind := DotNetClock.new(60)
+	behind.follow_engine_time = false
+	behind.sync_from_server(1000, 100.0)
+	for _i in 3:
+		var _t := behind.advance(1.0 / 60.0)
+	behind.note_input_lead(behind.tick, 2)
+	var was := behind.tick
+	behind.sync_from_server(was + 30, 100.0)
+	_check("a reported clock behind the newest snapshot jumps past it (%d -> %d, snapshot %d)" % [
+			was, behind.tick, behind.received_tick()],
+		behind.is_lead_reported() and behind.tick > behind.received_tick() and behind.floor_count() == 1)
+
+	# Frames the engine keeps up with, beside the same clock handed only the steps: nothing is
+	# credited, the floor is never needed, and the two clocks are the same clock.
+	var calm: Dictionary = _first_visit(128, 32, [], true, 4.0)
+	var calm_blind: Dictionary = _first_visit(128, 32, [], false, 4.0)
+	print("    128 ticks, cap 32, no stall: wall %s" % describe.call(calm))
+	print("                                steps %s" % describe.call(calm_blind))
+	_check("frames the engine keeps up with: nothing credited, no floor (%d ms, %d)" % [
+			int(calm["lost_ms"]), int(calm["floors"])],
+		int(calm["lost_ms"]) == 0 and int(calm["floors"]) == 0)
+	_check("and the clock does exactly what it did when handed only the steps (%d late, %d)" % [
+			int(calm["late"]), int(calm_blind["late"])],
+		int(calm["late"]) == int(calm_blind["late"]) and int(calm["starved"]) == int(calm_blind["starved"]))
+
+	# A host that reads its snapshots inside its physics step, before the clock advances: the
+	# stall is seen at that frame's first step, before the snapshots that followed it are read.
+	var polled: Dictionary = _first_visit(128, 8, [3.0, 2.0], true, 6.0, 150.0, true)
+	print("    128 ticks, cap 8, read in the physics step: %s" % describe.call(polled))
+	_check("read in the physics step, at most 2%% late and no snap (%d of %d, %d)" % [
+			int(polled["late"]), int(polled["ticks"]), int(polled["snaps"])],
+		int(polled["late"]) * 50 <= int(polled["ticks"]) and int(polled["snaps"]) == 0)
+
+
+## The same, through the engine itself: a clock advanced once a physics step reads the engine's
+## numbers on its own, and one advanced by hand never does.
+func _test_dropped_time_live() -> void:
+	_sections_entered += 1
+	print("")
+	print("[time the engine drops, through the engine]")
+
+	var cap_was := Engine.max_physics_steps_per_frame
+	Engine.max_physics_steps_per_frame = 8
+	var driven := DotNetClock.new(Engine.physics_ticks_per_second)
+	driven.sync_from_server(1000, 40.0)
+	var by_hand := DotNetClock.new(Engine.physics_ticks_per_second)
+	by_hand.sync_from_server(1000, 40.0)
+	for _i in 10:
+		await get_tree().physics_frame
+		var _d := driven.advance(1.0 / float(Engine.physics_ticks_per_second))
+	var tick_before := driven.tick
+	var wall_before := Time.get_ticks_usec()
+	# Half a second inside one frame: the engine runs its cap of steps after it and drops the
+	# rest. The hand-driven clock is advanced through it in a loop, as a test harness would.
+	OS.delay_msec(500)
+	for _i in 30:
+		var _h := by_hand.advance(1.0 / 60.0)
+	for _i in 40:
+		await get_tree().physics_frame
+		var _d := driven.advance(1.0 / float(Engine.physics_ticks_per_second))
+	var wall_ticks := float(Time.get_ticks_usec() - wall_before) / 1000000.0 * float(driven.tick_rate)
+	print("    driven by the engine: %d ms credited, %d ticks for %.0f of wall time; by hand: %d ms (engine %d Hz, cap %d)" % [
+		int(driven.lost_seconds() * 1000.0), driven.tick - tick_before, wall_ticks, int(by_hand.lost_seconds() * 1000.0),
+		Engine.physics_ticks_per_second, Engine.max_physics_steps_per_frame])
+	# Armed: following nothing, 0 ms credited and 40 ticks for 61 of wall time. Counting the
+	# reference frame's own steps (it was a frame catching up) credited 157 ms and ran 49.
+	_check("a clock the engine drives sees the half second it dropped (%d ms)" % int(driven.lost_seconds() * 1000.0),
+		driven.lost_seconds() >= 0.25)
+	_check("and keeps up with the wall clock through it (%d ticks for %.0f)" % [driven.tick - tick_before, wall_ticks],
+		float(driven.tick - tick_before) >= wall_ticks - 6.0)
+	_check("a clock advanced by hand credits nothing (%d ms)" % int(by_hand.lost_seconds() * 1000.0),
+		by_hand.lost_seconds() == 0.0)
+	Engine.max_physics_steps_per_frame = cap_was
+	_sections_completed += 1
 
 
 func _test_integration() -> void:
