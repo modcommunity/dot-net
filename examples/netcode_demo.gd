@@ -265,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 383
+const CHECKS := 389
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -339,6 +339,7 @@ func _run() -> void:
 	_test_input_batches()
 	_test_input_lead()
 	_test_dropped_time()
+	_test_join_hitch()
 	await _test_dropped_time_live()
 	await _test_integration()
 
@@ -3874,7 +3875,8 @@ func _test_input_lead() -> void:
 ## only the steps' deltas, which is all it had before. Returns what the server saw after the
 ## stalls: commands late, ticks with none, and when the last late one arrived.
 func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds: float = 6.0,
-		frame_ms: float = 150.0, read_first: bool = false) -> Dictionary:
+		frame_ms: float = 150.0, read_first: bool = false, settle_ms: float = 1000.0 / 60.0,
+		each_frame: Callable = Callable()) -> Dictionary:
 	var host := _parts_manager("DropServer%d" % rate, true, 1200)
 	var guest := _parts_manager("DropClient%d" % rate, false, 1200)
 	for m in [host, guest]:
@@ -3905,15 +3907,15 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 	rng.seed = 4242
 	# Frames: a second at 60 Hz to settle, the stalls, then slow frames.
 	var frames: Array[float] = []
-	for _i in 60:
-		frames.append(1000.0 / 60.0)
-	var stalls_end := 1000.0
+	for _i in int(1000.0 / settle_ms):
+		frames.append(settle_ms)
+	var stalls_end := float(int(1000.0 / settle_ms)) * settle_ms
 	for stall in stalls:
 		frames.append(float(stall) * 1000.0)
 		stalls_end += float(stall) * 1000.0
-		for _i in 10:
-			frames.append(1000.0 / 60.0)
-			stalls_end += 1000.0 / 60.0
+		for _i in int(1000.0 / 6.0 / settle_ms):
+			frames.append(settle_ms)
+			stalls_end += settle_ms
 	var slow := 0.0
 	while slow < slow_seconds * 1000.0:
 		var ms := frame_ms if frame_ms > 0.0 else rng.randf_range(60.0, 150.0)
@@ -3925,7 +3927,7 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 	var acc := 0.0
 	var physics := 0
 	var now := 0.0
-	var out := {"late": 0, "starved": 0, "last_late_ms": -1.0, "measured_from": 0, "ticks": 0}
+	var out := {"late": 0, "starved": 0, "last_late_ms": -1.0, "measured_from": 0, "ticks": 0, "arrivals": []}
 	var late_seen := 0
 	var counted := false
 	var run_server := func(until: float) -> void:
@@ -3934,7 +3936,10 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 			server["tick"] = int(server["tick"]) + 1
 			link["now"] = float(server["tick"]) * step_ms
 			while not up.is_empty() and float(up[0][0]) <= float(link["now"]):
-				var _pushed := buffer.push(up.pop_front()[1])
+				var input: DotNetInput = up.pop_front()[1]
+				# How early it came, in the server's own terms: ticks before the one it simulates next.
+				(out["arrivals"] as Array).append(Vector2(float(link["now"]) - stalls_end, float(input.tick - int(server["tick"]))))
+				var _pushed := buffer.push(input)
 			host.server_tick(int(server["tick"]))
 	for f in frames.size():
 		run_server.call(now)
@@ -3962,6 +3967,8 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 			while not down.is_empty() and float(down[0][0]) <= now:
 				guest.stats.note_rtt(2.0 * one_way + (frames[f - 1] if f > 0 else 0.0))
 				var _r := guest.receive_snapshot(down.pop_front()[1])
+		if each_frame.is_valid():
+			each_frame.call(guest.clock, now - stalls_end)
 		var produced: Array = []
 		for i in steps:
 			physics += 1
@@ -4062,9 +4069,12 @@ func _test_dropped_time() -> void:
 	_check("frames the engine keeps up with: nothing credited, no floor (%d ms, %d)" % [
 			int(calm["lost_ms"]), int(calm["floors"])],
 		int(calm["lost_ms"]) == 0 and int(calm["floors"]) == 0)
-	_check("and the clock does exactly what it did when handed only the steps (%d late, %d)" % [
+	# Not exactly the same clock any more: following the wall also discounts a frame longer than
+	# the last second has seen (DotNetClock._discount_long_frame), which these random frames
+	# have now and then. Never a worse one.
+	_check("and the clock does no worse than when handed only the steps (%d late, %d)" % [
 			int(calm["late"]), int(calm_blind["late"])],
-		int(calm["late"]) == int(calm_blind["late"]) and int(calm["starved"]) == int(calm_blind["starved"]))
+		int(calm["late"]) <= int(calm_blind["late"]) and int(calm["starved"]) <= int(calm_blind["starved"]))
 
 	# A host that reads its snapshots inside its physics step, before the clock advances: the
 	# stall is seen at that frame's first step, before the snapshots that followed it are read.
@@ -4073,6 +4083,61 @@ func _test_dropped_time() -> void:
 	_check("read in the physics step, at most 2%% late and no snap (%d of %d, %d)" % [
 			int(polled["late"]), int(polled["ticks"]), int(polled["snaps"])],
 		int(polled["late"]) * 50 <= int(polled["ticks"]) and int(polled["snaps"]) == 0)
+
+
+func _test_join_hitch() -> void:
+	_sections_entered += 1
+	print("")
+	print("[a short hitch after joining, and a clock pushed too far ahead]")
+	var slack := DotNetConfig.new().input_lead_slack_ticks
+	# The most ticks early any command reached the server in [from, to) ms after the hitch.
+	var most_early := func(r: Dictionary, from: float, to: float) -> int:
+		var most := -999
+		for a in r["arrivals"]:
+			var v: Vector2 = a
+			if v.x >= from and v.x < to:
+				most = maxi(most, int(v.y))
+		return most
+
+	# A load hitch shorter than the engine's step cap: no time is dropped, so nothing is credited,
+	# and every command produced in the frame after it was produced a hitch late and reached the
+	# server that much early. Steered by those reports, game-g2gfast's client at 128 ran 18 ticks
+	# early after a 0.3 s hitch and gave them back at the slow drift rate over three seconds.
+	var short: Dictionary = _first_visit(128, 8, [0.3], true, 3.0, 1000.0 / 240.0, false, 1000.0 / 240.0)
+	var early: int = most_early.call(short, 1000.0, 3000.0)
+	print("    128 ticks, 0.3 s hitch: at most %d early after 1 s, %d late" % [early, int(short["late"])])
+	_check("a 0.3 s hitch at 128 leaves commands at most slack+2 early within 1 s (%d, slack %d)"
+			% [early, slack], early <= slack + 2 and early >= 0)
+	_check("and none late (%d)" % int(short["late"]), int(short["late"]) == 0)
+
+	# The same hitch at 60 is past the step cap (8 steps are 0.13 s), so the dropped part is
+	# credited as well. The reports of the commands the credit produces still raise the lead
+	# for a second (9 early, against 16 before the long frame was discounted and the clock slowed
+	# fast), so this asks only that it is back within the slack by 2.5 s, where it was 9 early.
+	var over: Dictionary = _first_visit(60, 8, [0.3], true, 3.0, 1000.0 / 60.0, false, 1000.0 / 60.0)
+	var later: int = most_early.call(over, 2500.0, 3000.0)
+	print("    60 ticks, 0.3 s hitch: at most %d early 1-3 s on, %d at 2.5 s, %d late" % [
+			int(most_early.call(over, 1000.0, 3000.0)), later, int(over["late"])])
+	_check("a 0.3 s hitch at 60 is back within slack+2 by 2.5 s (%d)" % later,
+		later <= slack + 2 and later >= 0)
+	_check("and none late (%d)" % int(over["late"]), int(over["late"]) == 0)
+
+	# Pushed 100 ticks ahead at 128 (0.78 s, short of a snap): slowed at the drift rate, 6.4
+	# ticks a second, it took 16 s to come back.
+	var pushed := {"done": false}
+	var nudge := func(clock: DotNetClock, ms: float) -> void:
+		if ms >= 0.0 and not pushed["done"]:
+			pushed["done"] = true
+			clock.tick += 100
+	var p: Dictionary = _first_visit(128, 8, [], true, 10.0, 1000.0 / 240.0, false, 1000.0 / 240.0, nudge)
+	var back: int = most_early.call(p, 9000.0, 10000.0)
+	print("    128 ticks pushed 100 ahead: at most %d early 9-10 s on, %d late, %d snaps" % [
+			back, int(p["late"]), int(p["snaps"])])
+	_check("a clock pushed 100 ticks ahead is back within slack+2 in 9 s (%d)" % back,
+		back <= slack + 2 and back >= 0)
+	_check("and none late on the way, no snap (%d, %d)" % [int(p["late"]), int(p["snaps"])],
+		int(p["late"]) == 0 and int(p["snaps"]) == 0)
+	_sections_completed += 1
 
 
 ## The same, through the engine itself: a clock advanced once a physics step reads the engine's

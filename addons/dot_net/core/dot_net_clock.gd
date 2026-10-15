@@ -212,6 +212,10 @@ const LEAD_SMOOTH_SECONDS := 0.5
 ## sees each report ask one tick more than the clock has, forever.
 const LEAD_CAP_TICKS := 4
 
+## Ticks past [member lead_slack_ticks] the latest report's command must have arrived early by
+## before the lead is given back faster than [constant MAX_DRIFT_RATE] ([method _slowest]).
+const LEAD_EARLY_TICKS := 2
+
 ## Input ticks whose lead is remembered: far more than a round trip's worth at any rate.
 const LEAD_HISTORY := 512
 
@@ -271,6 +275,11 @@ var _engine_credited: float = 0.0
 ## commands produced since the older are the ones a stall credited now may not have been sent
 ## before ([method _credit_dropped]).
 var _engine_frame_ticks: PackedInt64Array = [0, 0]
+## The wall time (seconds) between the starts of the frames with a physics step in the last
+## [constant LEAD_WINDOW_SECONDS] of wall time, as [code]Vector2(the wall clock when it ended,
+## seconds)[/code] (the wall's, not local time's: a credited stall moves local time on by itself):
+## how long a frame's commands recurrently wait to be sent ([method _discount_long_frame]).
+var _frame_waits: Array[Vector2] = []
 var _lost_seconds: float = 0.0
 var _lost_count: int = 0
 
@@ -444,12 +453,13 @@ func note_engine_frame(frame: int, wall_usec: int, physics_frames: int, physics_
 		_engine_physics0 = before
 	var settled := float(_engine_prev_wall - _engine_wall0) / 1000000.0 \
 		- float(before - _engine_physics0) / float(physics_rate)
-	_engine_prev_wall = wall_usec
 	# The commands of the last two frames may have gone out after whatever stalled the previous
 	# one: a host flushes a frame's packets at its end, or at the next frame's poll.
 	var sent_after := _engine_frame_ticks[0]
 	_engine_frame_ticks = [_engine_frame_ticks[1], tick]
-	_credit_dropped(maxf(settled, _uncovered(wall_usec, before, physics_rate, max_steps)), sent_after)
+	_credit_dropped(maxf(settled, _uncovered(wall_usec, before, physics_rate, max_steps)))
+	_discount_long_frame(wall_usec, float(wall_usec - _engine_prev_wall) / 1000000.0, sent_after)
+	_engine_prev_wall = wall_usec
 
 
 ## The same, at any moment outside a physics step: the wall clock, the physics steps run so far,
@@ -467,7 +477,7 @@ func note_engine_time(wall_usec: int, physics_frames: int, physics_rate: int,
 		return
 	# This frame's commands go out at its end, after this, and the previous frame's may have
 	# waited for this frame's poll.
-	_credit_dropped(_uncovered(wall_usec, physics_frames, physics_rate, max_steps), _engine_frame_ticks[0])
+	_credit_dropped(_uncovered(wall_usec, physics_frames, physics_rate, max_steps))
 
 
 ## Hands the engine's own numbers to [method note_engine_frame] inside a physics step, or to
@@ -506,36 +516,15 @@ func _uncovered(wall_usec: int, ran: int, physics_rate: int, max_steps: int) -> 
 
 
 ## Credits what of [param gap] (seconds the engine's steps left uncovered since the reference) is
-## past the margin and not credited already. The commands produced after [param sent_after] may
-## not have gone out before the drop.
-##
-## [b]After a stall, those commands are recorded as that much less far ahead.[/b] A report is
-## measured against how far ahead of local time its command was sent ([member _lead_at]), and
-## the lead was recorded when the command was produced, so the time between producing and
-## sending (the rest of the frame) is in every report, and the lead covers it. A STALL between
-## them is not a frame to cover: one command produced before a three-second hitch and sent
-## after it reached the server the whole stall late, its report asked for the stall as lead on
-## top of the credit that had already restored local time, and the clock jumped a stall ahead
-## and snapped back a second later (netcode_demo, 176 ticks at 60). So a drop longer than
-## [constant LEAD_SMOOTH_SECONDS] (a stall, as the steering already counts one) moves those
-## commands' leads back by itself: the last two frames', because a host may flush a frame's
-## packets at the next frame's poll (game-g2gfast at 60, a 2.5 s hitch: the clock 134 ticks
-## ahead and snapped back with only the stalled frame's moved). One that went out before the
-## stall reads as needing less, which the window's most never steers by. A shorter one is a slow frame that will come again, and
-## moving its commands back steered every command of a client on steady slow frames late by
-## the drop (netcode_demo at 128 with 150 ms frames: all of them, 10 ticks late).
-func _credit_dropped(gap: float, sent_after: int) -> void:
+## past the margin and not credited already. What it does to the commands sent after it is
+## [method _discount_long_frame]'s.
+func _credit_dropped(gap: float) -> void:
 	var lost := gap - _engine_credited - float(DROP_MARGIN_STEPS) / float(_engine_rate)
 	if lost <= 0.0:
 		return
 	_engine_credited += lost
 	_lost_seconds += lost
 	_lost_count += 1
-	if lost > LEAD_SMOOTH_SECONDS and not _lead_tick.is_empty():
-		for t in range(maxi(sent_after + 1, tick - LEAD_HISTORY + 1), tick + 1):
-			var slot := posmod(t, LEAD_HISTORY)
-			if _lead_tick[slot] == t:
-				_lead_at[slot] -= lost * float(tick_rate)
 	# Local time and both timelines move on by it: the steps that would have carried them never
 	# ran. The tick moves here rather than by the steering because before the first report
 	# nothing steers it until the next snapshot, and every command until then was late by the
@@ -557,6 +546,54 @@ func _credit_dropped(gap: float, sent_after: int) -> void:
 	if ticks >= 1.0:
 		DotLog.debug(CHANNEL, "the engine dropped time; local time follows the wall clock",
 			{"seconds": snappedf(lost, 0.001), "ticks": snappedf(ticks, 0.1)})
+
+
+## A frame with a physics step just ended at [param wall_usec], [param seconds] after it began; the commands produced
+## after [param sent_after] (its own and the frame's before, as a host may flush a frame's
+## packets at the next frame's poll) may have waited all of it to be sent.
+##
+## [b]A frame longer than any in the last [constant LEAD_WINDOW_SECONDS] is not lead to keep.[/b]
+## A report is measured against how far ahead of local time its command was PRODUCED ([member
+## _lead_at]), so the time it then waits for its frame to end and send it is in the report, and
+## the lead covers it: right for frames that keep coming (netcode_demo at 128 with 150 ms frames:
+## discounting every one of them steered all commands late by the frame). A frame longer than
+## the window has seen is not one of those. The commands it held reached the server that much
+## later, each report about them asked for the frame again as lead, the window held the most of
+## them for a second and the lead was given back at [constant MAX_DRIFT_RATE]: a 0.3 s load
+## hitch on joining game-g2gfast at 128 had the next commands arrive 30-34 ticks early, and
+## still 2 over the slack 9 s later. And a three-second stall asked for the stall on top of the
+## credit that had restored local time: the clock jumped a stall ahead and snapped back a second
+## later (netcode_demo, 176 ticks at 60). So those commands' leads are moved back by what the
+## frame took beyond the longest of the window: the wait that recurs stays in, the excess does
+## not. A command that went out before the frame then reads as needing less, which the window's
+## most never steers by.
+func _discount_long_frame(wall_usec: int, seconds: float, sent_after: int) -> void:
+	var now := float(wall_usec) / 1000000.0
+	# The frames that ended in the window before this one began: this one is not its own measure.
+	var oldest := now - seconds - LEAD_WINDOW_SECONDS
+	while not _frame_waits.is_empty() and _frame_waits[0].x < oldest:
+		_frame_waits.pop_front()
+	# The second longest: one frame is not a wait that recurs, two are. The longest let a
+	# three-second stall make the two-second one after it a second later look like the frames
+	# to expect, and its commands asked for two seconds of lead (game-g2gfast's first visit).
+	var longest := 0.0
+	var second := 0.0
+	for wait in _frame_waits:
+		if wait.y > longest:
+			second = longest
+			longest = wait.y
+		elif wait.y > second:
+			second = wait.y
+	_frame_waits.append(Vector2(now, seconds))
+	longest = second
+	var excess := (seconds - longest) * float(tick_rate)
+	if excess <= 0.0 or longest <= 0.0 or _lead_tick.is_empty():
+		# The first frame measured has nothing to say what recurs.
+		return
+	for t in range(maxi(sent_after + 1, tick - LEAD_HISTORY + 1), tick + 1):
+		var slot := posmod(t, LEAD_HISTORY)
+		if _lead_tick[slot] == t:
+			_lead_at[slot] -= excess
 
 
 ## Seconds of wall time the engine dropped that [method note_engine_frame] and [method
@@ -967,7 +1004,7 @@ func _steer_lead(delta: float) -> void:
 		_drift_scale = 1.0
 		return
 
-	var correction := clampf(error * LEAD_GAIN, -MAX_DRIFT_RATE, LEAD_RAISE_RATE)
+	var correction := clampf(error * LEAD_GAIN, -_slowest(), LEAD_RAISE_RATE)
 	_drift_scale = 1.0 - correction
 
 	# Ticks this frame will run beyond real time: delta / (duration * scale) of them against
@@ -981,6 +1018,25 @@ func _steer_lead(delta: float) -> void:
 		_receive_excess += 1.0
 		_received_tick += 1
 		_receive_slip -= 1.0
+
+
+## The most a tick is lengthened to give lead back: [constant MAX_DRIFT_RATE], or [constant
+## LEAD_RAISE_RATE] while the latest report says its command arrived more than [constant
+## LEAD_EARLY_TICKS] past the slack early.
+##
+## [b]Slowing at the drift rate alone never got far.[/b] It is 3 ticks a second at 60 and 6.4 at
+## 128, so a lead a quarter of a second too large (a join hitch's reports, before [method
+## _discount_long_frame]) cost that much input latency for five seconds, and one 0.78 s too large
+## (just under a snap) for sixteen (netcode_demo at 128). Lengthened ticks lose no command, only
+## the latency they give back. The drift rate's caution is for a target that might be low: the
+## reports right after a stall can all be about commands [method _discount_long_frame] moved back
+## further than they waited, and steered down fast by those the next commands came late. A
+## command that did arrive that early says the lead really is too large. As fast as raising,
+## which [method render_alpha] already draws through.
+func _slowest() -> float:
+	if _last_arrival_lead - lead_slack_ticks <= LEAD_EARLY_TICKS:
+		return MAX_DRIFT_RATE
+	return LEAD_RAISE_RATE
 
 
 ## How far behind its target the input timeline may fall before it jumps forward, in ticks.
@@ -1142,6 +1198,7 @@ func reset(start_tick: int = 0) -> void:
 	_engine_last_step = -1
 	_engine_credited = 0.0
 	_engine_frame_ticks = [0, 0]
+	_frame_waits.clear()
 	_settle_local = -1.0
 	_stepped_ticks = 0.0
 
