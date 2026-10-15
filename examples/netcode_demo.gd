@@ -265,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 378
+const CHECKS := 383
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -331,6 +331,7 @@ func _run() -> void:
 	_test_unregistered_mid_tick()
 	_test_acked_baselines()
 	_test_standing_still()
+	_test_reconcile_once_per_frame()
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
 	_test_snapshot_parts()
@@ -2759,6 +2760,142 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 	host.free()
 	guest.free()
 	return out
+
+
+## [member DotNetConfig.reconcile_once_per_frame]: snapshots that arrive together are
+## reconciled once, against the newest, and land exactly where reconciling each would.
+##
+## Two clients read the same payloads from one server in bursts of [constant BURST] (what a
+## WebSocket hands over after a long frame): A reconciles every snapshot as it is read, B
+## defers and flushes once a burst. B must replay once a burst, not once a snapshot, touch
+## nothing until it flushes, and end every burst where A is -- the coalescing is only worth
+## having if it is the same answer.
+const BURST := 4
+
+
+func _test_reconcile_once_per_frame() -> void:
+	print("")
+	print("[reconciled once a frame]")
+	const TICKS := 64
+	const LEAD := 6
+
+	var host := DotNetManager.new()
+	host.name = "OnceServer"
+	host.is_server = true
+	host.service_scope = &"once_server"
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 60
+	add_child(host)
+
+	var guests: Array[DotNetManager] = []
+	for deferred in [false, true]:
+		var guest := DotNetManager.new()
+		guest.name = "OnceClient_%d" % int(deferred)
+		guest.is_server = false
+		guest.service_scope = StringName("once_client_%d" % int(deferred))
+		guest.local_peer_id = 2
+		guest.auto_tick = false
+		guest.config_file = ""
+		guest.config = DotNetConfig.new()
+		guest.config.tick_rate = 60
+		guest.config.snapshot_rate = 60
+		guest.config.input_margin_ticks = LEAD
+		guest.config.reconcile_once_per_frame = deferred
+		add_child(guest)
+		var _set := guest.setup()
+		guests.append(guest)
+
+	var _a := host.setup()
+	var wire: Array[PackedByteArray] = []
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d == DotNetMessage.Delivery.UNRELIABLE:
+			wire.append(payload)
+
+	var _c := host.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
+	var moving: Array[Movement] = []
+	for guest in guests:
+		var _s := guest.start()
+		guest.spawner.register_factory(&"player", _build_player)
+		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
+			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
+		).value
+		moving.append(mirror.behaviours[0] as Movement)
+
+	var replays_before: Array[int] = []
+	for guest in guests:
+		replays_before.append(int(guest.predictor.describe()["replays"]))
+
+	var bursts := 0
+	var read := 0
+	var untouched := true
+	var worst_apart := 0.0
+
+	for s in range(1, TICKS + 1):
+		var c := s + LEAD
+		# A turn every 8 ticks, so a replay on the wrong inputs could not agree by luck.
+		var move := Vector2(1.0, 0.0) if (s / 8) % 2 == 0 else Vector2(0.0, 1.0)
+		for g in range(2):
+			var input := DemoInput.new()
+			input.tick = c
+			input.delta = 1.0 / 60.0
+			input.move = move
+			guests[g].local_inputs().push(input)
+			moving[g]._net_apply_input(input, c)
+			guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
+
+		var copy := DemoInput.new()
+		copy.tick = c
+		copy.delta = 1.0 / 60.0
+		# The server disagrees now and then (a rule the client does not know), so every
+		# burst has a real correction in it to agree about.
+		copy.move = move if s % 5 != 0 else Vector2(-1.0, 0.0)
+		host.input_buffer_for(2).push(copy)
+		host.server_tick(s)
+
+		if s % BURST != 0:
+			continue
+
+		bursts += 1
+		var held := moving[1].position
+		for payload in wire:
+			read += 1
+			for guest in guests:
+				guest.clock.tick = c
+				var _r := guest.receive_snapshot(payload)
+		wire.clear()
+		if moving[1].position != held:
+			untouched = false
+		guests[1].flush_reconcile()
+		worst_apart = maxf(worst_apart, moving[0].position.distance_to(moving[1].position))
+		for guest in guests:
+			var _ack := host.receive_ack_payload(2, guest.encode_ack())
+
+	var replays_a := int(guests[0].predictor.describe()["replays"]) - replays_before[0]
+	var replays_b := int(guests[1].predictor.describe()["replays"]) - replays_before[1]
+	var coalesced := int(guests[1].describe()["prediction"].get("coalesced", -1))
+
+	_check("each snapshot reconciled with it off (%d of %d)" % [replays_a, read],
+		replays_a == read and read > 0)
+	_check("once a burst with it on (%d for %d bursts)" % [replays_b, bursts],
+		replays_b == bursts and bursts > 0)
+	_check("and the rest counted as coalesced (%d)" % coalesced, coalesced == read - bursts)
+	_check("nothing moves before the flush", untouched)
+	_check("and both land in the same place (worst %.6f m apart)" % worst_apart, worst_apart < 1e-4)
+
+	host.stop()
+	remove_child(host)
+	host.free()
+	for guest in guests:
+		guest.stop()
+		remove_child(guest)
+		guest.free()
 
 
 ## [member DotNetConfig.stagger_snapshots]: every peer still gets a snapshot exactly every

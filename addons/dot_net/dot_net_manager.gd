@@ -176,6 +176,13 @@ var _input_buffers: Dictionary = {}
 ## Local input history, on a client.
 var _local_inputs: DotNetInput.Buffer = null
 
+## net_id -> [identity, tick, values]: the newest snapshot's state for each predicted entity,
+## waiting for [method flush_reconcile] ([member DotNetConfig.reconcile_once_per_frame]).
+var _pending_reconcile: Dictionary = {}
+
+## Reconciliations a flush saved by keeping only the newest snapshot's, for [method describe].
+var _reconciles_coalesced: int = 0
+
 ## peer_id -> newest snapshot tick they have acknowledged, on the server.
 var _acks: Dictionary = {}
 
@@ -415,6 +422,7 @@ func stop() -> void:
 	_receiving_mask = 0
 	_receiving_total = 0
 	_seen_ticks.clear()
+	_pending_reconcile.clear()
 
 	if registry != null:
 		registry.clear()
@@ -619,6 +627,7 @@ func client_tick(tick: int) -> void:
 		# the server has already passed, every one of which is discarded.
 		return
 
+	flush_reconcile()
 	predictor.predict(registry.predicted(), tick, clock.tick_duration())
 
 
@@ -653,6 +662,8 @@ var _last_frame_usec: int = 0
 func interpolate_frame(alpha: float = -1.0) -> void:
 	if is_server or interpolator == null or not clock.is_synced():
 		return
+
+	flush_reconcile()
 
 	if alpha < 0.0:
 		alpha = clock.render_alpha()
@@ -1239,6 +1250,13 @@ func _apply_entity(
 		# left out back to what the server last sent, before the game's
 		# `_net_state_applied` copies the properties into its simulation.
 		if identity.is_predicted():
+			# Deferred, the prediction stays in the properties until the flush: reading
+			# writes the server's (older) state into them, and anything drawn or ticked
+			# before the flush would otherwise see the entity a round trip back.
+			var held := {}
+			if config.reconcile_once_per_frame:
+				for declaration in behaviour.net_vars:
+					held[declaration.property] = behaviour._net_read_property(declaration.property)
 			var applied: DotResult = DotResult.success(0)
 			if reader == null:
 				behaviour.apply_unchanged(tick, true)
@@ -1247,6 +1265,8 @@ func _apply_entity(
 			if not applied.ok:
 				return applied
 			values.merge(behaviour.authoritative_values(), true)
+			for property: StringName in held:
+				behaviour._net_write_property(property, held[property])
 		else:
 			var applied2: DotResult = DotResult.success(0)
 			if reader == null:
@@ -1273,11 +1293,17 @@ func _apply_entity(
 					values[declaration.property] = received[declaration.property]
 
 	if identity.is_predicted():
-		predictor.reconcile(
-			identity, tick, values, _local_inputs, clock.tick,
-			clock.tick_duration()
-		)
-		_local_inputs.acknowledge(tick)
+		if config.reconcile_once_per_frame:
+			# The newest tick wins; `values` is the server's whole state (absent filled from
+			# what came before), so an older snapshot's has nothing the newer one lacks.
+			var waiting: Array = _pending_reconcile.get(identity.net_id, [])
+			if not waiting.is_empty():
+				if int(waiting[1]) > tick:
+					return DotResult.success(tick)
+				_reconciles_coalesced += 1
+			_pending_reconcile[identity.net_id] = [identity, tick, values]
+		else:
+			_reconcile(identity, tick, values)
 	elif not values.is_empty():
 		interpolator.push(identity.net_id, tick, values)
 
@@ -1428,7 +1454,34 @@ func _observer_for(peer_id: int) -> DotNetIdentity:
 	return owned[0] if not owned.is_empty() else null
 
 
+func _reconcile(identity: DotNetIdentity, tick: int, values: Dictionary) -> void:
+	predictor.reconcile(
+		identity, tick, values, _local_inputs, clock.tick,
+		clock.tick_duration()
+	)
+	_local_inputs.acknowledge(tick)
+
+
+## Reconciles every predicted entity against the newest snapshot read for it since the
+## last flush. Nothing to do unless [member DotNetConfig.reconcile_once_per_frame] is on;
+## [method client_tick] and [method interpolate_frame] call it, so a host only does when it
+## predicts without either and must see the correction first.
+func flush_reconcile() -> void:
+	if _pending_reconcile.is_empty():
+		return
+	var waiting := _pending_reconcile
+	_pending_reconcile = {}
+	for net_id: int in waiting:
+		var entry: Array = waiting[net_id]
+		var identity: DotNetIdentity = entry[0]
+		# Unregistered (or freed) since the snapshot: nothing left to correct.
+		if not is_instance_valid(identity) or registry.get_identity(net_id) != identity:
+			continue
+		_reconcile(identity, int(entry[1]), entry[2])
+
+
 func _forget_entity(net_id: int) -> void:
+	_pending_reconcile.erase(net_id)
 	if interpolator != null:
 		interpolator.forget(net_id)
 	if predictor != null:
@@ -1530,6 +1583,8 @@ func describe() -> Dictionary:
 		d["interpolation"] = interpolator.describe()
 	if predictor != null:
 		d["prediction"] = predictor.describe()
+		if config != null and config.reconcile_once_per_frame:
+			d["prediction"]["coalesced"] = _reconciles_coalesced
 	if history != null:
 		d["lag_compensation"] = history.describe()
 

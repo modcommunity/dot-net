@@ -96,6 +96,26 @@ extends DotConfig
 ## 2-second round trip.
 @export_range(8, 512, 8) var input_history_ticks: int = 120
 
+## Reconcile a predicted entity once a frame, against the newest snapshot, rather than
+## once per snapshot as each arrives.
+##
+## Every reconciliation rewinds and replays every unacknowledged input, so its cost is the
+## input lead in ticks times one simulation. Several snapshots read in one frame (a
+## WebSocket hands over everything that queued while a frame was long) each paid that in
+## full, and only the last answer was ever drawn: rewinding wholesale to snapshot N + 1
+## discards whatever N's replay produced. On a single-threaded browser that is a loop with
+## no way out -- a long frame queues snapshots, replaying them all makes the next frame
+## longer, the late inputs raise the lead, and a longer lead makes each replay longer.
+## game-arena's web client sat at 2 frames a second replaying 660 ticks a frame after one
+## 4-second stall (2026-10-15).
+##
+## Off by default because it changes WHEN a snapshot's correction lands: on
+## [method DotNetManager.flush_reconcile], which [method DotNetManager.client_tick] and
+## [method DotNetManager.interpolate_frame] call first. A host that reads a predicted
+## entity right after [method DotNetManager.receive_snapshot] and expects it rewound calls
+## [method DotNetManager.flush_reconcile] itself, or leaves this off.
+@export var reconcile_once_per_frame: bool = false
+
 ## Position error before a predicted entity is corrected, in metres.
 ##
 ## Below this the prediction is treated as right, which stops floating-point noise
