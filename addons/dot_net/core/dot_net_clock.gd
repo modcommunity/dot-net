@@ -278,6 +278,38 @@ var _lost_count: int = 0
 func _init(p_tick_rate: int = 60, p_is_authority: bool = false) -> void:
 	tick_rate = maxi(1, p_tick_rate)
 	is_authority = p_is_authority
+	if is_authority:
+		_counted_as_server = true
+		_servers_in_process += 1
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE and _counted_as_server:
+		_counted_as_server = false
+		_servers_in_process -= 1
+
+
+## Authority clocks alive in this process: a server that runs on this engine's steps.
+##
+## [b]A server in the same process stalls with the client.[/b] The engine's numbers say this
+## process stopped, not that the server kept going; one in the same process (a listen host, a
+## test harness running both ends) dropped the same time. Credited anyway (v0.1.8), a 0.38 s
+## hitch on joining put dot-server-deploy's `lookatme_client` first player 22 ticks ahead of the
+## server beside it, given back at [constant MAX_DRIFT_RATE] over seven seconds, and the next
+## section's walk lost a third of its length to the latency (1.1 to 1.8 m against more than 2).
+## So no clock follows the engine while one exists. Asking the server's snapshots instead
+## (credit only what they show it went on without us) was tried: they confirm a drop a
+## snapshot period late at best, and a credit that trails by a few ticks every frame is either
+## counted twice by the reports or, corrected for, steers every command of a client on steady
+## slow frames late.
+static var _servers_in_process: int = 0
+var _counted_as_server: bool = false
+
+
+## Whether a server's clock is alive in this process, so this clock does not follow the
+## engine's dropped time ([member _servers_in_process]).
+static func server_in_process() -> bool:
+	return _servers_in_process > 0
 
 
 ## Seconds in one tick.
@@ -440,10 +472,14 @@ func note_engine_time(wall_usec: int, physics_frames: int, physics_rate: int,
 
 ## Hands the engine's own numbers to [method note_engine_frame] inside a physics step, or to
 ## [method note_engine_time] outside one, while [member follow_engine_time] is set, time runs
-## at its own speed, and the engine's physics steps are what advance this clock (one [method
-## advance] a step, the latest included).
+## at its own speed, no server runs in this process, and the engine's physics steps are what
+## advance this clock (one [method advance] a step, the latest included).
 func _follow_engine() -> void:
 	if not follow_engine_time or is_authority or Engine.time_scale != 1.0:
+		return
+	if _servers_in_process > 0:
+		# The server beside this client stalled with it ([member _servers_in_process]).
+		_engine_frame = -1
 		return
 	if _engine_last_step < 0 or Engine.get_physics_frames() - _engine_last_step > 1:
 		# Only while the engine's physics steps advance this clock: the latest step did. A test

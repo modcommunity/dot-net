@@ -265,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 376
+const CHECKS := 378
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -3939,7 +3939,8 @@ func _test_dropped_time() -> void:
 
 
 ## The same, through the engine itself: a clock advanced once a physics step reads the engine's
-## numbers on its own, and one advanced by hand never does.
+## numbers on its own and credits a stall, credits nothing while a server's clock runs in the
+## same process (it stalled too), and a clock advanced by hand never reads them.
 func _test_dropped_time_live() -> void:
 	_sections_entered += 1
 	print("")
@@ -3947,35 +3948,59 @@ func _test_dropped_time_live() -> void:
 
 	var cap_was := Engine.max_physics_steps_per_frame
 	Engine.max_physics_steps_per_frame = 8
-	var driven := DotNetClock.new(Engine.physics_ticks_per_second)
-	driven.sync_from_server(1000, 40.0)
-	var by_hand := DotNetClock.new(Engine.physics_ticks_per_second)
+	var rate := Engine.physics_ticks_per_second
+	# The sections before free their managers at the end of the frame.
+	await get_tree().process_frame
+	var alone := not DotNetClock.server_in_process()
+
+	# Half a second inside one physics step, while [param clock] is advanced once a step: the
+	# engine runs its cap of steps after it and drops the rest. Returns the ticks the clock ran
+	# from the stall on, and the wall time that passed, in ticks.
+	var stall := func(clock: DotNetClock) -> Vector2:
+		clock.sync_from_server(1000, 40.0)
+		for _i in 10:
+			await get_tree().physics_frame
+			var _a := clock.advance(1.0 / float(rate))
+		var before := clock.tick
+		var wall := Time.get_ticks_usec()
+		OS.delay_msec(500)
+		for _i in 40:
+			await get_tree().physics_frame
+			var _a := clock.advance(1.0 / float(rate))
+		return Vector2(clock.tick - before, float(Time.get_ticks_usec() - wall) / 1000000.0 * float(rate))
+
+	var remote := DotNetClock.new(rate)
+	var remote_ran: Vector2 = await stall.call(remote)
+	# The server's clock in this process, alive through the second stall.
+	var beside := DotNetClock.new(rate, true)
+	var listen := DotNetClock.new(rate)
+	var listen_ran: Vector2 = await stall.call(listen)
+	var server_seen := DotNetClock.server_in_process()
+	beside = null
+	var by_hand := DotNetClock.new(rate)
 	by_hand.sync_from_server(1000, 40.0)
-	for _i in 10:
-		await get_tree().physics_frame
-		var _d := driven.advance(1.0 / float(Engine.physics_ticks_per_second))
-	var tick_before := driven.tick
-	var wall_before := Time.get_ticks_usec()
-	# Half a second inside one frame: the engine runs its cap of steps after it and drops the
-	# rest. The hand-driven clock is advanced through it in a loop, as a test harness would.
-	OS.delay_msec(500)
+	OS.delay_msec(200)
 	for _i in 30:
 		var _h := by_hand.advance(1.0 / 60.0)
-	for _i in 40:
-		await get_tree().physics_frame
-		var _d := driven.advance(1.0 / float(Engine.physics_ticks_per_second))
-	var wall_ticks := float(Time.get_ticks_usec() - wall_before) / 1000000.0 * float(driven.tick_rate)
-	print("    driven by the engine: %d ms credited, %d ticks for %.0f of wall time; by hand: %d ms (engine %d Hz, cap %d)" % [
-		int(driven.lost_seconds() * 1000.0), driven.tick - tick_before, wall_ticks, int(by_hand.lost_seconds() * 1000.0),
-		Engine.physics_ticks_per_second, Engine.max_physics_steps_per_frame])
+	print("    no server in this process: %d ms credited, %d ticks for %.0f of wall time" % [
+		int(remote.lost_seconds() * 1000.0), int(remote_ran.x), remote_ran.y])
+	print("    a server in this process: %d ms credited, %d ticks for %.0f; by hand: %d ms (engine %d Hz, cap %d)" % [
+		int(listen.lost_seconds() * 1000.0), int(listen_ran.x), listen_ran.y,
+		int(by_hand.lost_seconds() * 1000.0), rate, Engine.max_physics_steps_per_frame])
 	# Armed: following nothing, 0 ms credited and 40 ticks for 61 of wall time. Counting the
 	# reference frame's own steps (it was a frame catching up) credited 157 ms and ran 49.
-	_check("a clock the engine drives sees the half second it dropped (%d ms)" % int(driven.lost_seconds() * 1000.0),
-		driven.lost_seconds() >= 0.25)
-	_check("and keeps up with the wall clock through it (%d ticks for %.0f)" % [driven.tick - tick_before, wall_ticks],
-		float(driven.tick - tick_before) >= wall_ticks - 6.0)
+	_check("with no server in this process, the half second the engine dropped is credited (%d ms)" % int(remote.lost_seconds() * 1000.0),
+		alone and remote.lost_seconds() >= 0.25)
+	_check("and the clock keeps up with the wall clock through it (%d ticks for %.0f)" % [int(remote_ran.x), remote_ran.y],
+		remote_ran.x >= remote_ran.y - 6.0)
+	# Armed: following the engine beside a server (v0.1.8), 318 ms credited and 59 ticks run, the
+	# stall ahead of a server that never ran it (dot-server-deploy's lookatme_client).
+	_check("with a server's clock in this process, which stalled too, nothing is credited (%d ms)" % int(listen.lost_seconds() * 1000.0),
+		server_seen and listen.lost_seconds() == 0.0)
 	_check("a clock advanced by hand credits nothing (%d ms)" % int(by_hand.lost_seconds() * 1000.0),
 		by_hand.lost_seconds() == 0.0)
+	_check("and the count of servers in this process goes back down (%s)" % DotNetClock.server_in_process(),
+		alone and not DotNetClock.server_in_process())
 	Engine.max_physics_steps_per_frame = cap_was
 	_sections_completed += 1
 
