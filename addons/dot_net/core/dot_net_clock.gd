@@ -321,6 +321,34 @@ static func server_in_process() -> bool:
 	return _servers_in_process > 0
 
 
+## How much wall time of physics steps a client keeps up with, in seconds: [method adopt_tick_rate]
+## raises the engine's step cap to cover this at the new rate.
+const SLOW_FRAME_SECONDS := 0.25
+
+
+## Sets the engine's physics rate to [param rate] and lets it run a quarter second of ticks in one
+## frame. Call it where a client adopts the server's tick rate (every game's HELLO), in place of
+## writing [code]Engine.physics_ticks_per_second[/code] alone.
+##
+## [b]The engine runs at most [code]max_physics_steps_per_frame[/code] steps a frame, 8 by
+## default, and silently drops the time past that.[/b] 8 steps are 133 ms at 60 Hz but 62.5 ms at
+## 128, so a client below 16 frames a second (a browser's first visit: packs mounting, shaders
+## compiling) runs fewer ticks than the server and has no command of its own for the ones it
+## skipped: a jump or a strafe shorter than a frame is dropped. The cap is raised, never lowered,
+## because a game or a user may already hold a higher one. (API 7.)
+static func adopt_tick_rate(rate: int) -> void:
+	if rate <= 0:
+		return
+	var steps := ceili(SLOW_FRAME_SECONDS * float(rate))
+	var raised := Engine.max_physics_steps_per_frame < steps
+	if raised:
+		Engine.max_physics_steps_per_frame = steps
+	Engine.physics_ticks_per_second = rate
+	DotLog.debug(CHANNEL, "adopted a tick rate", {
+		"rate": rate, "max_steps": Engine.max_physics_steps_per_frame, "raised": raised,
+	})
+
+
 ## Seconds in one tick.
 func tick_duration() -> float:
 	return 1.0 / float(tick_rate)

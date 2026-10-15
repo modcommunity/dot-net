@@ -265,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 389
+const CHECKS := 393
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -4203,6 +4203,25 @@ func _test_dropped_time_live() -> void:
 		by_hand.lost_seconds() == 0.0)
 	_check("and the count of servers in this process goes back down (%s)" % DotNetClock.server_in_process(),
 		alone and not DotNetClock.server_in_process())
+	# adopt_tick_rate: raises the cap to a quarter second of ticks, never lowers a higher one.
+	var rate_was := Engine.physics_ticks_per_second
+	Engine.max_physics_steps_per_frame = 8
+	DotNetClock.adopt_tick_rate(128)
+	_check("adopt_tick_rate(128) sets the rate and a 32 step cap (%d Hz, %d)" % [
+		Engine.physics_ticks_per_second, Engine.max_physics_steps_per_frame],
+		Engine.physics_ticks_per_second == 128 and Engine.max_physics_steps_per_frame == 32)
+	Engine.max_physics_steps_per_frame = 100
+	DotNetClock.adopt_tick_rate(128)
+	_check("and never lowers a higher cap (%d)" % Engine.max_physics_steps_per_frame,
+		Engine.max_physics_steps_per_frame == 100)
+	Engine.max_physics_steps_per_frame = 8
+	DotNetClock.adopt_tick_rate(60)
+	_check("60 Hz needs 15 steps (%d)" % Engine.max_physics_steps_per_frame,
+		Engine.max_physics_steps_per_frame == 15)
+	DotNetClock.adopt_tick_rate(0)
+	_check("a rate of 0 changes nothing (%d Hz)" % Engine.physics_ticks_per_second,
+		Engine.physics_ticks_per_second == 60)
+	Engine.physics_ticks_per_second = rate_was
 	Engine.max_physics_steps_per_frame = cap_was
 	_sections_completed += 1
 
