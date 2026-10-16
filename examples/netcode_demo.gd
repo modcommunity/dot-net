@@ -265,7 +265,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 393
+const CHECKS := 394
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -2257,6 +2257,25 @@ func _test_drawing_through_slips() -> void:
 	var naive_worst := _worst_step_change(naive)
 	_check("a drifting clock draws evenly: no frame's step a tenth of a tick off (%.3f; the engine's fraction alone %.2f)" % [
 		worst, naive_worst], worst < 0.1 and naive_worst > 0.5)
+
+	# 1b. Two slips the same way close together. The first is still being taken up when the
+	# second lands, so the slip briefly passes 1; clamped there, the remainder was lost and
+	# that frame moved half a tick less than its time (g2gfast's `headless_feel` caught it).
+	var twice := DotNetClock.new(64, false)
+	var timeline: Array[float] = []
+	for i in range(40):
+		if i == 10 or i == 15:
+			# A physics frame that runs no tick: a tick's worth less in the accumulator.
+			twice.set("_accumulator", float(twice.get("_accumulator")) - twice.tick_duration())
+		var _steps := twice.advance(physics)
+		timeline.append(float(twice.tick) - 1.0 + twice.render_alpha(0.0, physics))
+	var least := INF
+	var most := -INF
+	for i in range(1, timeline.size()):
+		least = minf(least, timeline[i] - timeline[i - 1])
+		most = maxf(most, timeline[i] - timeline[i - 1])
+	_check("two slips the same way five frames apart: every frame moves 0.5-1.5 of its time (%.2f-%.2f)" % [
+		least, most], least > 0.5 and most < 1.5)
 
 	# 2. The receive timeline re-anchors: three ticks forward at once, then one back.
 	var receiving := DotNetClock.new(64, false)

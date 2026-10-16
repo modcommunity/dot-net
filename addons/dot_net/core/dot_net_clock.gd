@@ -108,6 +108,9 @@ const RECEIVE_RECOVERY := 0.2
 ## at once.
 const SLIP_RECOVERY := 0.1
 
+## The most slip carried, in ticks: room for a second slip while the first is taken up.
+const MAX_SLIP := 2.0
+
 ## How fast slips are taken up now: [constant SLIP_RECOVERY], or twice what the drift makes
 ## while it is faster than [constant MAX_DRIFT_RATE] (raising a reported lead, up to
 ## [constant LEAD_RAISE_RATE]). Slower than the drift makes them, they pile up to the clamp
@@ -406,7 +409,11 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 		_slip_recovery = maxf(SLIP_RECOVERY, 2.0 * absf(1.0 / _drift_scale - 1.0))
 		_slip = move_toward(_slip, 0.0, _slip_recovery * float(tick_rate) * delta)
 		if steps != 1 and absi(steps - 1) <= 1:
-			_slip = clampf(_slip + float(1 - steps), -1.0, 1.0)
+			# Within 2, not 1: a second slip the same way often lands while the first is still
+			# being taken up (about half of it, five frames later), and clamped at 1 the rest
+			# was lost and that frame drawn half a tick short (g2gfast's `headless_feel`).
+			# Bounded at all so a run of slips cannot carry the drawing ticks away.
+			_slip = clampf(_slip + float(1 - steps), -MAX_SLIP, MAX_SLIP)
 
 	if _accumulator >= step:
 		# Still behind after the cap. Discard the backlog rather than carrying it
@@ -715,7 +722,10 @@ func render_alpha(physics_fraction: float = -1.0, physics_delta: float = -1.0) -
 	# every physics frame and not just on average.
 	if physics_delta <= 0.0:
 		physics_delta = 1.0 / float(maxi(1, Engine.physics_ticks_per_second))
-	return frac + move_toward(_slip, 0.0, _slip_recovery * float(tick_rate) * frac * physics_delta)
+	# Clamped to -1..2: never more than a tick before the frame's first tick, nor a tick past
+	# the extrapolation a renderer already allows past 1.
+	return clampf(frac + move_toward(_slip, 0.0, _slip_recovery * float(tick_rate) * frac * physics_delta),
+		-1.0, 2.0)
 
 
 # --- Client synchronisation ------------------------------------------------
