@@ -137,6 +137,15 @@ extends DotConfig
 ## the entity through geometry.
 @export_range(0.1, 100.0, 0.1) var reconcile_snap_distance: float = 2.0
 
+## Longest a client carries a remote entity along its replicated velocity when predicting
+## against it, in seconds ([method DotNetBehaviour.extrapolated_value]). 0, the default,
+## predicts against where it was last heard.
+##
+## About the input lead plus one snapshot interval: the age of the newest snapshot when none
+## is lost. Further only carries a remote on through its turns while snapshots are lost, which
+## makes the worst bump worse and the mean no better (docs/prediction.md#bumping-a-remote).
+@export_range(0.0, 1.0, 0.01) var remote_extrapolation_sec: float = 0.0
+
 @export_group("Lag compensation")
 
 ## Rewind the world to a client's view when validating its actions.

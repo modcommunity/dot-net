@@ -142,6 +142,82 @@ class Counted extends Movement:
 		last_applied = tick
 
 
+## A bot the server walks back and forth along x at a constant speed, reversing at once at
+## each end: a pure function of the tick ([method at]), so the server's truth at any tick is
+## known without asking the server. On a receiving client it records what it last heard.
+class Pacer extends DotNetBehaviour:
+	const NEAR_X := 1.5
+	const FAR_X := 5.5
+
+	var position: Vector3 = Vector3(FAR_X, 0.0, 0.0)
+	var velocity: Vector3 = Vector3.ZERO
+	var speed: float = 4.0
+
+	## The snapshot tick the client last heard this bot at, and where. -1 until then.
+	var heard_tick: int = -1
+	var heard_position: Vector3 = Vector3.ZERO
+
+	func _register_net_vars() -> void:
+		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
+		replicate(&"velocity", DotNetVar.Type.VECTOR3_VELOCITY)
+
+	## Where the server has it after simulating [param tick]: from the far end toward the
+	## player, back, and again.
+	func at(tick: int, delta: float) -> Array:
+		var span := FAR_X - NEAR_X
+		var travelled := fposmod(float(tick) * delta * speed, 2.0 * span)
+		if travelled < span:
+			return [Vector3(FAR_X - travelled, 0.0, 0.0), Vector3(-speed, 0.0, 0.0)]
+		return [Vector3(NEAR_X + travelled - span, 0.0, 0.0), Vector3(speed, 0.0, 0.0)]
+
+	func _net_simulate(tick: int, delta: float) -> void:
+		var now := at(tick, delta)
+		position = now[0]
+		velocity = now[1]
+
+	func _net_state_applied(tick: int) -> void:
+		var said := received_values()
+		heard_tick = tick
+		heard_position = said.get(&"position", heard_position)
+
+
+## A predicted player that walks +x into a [Pacer] and is pushed back out of it along x:
+## the smallest simulation in which a client predicts a bump against something it does not
+## predict. [member obstacle_at] answers where the bot is
+## for a tick, `Vector3.INF` for "collide with nothing"; the server's answer is the truth,
+## the client's is whatever estimate is under test.
+class Bumper extends DotNetBehaviour:
+	## Two capsule radii, 0.35 m each, as dot-player-controller's standing hull.
+	const APART := 0.7
+	const WALK := 3.0
+
+	var position: Vector3 = Vector3.ZERO
+	var velocity: Vector3 = Vector3.ZERO
+	var current_input: DemoInput = null
+	var obstacle_at: Callable = Callable()
+
+	func _register_net_vars() -> void:
+		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
+		replicate(&"velocity", DotNetVar.Type.VECTOR3_VELOCITY)
+
+	func _net_apply_input(input: DotNetInput, _tick: int) -> void:
+		current_input = input as DemoInput
+
+	func _net_simulate(tick: int, delta: float) -> void:
+		if current_input != null:
+			velocity = Vector3(current_input.move.x, 0.0, current_input.move.y) * WALK
+		position += velocity * delta
+		if not obstacle_at.is_valid():
+			return
+		var bot: Vector3 = obstacle_at.call(tick)
+		if not bot.is_finite():
+			return
+		# Along x only, as in a corridor one hull wide: the quantised position carries a few
+		# millimetres of z, and a disc push would turn them into a sideways slide.
+		if absf(position.x - bot.x) < APART:
+			position.x = bot.x + signf(position.x - bot.x + 0.0001) * APART
+
+
 ## Relevant unless excluded, by net id. What "it walked out of view" is to a test.
 class ExcludeInterest extends DotNetInterest:
 	var excluded := {}
@@ -265,7 +341,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 394
+const CHECKS := 402
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -331,6 +407,7 @@ func _run() -> void:
 	_test_unregistered_mid_tick()
 	_test_acked_baselines()
 	_test_standing_still()
+	_test_remote_bumps()
 	_test_reconcile_once_per_frame()
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
@@ -2780,6 +2857,284 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 	host.free()
 	guest.free()
 	return out
+
+
+## [b]Bumping a remote under loss.[/b] A client predicts its own player against the others at
+## an estimate of where they are; the server pushes it out of where they really are. The gap
+## between the two is the prediction error a bump costs, and this section measures it for each
+## way of making the estimate (docs/prediction.md#bumping-a-remote).
+##
+## A [Bumper] walks at 3 m/s into a [Pacer] that comes at it, pushes it back, turns at once
+## and walks away, at [constant BUMP_SPEEDS]. Snapshots are lost at random, the same draws for
+## every estimate. The gap is taken at each tick as first predicted, which is where the
+## player is drawn before any correction.
+##
+## The estimates: `heard`, where the bot was last heard (what every game does); `ignore`, no
+## bot in the prediction at all; `line`, the interpolator's line through the last two
+## positions sampled at the input tick; `extrapolated`, [method DotNetBehaviour.extrapolated_value]
+## with [member DotNetConfig.remote_extrapolation_sec] at [constant BUMP_EXTRAPOLATE_SEC]; and
+## `default`, the same call with the setting left at its default.
+const BUMP_LEAD := 6
+const BUMP_TICKS := 1200
+const BUMP_SPEEDS: Array[float] = [4.0, 8.0]
+const BUMP_LOSSES: Array[float] = [0.0, 0.05, 0.15]
+## The lead plus one snapshot interval, 9 ticks at 60 Hz.
+const BUMP_EXTRAPOLATE_SEC := 0.15
+const BUMP_ESTIMATES: Array[StringName] = [
+	&"oracle", &"heard", &"ignore", &"line", &"extrapolated", &"default"
+]
+
+
+func _test_remote_bumps() -> void:
+	print("")
+	print("[bumping a remote under loss]")
+
+	var table := {}
+	for speed in BUMP_SPEEDS:
+		for loss in BUMP_LOSSES:
+			for estimate in BUMP_ESTIMATES:
+				table[[speed, loss, estimate]] = _bump_run(speed, loss, estimate)
+
+	print("  worst / mean gap in m, input lead %d ticks at 60 Hz, 20 snapshots/s" % BUMP_LEAD)
+	for speed in BUMP_SPEEDS:
+		for loss in BUMP_LOSSES:
+			var row := "  bot %.0f m/s, loss %2d%%:" % [speed, roundi(loss * 100.0)]
+			for estimate: StringName in [&"heard", &"ignore", &"line", &"extrapolated"]:
+				var r: Dictionary = table[[speed, loss, estimate]]
+				row += "  %s %.2f / %.3f" % [estimate, float(r["worst"]), float(r["mean"])]
+			print(row)
+
+	var oracle_worst := 0.0
+	var contact := true
+	var default_same := true
+	var mean_ratio := 0.0
+	var line_ratio := INF
+	var lossy_worse := 0.0
+	for speed in BUMP_SPEEDS:
+		for loss in BUMP_LOSSES:
+			var oracle: Dictionary = table[[speed, loss, &"oracle"]]
+			var heard: Dictionary = table[[speed, loss, &"heard"]]
+			var line: Dictionary = table[[speed, loss, &"line"]]
+			var ahead: Dictionary = table[[speed, loss, &"extrapolated"]]
+			var plain: Dictionary = table[[speed, loss, &"default"]]
+			oracle_worst = maxf(oracle_worst, float(oracle["worst"]))
+			contact = contact and int(oracle["contact"]) > 100
+			default_same = default_same and is_equal_approx(float(plain["mean"]), float(heard["mean"])) \
+				and is_equal_approx(float(plain["worst"]), float(heard["worst"]))
+			mean_ratio = maxf(mean_ratio, float(ahead["mean"]) / float(heard["mean"]))
+			line_ratio = minf(line_ratio, float(line["mean"]) / float(ahead["mean"]))
+			if loss > 0.1:
+				lossy_worse = maxf(lossy_worse, float(ahead["worst"]) - float(heard["worst"]))
+
+	# The control: told where the bot really is, the client agrees with the server under any
+	# loss, so every gap below is the estimate's and nothing else's.
+	_check(
+		"control: the true bot position predicts within 1 cm (%.4f m)" % oracle_worst,
+		oracle_worst < 0.01
+	)
+	_check("and the player really is pushed, every run", contact)
+
+	# The problem, measured: the last-heard position costs speed x age, and loss ages it.
+	var heard_slow: float = table[[4.0, 0.0, &"heard"]]["worst"]
+	var heard_fast: float = table[[8.0, 0.0, &"heard"]]["worst"]
+	var heard_lossy: float = table[[8.0, 0.15, &"heard"]]["worst"]
+	_check(
+		"last heard: a faster bot costs more (%.2f m against %.2f)" % [heard_fast, heard_slow],
+		heard_fast > heard_slow * 1.5
+	)
+	_check(
+		"last heard: and loss costs more again (%.2f m at 15%%)" % heard_lossy,
+		heard_lossy > heard_fast
+	)
+
+	# The decision. Carried along the replicated velocity, the mean gap is a fraction of the
+	# last heard one everywhere, and the worst under loss is no worse.
+	_check(
+		"extrapolated: the mean gap is under a third of last heard's (worst ratio %.2f)" % mean_ratio,
+		mean_ratio < 0.34
+	)
+	_check(
+		"extrapolated: and the worst at 15%% loss is no worse (by %.2f m at most)" % lossy_worse,
+		lossy_worse < 0.01
+	)
+	_check(
+		"the interpolator's line through two positions does worse (mean x%.1f at best)" % line_ratio,
+		line_ratio > 1.5
+	)
+	_check(
+		"left at its default, extrapolated_value is the last heard position",
+		default_same
+	)
+
+
+## One run of [method _test_remote_bumps]: a server and a client in one process, the client
+## [constant BUMP_LEAD] ticks ahead, every snapshot delivered at once or lost. Returns the
+## worst and mean gap between where the client first predicted its player at a tick and
+## where the server had it, and how many ticks the server pushed it.
+func _bump_run(speed: float, loss: float, estimate: StringName) -> Dictionary:
+	var scope := "bump_%d_%d_%s" % [roundi(speed), roundi(loss * 100.0), estimate]
+	var dt := 1.0 / 60.0
+
+	var host := DotNetManager.new()
+	host.name = "BumpServer_" + scope
+	host.is_server = true
+	host.service_scope = StringName(scope + "_server")
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	add_child(host)
+
+	var guest := DotNetManager.new()
+	guest.name = "BumpClient_" + scope
+	guest.is_server = false
+	guest.service_scope = StringName(scope + "_client")
+	guest.local_peer_id = 2
+	guest.auto_tick = false
+	guest.config_file = ""
+	guest.config = DotNetConfig.new()
+	guest.config.input_margin_ticks = BUMP_LEAD
+	if estimate == &"extrapolated":
+		guest.config.remote_extrapolation_sec = BUMP_EXTRAPOLATE_SEC
+	add_child(guest)
+
+	var _a := host.setup()
+	var _b := guest.setup()
+
+	# The same draws for every estimate at one loss, so they are compared on the same packets.
+	var draws := RandomNumberGenerator.new()
+	draws.seed = 7001 + roundi(loss * 100.0)
+	var wire: Array[PackedByteArray] = []
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			return
+		if draws.randf() < loss:
+			return
+		wire.append(payload)
+
+	var _c := host.start()
+	var _d := guest.start()
+	host.add_peer(2)
+	for side: DotNetManager in [host, guest]:
+		side.spawner.register_factory(&"pacer", _build_bump.bind(&"pacer", speed))
+		side.spawner.register_factory(&"bumper", _build_bump.bind(&"bumper", speed))
+
+	# The bot first, so it is simulated before the player on the server; [method Pacer.at]
+	# makes the order not matter anyway.
+	var bot_s: DotNetIdentity = host.spawner.spawn(&"pacer", 1, Transform3D.IDENTITY, 0).value
+	var me_s: DotNetIdentity = host.spawner.spawn(&"bumper", 2, Transform3D.IDENTITY, 0).value
+	var bot_c: DotNetIdentity = guest.spawner.spawn_remote(
+		&"pacer", bot_s.net_id, 1, Transform3D.IDENTITY, 0
+	).value
+	var me_c: DotNetIdentity = guest.spawner.spawn_remote(
+		&"bumper", me_s.net_id, 2, Transform3D.IDENTITY, 0
+	).value
+	var pacer_s := bot_s.behaviours[0] as Pacer
+	var pacer_c := bot_c.behaviours[0] as Pacer
+	var bumper_s := me_s.behaviours[0] as Bumper
+	var bumper_c := me_c.behaviours[0] as Bumper
+
+	var pushed := [0]
+	bumper_s.obstacle_at = func(tick: int) -> Vector3:
+		var bot: Vector3 = pacer_s.at(tick, dt)[0]
+		if absf(bumper_s.position.x - bot.x) < Bumper.APART:
+			pushed[0] += 1
+		return bot
+
+	match estimate:
+		&"oracle":
+			bumper_c.obstacle_at = func(tick: int) -> Vector3:
+				return pacer_s.at(tick, dt)[0]
+		&"heard":
+			bumper_c.obstacle_at = func(_tick: int) -> Vector3:
+				return pacer_c.heard_position if pacer_c.heard_tick >= 0 else Vector3.INF
+		&"ignore":
+			bumper_c.obstacle_at = Callable()
+		&"line":
+			bumper_c.obstacle_at = func(tick: int) -> Vector3:
+				var drawn := guest.interpolator.sample(bot_c.net_id, float(tick))
+				return drawn.get(&"position", Vector3.INF)
+		_:
+			# `extrapolated` and `default`: the call a game makes, at the tick being simulated.
+			bumper_c.obstacle_at = func(tick: int) -> Vector3:
+				var at: Variant = pacer_c.extrapolated_value(&"position", &"velocity", tick)
+				return Vector3.INF if at == null else at as Vector3
+
+	var server_at := {}
+	var client_at := {}
+	for s in range(1, BUMP_TICKS + 1):
+		var c := s + BUMP_LEAD
+		var input := DemoInput.new()
+		input.tick = c
+		input.delta = dt
+		input.move = Vector2(1.0, 0.0)
+		guest.local_inputs().push(input)
+		bumper_c._net_apply_input(input, c)
+		guest.predictor.predict(guest.registry.predicted(), c, dt)
+		client_at[c] = bumper_c.position
+
+		var copy := DemoInput.new()
+		copy.tick = c
+		copy.delta = dt
+		copy.move = input.move
+		host.input_buffer_for(2).push(copy)
+
+		host.server_tick(s)
+		server_at[s] = bumper_s.position
+
+		for payload in wire:
+			guest.clock.tick = c
+			var _applied := guest.receive_snapshot(payload)
+		wire.clear()
+		var _ack := host.receive_ack_payload(2, guest.encode_ack())
+
+	var worst := 0.0
+	var total := 0.0
+	var counted := 0
+	for tick: int in server_at:
+		# The first second is the client finding its feet; nothing in it is about bumps.
+		if tick <= 60 or not client_at.has(tick):
+			continue
+		var gap := (client_at[tick] as Vector3).distance_to(server_at[tick] as Vector3)
+		worst = maxf(worst, gap)
+		total += gap
+		counted += 1
+
+	host.stop()
+	guest.stop()
+	remove_child(host)
+	remove_child(guest)
+	host.free()
+	guest.free()
+	return {"worst": worst, "mean": total / maxf(1.0, float(counted)), "contact": pushed[0]}
+
+
+## A bump-test entity: a [Pacer] the server owns, or a [Bumper] its owner predicts.
+func _build_bump(_context: Dictionary, prefab: StringName, speed: float) -> Node:
+	var body := Node3D.new()
+	body.name = "Entity"
+	var identity := DotNetIdentity.new()
+	identity.name = "NetIdentity"
+	identity.prefab_id = prefab
+	identity.authority = (
+		DotNetIdentity.Authority.SERVER if prefab == &"pacer"
+		else DotNetIdentity.Authority.SHARED
+	)
+	body.add_child(identity)
+	var behaviour: DotNetBehaviour
+	if prefab == &"pacer":
+		var pacer := Pacer.new()
+		pacer.speed = speed
+		behaviour = pacer
+	else:
+		behaviour = Bumper.new()
+	behaviour.name = "Behaviour"
+	body.add_child(behaviour)
+	identity.entity = body
+	identity.behaviours = [behaviour]
+	behaviour.identity = identity
+	behaviour._bind(DotNetConfig.new())
+	return body
 
 
 ## [member DotNetConfig.reconcile_once_per_frame]: snapshots that arrive together are

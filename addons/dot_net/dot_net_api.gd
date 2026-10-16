@@ -7,5 +7,7 @@ extends RefCounted
 ## because every pack built before that no longer compiles against this addon.
 
 # 7: DotNetClock.adopt_tick_rate(rate), the engine's tick rate plus a step cap of a quarter second.
-const LEVEL := 7
+# 8: DotNetBehaviour.extrapolated_value(property, velocity_property, tick) and
+#    DotNetConfig.remote_extrapolation_sec: a remote where it is at an input tick, to bump against.
+const LEVEL := 8
 const OLDEST := 1

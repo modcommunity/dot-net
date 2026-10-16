@@ -57,6 +57,10 @@ var _views: Dictionary = {}
 var _registered: bool = false
 var _config: DotNetConfig = null
 
+## The tick of the snapshot [member _baseline] was last read from, on a receiving peer; -1
+## before the first. What [method extrapolated_value] measures the age of what it heard by.
+var _read_tick: int = -1
+
 
 ## What one peer is believed to have, and what it has confirmed.
 ##
@@ -858,6 +862,7 @@ func _finish_read(tick: int, rewind: bool) -> void:
 			if not _read_now.has(property):
 				_net_write_property(property, _baseline[property])
 
+	_read_tick = tick
 	_net_state_applied(tick)
 
 
@@ -911,6 +916,45 @@ func received_values() -> Dictionary:
 			out[declaration.property] = _baseline[declaration.property]
 
 	return out
+
+
+## Where a remote entity is at [param tick], from what the server last said: the last
+## received [param property] carried along the last received [param velocity_property] (per
+## second) for the ticks since that snapshot, at most
+## [member DotNetConfig.remote_extrapolation_sec]. With that at 0, the default, it is the last
+## received value unchanged. Null if [param property] was never received.
+##
+## [b]For a client predicting against something it does not predict[/b]: its own player
+## bumping a remote player or a bot, at an input tick ahead of everything it has heard. The
+## last heard position is a round trip and a snapshot interval old there, more under loss,
+## and a bump against it is off by the remote's speed times that age
+## (docs/prediction.md#bumping-a-remote). A game's collision asks this for the tick it is
+## simulating, replays included, so a replay agrees with itself.
+##
+## The replicated velocity, not a line through the last two positions as
+## [DotNetInterpolator] draws: that line lags a turn by a snapshot interval and reads a
+## lost snapshot as a slower entity. Velocity is required; without one the value is not
+## moved. Never past the cap, which is held rather than dropped back to the last heard value:
+## falling back would undo the whole extrapolation the moment loss made it matter.
+func extrapolated_value(property: StringName, velocity_property: StringName, tick: int) -> Variant:
+	if not _baseline.has(property):
+		return null
+
+	var heard: Variant = _baseline[property]
+	var cap := _config.remote_extrapolation_sec if _config != null else 0.0
+
+	if cap <= 0.0 or _read_tick < 0 or not _baseline.has(velocity_property):
+		return heard
+
+	var rate := float(_config.tick_rate)
+	var seconds := clampf(float(tick - _read_tick), 0.0, cap * rate) / rate
+	var velocity: Variant = _baseline[velocity_property]
+
+	if heard is Vector3 and velocity is Vector3:
+		return (heard as Vector3) + (velocity as Vector3) * seconds
+	if heard is Vector2 and velocity is Vector2:
+		return (heard as Vector2) + (velocity as Vector2) * seconds
+	return heard
 
 
 ## Forgets what a peer is known to have, so the next collection sends everything.
