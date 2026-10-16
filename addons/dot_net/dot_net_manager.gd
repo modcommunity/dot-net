@@ -183,6 +183,15 @@ var _pending_reconcile: Dictionary = {}
 ## Reconciliations a flush saved by keeping only the newest snapshot's, for [method describe].
 var _reconciles_coalesced: int = 0
 
+# perf_counters(): running totals, never reset, so any reader can difference two reads.
+var _perf_snapshots: int = 0
+var _perf_snapshot_usec: int = 0
+var _perf_reconciles: int = 0
+var _perf_reconcile_usec: int = 0
+var _perf_replayed_ticks: int = 0
+var _perf_client_ticks: int = 0
+var _perf_predict_usec: int = 0
+
 ## peer_id -> newest snapshot tick they have acknowledged, on the server.
 var _acks: Dictionary = {}
 
@@ -628,7 +637,34 @@ func client_tick(tick: int) -> void:
 		return
 
 	flush_reconcile()
+	var started := Time.get_ticks_usec()
 	predictor.predict(registry.predicted(), tick, clock.tick_duration())
+	_perf_predict_usec += Time.get_ticks_usec() - started
+	_perf_client_ticks += 1
+
+
+## Running totals of what a client spends on the network side of a frame, for a
+## frame-time readout (DotMenuNetStat) or a benchmark to difference between two reads.
+## Totals rather than per-frame figures because the reader decides the window: a graph
+## wants the last second, a benchmark the whole run, and neither can be rebuilt from a
+## value that was overwritten every frame. Microseconds of wall-clock time:
+## [code]snapshot_usec[/code] reading and applying snapshots (the reconcile included when
+## it is not deferred), [code]reconcile_usec[/code] rewinding and replaying the predicted
+## entities, [code]replayed_ticks[/code] how many ticks those replays re-simulated (the
+## cost that grows with latency: the lead is a round trip of ticks), and
+## [code]predict_usec[/code] / [code]client_ticks[/code] the forward prediction.
+func perf_counters() -> Dictionary:
+	return {
+		&"snapshots": _perf_snapshots,
+		&"snapshot_usec": _perf_snapshot_usec,
+		&"reconciles": _perf_reconciles,
+		&"reconcile_usec": _perf_reconcile_usec,
+		&"replayed_ticks": _perf_replayed_ticks,
+		&"client_ticks": _perf_client_ticks,
+		&"predict_usec": _perf_predict_usec,
+		# How far the prediction runs ahead of the newest snapshot: what each replay re-runs.
+		&"lead_ticks": clock.input_tick() - clock.received_tick() if clock != null else 0,
+	}
 
 
 ## When [method interpolate_frame] last ran, for the interpolation buffer's rate limit.
@@ -1080,6 +1116,14 @@ func _entity_end_bit(from_bit: int, identity: DotNetIdentity, dirties: Array) ->
 
 ## Applies a snapshot payload. Client side.
 func receive_snapshot(payload: PackedByteArray) -> DotResult:
+	var started := Time.get_ticks_usec()
+	var result := _receive_snapshot(payload)
+	_perf_snapshot_usec += Time.get_ticks_usec() - started
+	_perf_snapshots += 1
+	return result
+
+
+func _receive_snapshot(payload: PackedByteArray) -> DotResult:
 	if is_server:
 		return DotResult.fail(
 			DotError.CODE_FORBIDDEN, "A server does not receive snapshots."
@@ -1455,11 +1499,15 @@ func _observer_for(peer_id: int) -> DotNetIdentity:
 
 
 func _reconcile(identity: DotNetIdentity, tick: int, values: Dictionary) -> void:
+	var started := Time.get_ticks_usec()
 	predictor.reconcile(
 		identity, tick, values, _local_inputs, clock.tick,
 		clock.tick_duration()
 	)
 	_local_inputs.acknowledge(tick)
+	_perf_reconcile_usec += Time.get_ticks_usec() - started
+	_perf_reconciles += 1
+	_perf_replayed_ticks += predictor._last_replay_ticks
 
 
 ## Reconciles every predicted entity against the newest snapshot read for it since the
