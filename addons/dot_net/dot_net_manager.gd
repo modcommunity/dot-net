@@ -660,6 +660,9 @@ func perf_counters() -> Dictionary:
 		&"reconciles": _perf_reconciles,
 		&"reconcile_usec": _perf_reconcile_usec,
 		&"replayed_ticks": _perf_replayed_ticks,
+		# Reconciles that found the prediction already right and replayed nothing
+		# (DotNetConfig.skip_matching_replays); counted in `reconciles` too.
+		&"skipped": predictor.skipped() if predictor != null else 0,
 		&"client_ticks": _perf_client_ticks,
 		&"predict_usec": _perf_predict_usec,
 		# How far the prediction runs ahead of the newest snapshot: what each replay re-runs.

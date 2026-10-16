@@ -353,6 +353,84 @@ func differs(old_value: Variant, new_value: Variant) -> bool:
 	return not _values_equal(old_value, new_value)
 
 
+## The step between two values the wire can carry for this property: what a value moves
+## by being quantised, at most half of it. 0 for an exact type.
+func quantum() -> float:
+	match type:
+		Type.FLOAT_RANGE, Type.VECTOR3_RANGE:
+			return (max_value - min_value) / float((1 << bit_width) - 1)
+		Type.VECTOR3_POSITION:
+			return 2.0 * _extent() / float((1 << _position_bits()) - 1)
+		Type.VECTOR3_VELOCITY:
+			return 2.0 * _max_speed() / float((1 << _velocity_bits()) - 1)
+		Type.ANGLE:
+			return 360.0 / float((1 << bit_width) - 1)
+		Type.DIRECTION:
+			return TAU / float((1 << bit_width) - 1)
+		Type.QUATERNION:
+			return sqrt(2.0) / float((1 << _rotation_bits()) - 1)
+	return 0.0
+
+
+## Whether a value this side computed, [param predicted], is what [param received] (read off
+## the wire) says, as nearly as the wire can say it: within one and a half quanta per
+## component, or the property's [member epsilon] where that is wider, since a change
+## inside the deadband is never sent. Exact for integers, booleans, strings and bytes; a
+## custom codec is compared after a round trip through it.
+##
+## [b]False is always safe.[/b] The predictor uses this to skip a replay whose starting
+## state it already had; a "differs" that did not need to costs one replay, and a "matches"
+## that should not have would leave a misprediction standing. Hence the generous slack
+## only where the wire itself is inexact.
+func matches(predicted: Variant, received: Variant) -> bool:
+	var slack := maxf(epsilon, quantum() * 1.5)
+	match type:
+		Type.BOOL:
+			return bool(predicted) == bool(received)
+		Type.UINT, Type.INT, Type.VARINT:
+			return absi(int(predicted) - int(received)) <= int(epsilon)
+		Type.FLOAT:
+			return absf(float(predicted) - float(received)) <= maxf(epsilon, 1e-5 * maxf(1.0, absf(float(received))))
+		Type.FLOAT_RANGE:
+			return absf(clampf(float(predicted), min_value, max_value) - float(received)) <= slack
+		Type.VECTOR3_POSITION, Type.VECTOR3_VELOCITY, Type.VECTOR3_RANGE:
+			if not (predicted is Vector3 and received is Vector3):
+				return false
+			var lo := -INF
+			var hi := INF
+			if type == Type.VECTOR3_RANGE:
+				lo = min_value
+				hi = max_value
+			elif type == Type.VECTOR3_VELOCITY:
+				lo = -_max_speed()
+				hi = _max_speed()
+			else:
+				lo = -_extent()
+				hi = _extent()
+			var d := ((predicted as Vector3).clampf(lo, hi) - (received as Vector3)).abs()
+			return maxf(d.x, maxf(d.y, d.z)) <= slack
+		Type.ANGLE:
+			return absf(angle_difference(deg_to_rad(float(predicted)), deg_to_rad(float(received)))) <= deg_to_rad(slack)
+		Type.DIRECTION:
+			if not (predicted is Vector3 and received is Vector3):
+				return false
+			return (predicted as Vector3).normalized().angle_to(received as Vector3) <= slack * 2.0
+		Type.QUATERNION:
+			if not (predicted is Quaternion and received is Quaternion):
+				return false
+			return (predicted as Quaternion).normalized().angle_to(received as Quaternion) <= slack * 4.0
+		Type.STRING, Type.BYTES:
+			return _values_equal(predicted, received)
+		Type.CUSTOM:
+			if not write_fn.is_valid() or not read_fn.is_valid():
+				return false
+			var w := DotNetWriter.new()
+			write(w, predicted)
+			var r := DotNetReader.new(w.to_bytes())
+			return _values_equal(read(r), received)
+	return false
+
+
 static func _values_equal(a: Variant, b: Variant) -> bool:
 	# typeof first: `==` between a null and a Vector3 is false, but between two
 	# different types it can be true in ways that hide a real change.

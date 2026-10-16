@@ -116,6 +116,29 @@ extends DotConfig
 ## [method DotNetManager.flush_reconcile] itself, or leaves this off.
 @export var reconcile_once_per_frame: bool = false
 
+## Skip a reconciliation whose server state the client already predicted.
+##
+## The predictor keeps what each predicted tick produced. When a snapshot's state for tick
+## T matches what this client predicted for T (as nearly as the wire carries it; see
+## [method DotNetVar.matches]), rewinding to it and replaying the lead would recompute the
+## state the entity already has, so nothing is done. Most snapshots are like that: a
+## prediction is only wrong when something the client could not know happened.
+##
+## [b]This is what uncouples frame time from latency.[/b] A replay costs the lead in ticks
+## times one simulation, and the lead is a round trip of ticks, so without this every
+## frame paid in proportion to the ping: in a browser, where the simulation is several
+## times slower than native, a 100 ms ping was several milliseconds of every frame, and a
+## longer frame raises the measured ping again.
+##
+## Needs [member reconcile_once_per_frame]: a deferred reconcile is decided while the
+## properties still hold the prediction; an immediate one has already written the server's
+## older state over them, and only the replay gets back.
+##
+## Off by default because a state outside [member DotNetBehaviour.net_vars] that only a
+## replay re-derives (a cache rebuilt in [code]_net_simulate[/code] from the properties) is
+## left as the prediction had it; a game turns it on after its prediction suites pass.
+@export var skip_matching_replays: bool = false
+
 ## Position error before a predicted entity is corrected, in metres.
 ##
 ## Below this the prediction is treated as right, which stops floating-point noise

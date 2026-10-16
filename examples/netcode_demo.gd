@@ -341,7 +341,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 402
+const CHECKS := 406
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -409,6 +409,7 @@ func _run() -> void:
 	_test_standing_still()
 	_test_remote_bumps()
 	_test_reconcile_once_per_frame()
+	_test_skip_matching_replays()
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
 	_test_snapshot_parts()
@@ -3263,6 +3264,132 @@ func _test_reconcile_once_per_frame() -> void:
 	_check("and the rest counted as coalesced (%d)" % coalesced, coalesced == read - bursts)
 	_check("nothing moves before the flush", untouched)
 	_check("and both land in the same place (worst %.6f m apart)" % worst_apart, worst_apart < 1e-4)
+
+	host.stop()
+	remove_child(host)
+	host.free()
+	for guest in guests:
+		guest.stop()
+		remove_child(guest)
+		guest.free()
+
+
+## [member DotNetConfig.skip_matching_replays]: a snapshot the prediction already reached
+## replays nothing, and one it did not is replayed as before. Two clients read the same
+## snapshots: A replays every one, B skips the ones it predicted. The server overrules the
+## input every 16 ticks, so B has real corrections to make; it must make them (end where A
+## does, within what the wire's quantisation allows) and skip the rest.
+func _test_skip_matching_replays() -> void:
+	print("")
+	print("[replays skipped when the prediction matched]")
+	const TICKS := 96
+	const LEAD := 6
+
+	var host := DotNetManager.new()
+	host.name = "SkipServer"
+	host.is_server = true
+	host.service_scope = &"skip_server"
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 60
+	add_child(host)
+
+	var guests: Array[DotNetManager] = []
+	for skip in [false, true]:
+		var guest := DotNetManager.new()
+		guest.name = "SkipClient_%d" % int(skip)
+		guest.is_server = false
+		guest.service_scope = StringName("skip_client_%d" % int(skip))
+		guest.local_peer_id = 2
+		guest.auto_tick = false
+		guest.config_file = ""
+		guest.config = DotNetConfig.new()
+		guest.config.tick_rate = 60
+		guest.config.snapshot_rate = 60
+		guest.config.input_margin_ticks = LEAD
+		guest.config.skip_matching_replays = skip
+		# Both deferred: a skip needs the prediction still in the properties when it decides.
+		guest.config.reconcile_once_per_frame = true
+		add_child(guest)
+		var _set := guest.setup()
+		guests.append(guest)
+
+	var _a := host.setup()
+	var wire: Array[PackedByteArray] = []
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d == DotNetMessage.Delivery.UNRELIABLE:
+			wire.append(payload)
+
+	var _c := host.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
+	var moving: Array[Movement] = []
+	for guest in guests:
+		var _s := guest.start()
+		guest.spawner.register_factory(&"player", _build_player)
+		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
+			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
+		).value
+		moving.append(mirror.behaviours[0] as Movement)
+
+	var before: Array[Dictionary] = []
+	for guest in guests:
+		before.append(guest.perf_counters())
+
+	var worst_apart := 0.0
+	var final_apart := 0.0
+	var overruled := 0
+	for s in range(1, TICKS + 1):
+		var c := s + LEAD
+		var move := Vector2(1.0, 0.0) if (s / 8) % 2 == 0 else Vector2(0.0, 1.0)
+		for g in range(2):
+			var input := DemoInput.new()
+			input.tick = c
+			input.delta = 1.0 / 60.0
+			input.move = move
+			guests[g].local_inputs().push(input)
+			moving[g]._net_apply_input(input, c)
+			guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
+
+		var copy := DemoInput.new()
+		copy.tick = c
+		copy.delta = 1.0 / 60.0
+		copy.move = move if s % 16 != 0 else Vector2(-1.0, 0.0)
+		if s % 16 == 0:
+			overruled += 1
+		host.input_buffer_for(2).push(copy)
+		host.server_tick(s)
+
+		for payload in wire:
+			for guest in guests:
+				guest.clock.tick = c
+				var _r := guest.receive_snapshot(payload)
+				guest.flush_reconcile()
+				var _ack := host.receive_ack_payload(2, guest.encode_ack())
+		wire.clear()
+		final_apart = moving[0].position.distance_to(moving[1].position)
+		worst_apart = maxf(worst_apart, final_apart)
+
+	var a := guests[0].perf_counters()
+	var b := guests[1].perf_counters()
+	var replayed_a := int(a[&"replayed_ticks"]) - int(before[0][&"replayed_ticks"])
+	var replayed_b := int(b[&"replayed_ticks"]) - int(before[1][&"replayed_ticks"])
+	var skipped_b := int(b[&"skipped"]) - int(before[1][&"skipped"])
+	var reconciles_b := int(b[&"reconciles"]) - int(before[1][&"reconciles"])
+
+	_check("with it off every snapshot replays the lead (%d ticks)" % replayed_a, replayed_a >= TICKS * LEAD / 2)
+	_check("with it on most are skipped (%d of %d reconciles)" % [skipped_b, reconciles_b],
+		skipped_b > 0 and skipped_b >= reconciles_b - overruled * 3)
+	_check("and it replays a fraction of the ticks (%d against %d)" % [replayed_b, replayed_a],
+		replayed_b > 0 and replayed_b * 4 < replayed_a)
+	# Within the wire's quantisation: B kept its own unquantised prediction where A rewound
+	# to the server's quantised state; a correction B missed would be a metre or more.
+	_check("and lands where replaying everything does (worst %.4f m, last %.4f m apart)" % [worst_apart, final_apart],
+		worst_apart < 0.05)
 
 	host.stop()
 	remove_child(host)

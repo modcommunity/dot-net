@@ -44,6 +44,11 @@ var _corrections_applied: int = 0
 var _snaps: int = 0
 var _last_replay_ticks: int = 0
 var _worst_error: float = 0.0
+var _skipped: int = 0
+
+## net_id -> {tick: {property: value}}: what each predicted tick produced, for
+## [member DotNetConfig.skip_matching_replays]. Trimmed to the unacknowledged window.
+var _predicted: Dictionary = {}
 
 
 func _init(p_config: DotNetConfig) -> void:
@@ -70,6 +75,55 @@ func predict(
 
 		for behaviour in identity.behaviours:
 			behaviour._net_simulate(tick, delta)
+		_remember(identity, tick)
+
+
+## Keeps what [param tick] produced for [param identity], when replays may be skipped.
+func _remember(identity: DotNetIdentity, tick: int) -> void:
+	if not config.skip_matching_replays or not config.reconcile_once_per_frame:
+		return
+	var values := {}
+	for behaviour in identity.behaviours:
+		for declaration in behaviour.net_vars:
+			values[declaration.property] = behaviour._net_read_property(declaration.property)
+	var ticks: Dictionary = _predicted.get(identity.net_id, {})
+	if ticks.is_empty():
+		_predicted[identity.net_id] = ticks
+	ticks[tick] = values
+	# Bounded by the input history: an older tick could never be replayed from anyway.
+	var oldest := tick - config.input_history_ticks
+	if ticks.size() > config.input_history_ticks:
+		for t: int in ticks.keys():
+			if t < oldest:
+				ticks.erase(t)
+
+
+## Whether the server's [param values] for [param server_tick] are what this client
+## predicted for that tick, every property of it.
+func _predicted_matches(identity: DotNetIdentity, server_tick: int, values: Dictionary) -> bool:
+	var ticks: Dictionary = _predicted.get(identity.net_id, {})
+	var mine: Dictionary = ticks.get(server_tick, {})
+	if mine.is_empty():
+		return false
+	var compared := 0
+	for behaviour in identity.behaviours:
+		for declaration in behaviour.net_vars:
+			if not values.has(declaration.property):
+				continue
+			if not mine.has(declaration.property):
+				return false
+			if not declaration.matches(mine[declaration.property], values[declaration.property]):
+				return false
+			compared += 1
+	return compared > 0
+
+
+## Drops the remembered ticks up to [param through]: acknowledged, never compared again.
+func _forget_through(net_id: int, through: int) -> void:
+	var ticks: Dictionary = _predicted.get(net_id, {})
+	for t: int in ticks.keys():
+		if t <= through:
+			ticks.erase(t)
 
 
 # --- Reconciliation --------------------------------------------------------
@@ -93,6 +147,18 @@ func reconcile(
 	tick_delta: float
 ) -> DotResult:
 	if not identity.is_predicted():
+		return DotResult.success(0)
+
+	# The prediction already reached this state: a rewind and a replay would compute what
+	# the entity holds now. See DotNetConfig.skip_matching_replays.
+	# Deferred reconciles only: then the properties still hold the prediction (the manager
+	# held them through the read), where an immediate one has already written the server's
+	# older state over them and needs the replay to get back.
+	if config.skip_matching_replays and config.reconcile_once_per_frame \
+			and _predicted_matches(identity, server_tick, authoritative_values):
+		_forget_through(identity.net_id, server_tick)
+		_skipped += 1
+		_last_replay_ticks = 0
 		return DotResult.success(0)
 
 	# What the client currently shows, before rewinding. Needed to measure the
@@ -176,6 +242,8 @@ func reconcile(
 
 		for behaviour in identity.behaviours:
 			behaviour._net_simulate(replay_tick, tick_delta)
+		# The replay is the prediction now; what the first pass remembered is not.
+		_remember(identity, replay_tick)
 
 		replayed += 1
 		replay_tick += 1
@@ -187,6 +255,13 @@ func reconcile(
 
 	_replays += 1
 	_last_replay_ticks = replayed
+	if config.skip_matching_replays:
+		_forget_through(identity.net_id, server_tick)
+		# A replay that stopped short left the ticks after it as the old prediction had them.
+		var ticks: Dictionary = _predicted.get(identity.net_id, {})
+		for t: int in ticks.keys():
+			if t >= replay_tick:
+				ticks.erase(t)
 
 	# 3. Measure how wrong the prediction was.
 	var after := _capture_visual(identity)
@@ -297,10 +372,17 @@ static func _visual_error(before: Dictionary, after: Dictionary) -> float:
 
 func clear() -> void:
 	_corrections.clear()
+	_predicted.clear()
 
 
 func forget(net_id: int) -> void:
 	_corrections.erase(net_id)
+	_predicted.erase(net_id)
+
+
+## Reconciliations skipped because the prediction already matched the server.
+func skipped() -> int:
+	return _skipped
 
 
 ## Fraction of replays that needed a visible correction.
@@ -318,6 +400,7 @@ func describe() -> Dictionary:
 	return {
 		"enabled": config.enable_prediction,
 		"replays": _replays,
+		"skipped": _skipped,
 		"last_replay_ticks": _last_replay_ticks,
 		"corrections": _corrections_applied,
 		"snaps": _snaps,
