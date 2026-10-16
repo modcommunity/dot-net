@@ -30,6 +30,13 @@ class Movement extends DotNetBehaviour:
 	## so every section written before it sees the node it always saw.
 	var moves_body: bool = false
 
+	## Whether the simulation runs on state of its own, copied into the properties after
+	## each tick and back out of them in [method _net_state_applied], as every game's
+	## controller does. Off by default: the sections before it simulate on the properties.
+	var keeps_own_state: bool = false
+	var _sim_position: Vector3 = Vector3.ZERO
+	var _sim_velocity: Vector3 = Vector3.ZERO
+
 	func _register_net_vars() -> void:
 		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION) \
 			.interpolated().with_priority(5.0)
@@ -44,6 +51,14 @@ class Movement extends DotNetBehaviour:
 	## Deterministic given the same input and starting state — the property the
 	## whole prediction model depends on.
 	func _net_simulate(_tick: int, delta: float) -> void:
+		if keeps_own_state:
+			if current_input != null:
+				_sim_velocity.x = current_input.move.x * 10.0
+				_sim_velocity.z = current_input.move.y * 10.0
+			_sim_position += _sim_velocity * delta
+			position = _sim_position
+			velocity = _sim_velocity
+			return
 		if current_input != null:
 			velocity.x = current_input.move.x * 10.0
 			velocity.z = current_input.move.y * 10.0
@@ -51,6 +66,11 @@ class Movement extends DotNetBehaviour:
 		position += velocity * delta
 		if moves_body:
 			_move_body()
+
+	func _net_state_applied(_tick: int) -> void:
+		if keeps_own_state:
+			_sim_position = position
+			_sim_velocity = velocity
 
 	func _move_body() -> void:
 		var body := get_parent() as Node3D
@@ -341,7 +361,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 406
+const CHECKS := 410
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -409,7 +429,8 @@ func _run() -> void:
 	_test_standing_still()
 	_test_remote_bumps()
 	_test_reconcile_once_per_frame()
-	_test_skip_matching_replays()
+	_test_skip_matching_replays(false)
+	_test_skip_matching_replays(true)
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
 	_test_snapshot_parts()
@@ -3279,9 +3300,15 @@ func _test_reconcile_once_per_frame() -> void:
 ## snapshots: A replays every one, B skips the ones it predicted. The server overrules the
 ## input every 16 ticks, so B has real corrections to make; it must make them (end where A
 ## does, within what the wire's quantisation allows) and skip the rest.
-func _test_skip_matching_replays() -> void:
+##
+## [param own_state]: the behaviour simulates on state of its own and copies the
+## properties into it from `_net_state_applied`, as every game does. Reading a deferred
+## snapshot runs that hook with the server's older state, and the manager then puts only
+## the properties back; a skip that left it there had the next tick simulate from a round
+## trip ago (game-arena's headless_feel, 2026-10-16: 300 mm, 31 corrections at 40 ms).
+func _test_skip_matching_replays(own_state: bool) -> void:
 	print("")
-	print("[replays skipped when the prediction matched]")
+	print("[replays skipped when the prediction matched%s]" % (", own simulation state" if own_state else ""))
 	const TICKS := 96
 	const LEAD := 6
 
@@ -3334,7 +3361,11 @@ func _test_skip_matching_replays() -> void:
 		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
 			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
 		).value
-		moving.append(mirror.behaviours[0] as Movement)
+		var movement := mirror.behaviours[0] as Movement
+		movement.keeps_own_state = own_state
+		movement._sim_position = movement.position
+		movement._sim_velocity = movement.velocity
+		moving.append(movement)
 
 	var before: Array[Dictionary] = []
 	for guest in guests:

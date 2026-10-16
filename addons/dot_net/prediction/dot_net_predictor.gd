@@ -156,6 +156,16 @@ func reconcile(
 	# older state over them and needs the replay to get back.
 	if config.skip_matching_replays and config.reconcile_once_per_frame \
 			and _predicted_matches(identity, server_tick, authoritative_values):
+		# [b]The properties hold the prediction again; the game's simulation does not.[/b]
+		# Reading the snapshot ran `_net_state_applied` with the server's state (that hook
+		# is where every game rewinds its simulation, by copying the properties into it),
+		# and the manager then put back only the properties. A replay overwrites that
+		# simulation from the rewound properties anyway; a skip has to hand it the
+		# prediction back the same way, or the next tick simulates from a round trip ago
+		# and the eye jumps back by the lead: game-arena's headless_feel at a steady
+		# 40 ms, 300 mm and 31 corrections (2026-10-16).
+		for behaviour in identity.behaviours:
+			behaviour._net_state_applied(server_tick)
 		_forget_through(identity.net_id, server_tick)
 		_skipped += 1
 		_last_replay_ticks = 0
