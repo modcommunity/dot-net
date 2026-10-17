@@ -103,6 +103,23 @@ func sanitise(tick_rate: int) -> void:
 	_sanitise()
 
 
+## Rounds this input in place to exactly what the server will decode: written and read
+## back through the wire format.
+##
+## [b]A client predicts on what it sends, not on what it sampled.[/b] A view angle goes
+## out in 12 bits and a move axis in 10, so the server simulates on the rounded command,
+## and a client that simulated on the raw one walks a slightly different line every tick
+## that the view turns. A replay does not hide it, because the replay runs on the same raw
+## command. Each tick is a fraction of a millimetre, but nothing resynchronises a skipped
+## replay ([member DotNetConfig.skip_matching_replays]), so it adds up past what
+## [method DotNetVar.matches] allows and the skip stops working while the player is
+## turning, which is always.
+func round_trip() -> void:
+	var writer := DotNetWriter.new(32)
+	write(writer)
+	read(DotNetReader.new(writer.to_bytes()))
+
+
 func equals(other: DotNetInput) -> bool:
 	if other == null:
 		return false

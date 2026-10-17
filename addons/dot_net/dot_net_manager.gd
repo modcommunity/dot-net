@@ -643,6 +643,30 @@ func client_tick(tick: int) -> void:
 	_perf_client_ticks += 1
 
 
+## One predicted tick for a host that records its own command and simulates it, which is
+## what a game with its own [code]client_tick[/code] does (game-arena's bridge): the snapshots
+## read since the last tick are reconciled first ([method flush_reconcile]), then every
+## predicted entity is handed [param input] and simulated for [param tick].
+##
+## [b]Through the predictor, not around it.[/b] A host that looped over
+## [method DotNetRegistry.predicted] and called [code]_net_simulate[/code] itself predicted
+## the same thing, but the predictor never saw those ticks: with
+## [member DotNetConfig.skip_matching_replays] nothing they produced was remembered, so a
+## snapshot for any tick a replay had not covered could never match and replayed the whole
+## lead, and [method perf_counters] said the forward prediction cost nothing. (API 10.)
+func predict_tick(tick: int, input: DotNetInput = null) -> void:
+	if not clock.is_synced():
+		return
+	flush_reconcile()
+	var started := Time.get_ticks_usec()
+	# The buffered input is this same object, so its replays run on the rounded one too.
+	if input != null and config.predict_wire_input:
+		input.round_trip()
+	predictor.predict(registry.predicted(), tick, clock.tick_duration(), input)
+	_perf_predict_usec += Time.get_ticks_usec() - started
+	_perf_client_ticks += 1
+
+
 ## Running totals of what a client spends on the network side of a frame, for a
 ## frame-time readout (DotMenuNetStat) or a benchmark to difference between two reads.
 ## Totals rather than per-frame figures because the reader decides the window: a graph

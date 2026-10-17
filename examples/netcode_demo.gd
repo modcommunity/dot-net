@@ -34,8 +34,13 @@ class Movement extends DotNetBehaviour:
 	## each tick and back out of them in [method _net_state_applied], as every game's
 	## controller does. Off by default: the sections before it simulate on the properties.
 	var keeps_own_state: bool = false
+	## False plays a dead player: DotNetBehaviour._net_predicts.
+	var predicts: bool = true
 	var _sim_position: Vector3 = Vector3.ZERO
 	var _sim_velocity: Vector3 = Vector3.ZERO
+
+	func _net_predicts() -> bool:
+		return predicts
 
 	func _register_net_vars() -> void:
 		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION) \
@@ -361,7 +366,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 410
+const CHECKS := 419
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -2206,6 +2211,22 @@ func _test_prediction() -> void:
 	_check("the predictor reports what it did",
 		predictor.describe()["replays"] == 2)
 
+	# An entity that would simulate nothing (a dead player) keeps the rewind and replays
+	# nothing: DotNetBehaviour._net_predicts.
+	var dead := _in_tree(_make_entity(&"player", 2))
+	dead.is_owner = true
+	dead.is_authoritative = false
+	var dead_movement := dead.behaviours[0] as Movement
+	dead_movement.predicts = false
+	dead_movement.position = Vector3(9.0, 0.0, 0.0)
+	var unpredicted_before := int(predictor.describe()["unpredicted"])
+	var kept := predictor.reconcile(dead, 10, authoritative_at_10, buffer, 20, dt)
+	_check("a reconcile of an entity that is not predicting rewinds and replays nothing (%d ticks)" % int(kept.value),
+		kept.ok and int(kept.value) == 0
+			and dead_movement.position.is_equal_approx(authoritative_at_10[&"position"])
+			and int(predictor.describe()["unpredicted"]) == unpredicted_before + 1)
+	_out_of_tree(dead)
+
 	for entity in [server_entity, client_entity, lonely, untouched, holed_server, holed_client]:
 		_out_of_tree(entity)
 
@@ -3324,12 +3345,18 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	host.config.snapshot_rate = 60
 	add_child(host)
 
+	# A: replays everything. B: skips, predicting through `DotNetPredictor.predict`.
+	# C: skips, predicting through `DotNetManager.predict_tick` as a host with its own client
+	# tick does. D: skips, but simulates its predicted behaviours by hand, as game-arena's
+	# bridge did until 2026-10-17: the predictor never remembers those ticks, so only a snapshot
+	# a replay happened to cover can match, and most replay the lead anyway.
 	var guests: Array[DotNetManager] = []
-	for skip in [false, true]:
+	for g in range(4):
+		var skip := g > 0
 		var guest := DotNetManager.new()
-		guest.name = "SkipClient_%d" % int(skip)
+		guest.name = "SkipClient_%d" % g
 		guest.is_server = false
-		guest.service_scope = StringName("skip_client_%d" % int(skip))
+		guest.service_scope = StringName("skip_client_%d" % g)
 		guest.local_peer_id = 2
 		guest.auto_tick = false
 		guest.config_file = ""
@@ -3377,14 +3404,20 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	for s in range(1, TICKS + 1):
 		var c := s + LEAD
 		var move := Vector2(1.0, 0.0) if (s / 8) % 2 == 0 else Vector2(0.0, 1.0)
-		for g in range(2):
+		for g in range(guests.size()):
 			var input := DemoInput.new()
 			input.tick = c
 			input.delta = 1.0 / 60.0
 			input.move = move
 			guests[g].local_inputs().push(input)
+			if g == 2 and guests[g].clock.is_synced():
+				guests[g].predict_tick(c, input)
+				continue
 			moving[g]._net_apply_input(input, c)
-			guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
+			if g == 3:
+				moving[g]._net_simulate(c, 1.0 / 60.0)
+			else:
+				guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
 
 		var copy := DemoInput.new()
 		copy.tick = c
@@ -3411,6 +3444,12 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	var replayed_b := int(b[&"replayed_ticks"]) - int(before[1][&"replayed_ticks"])
 	var skipped_b := int(b[&"skipped"]) - int(before[1][&"skipped"])
 	var reconciles_b := int(b[&"reconciles"]) - int(before[1][&"reconciles"])
+	var tc := guests[2].perf_counters()
+	var replayed_c := int(tc[&"replayed_ticks"]) - int(before[2][&"replayed_ticks"])
+	var skipped_c := int(tc[&"skipped"]) - int(before[2][&"skipped"])
+	var reconciles_c := int(tc[&"reconciles"]) - int(before[2][&"reconciles"])
+	var td := guests[3].perf_counters()
+	var replayed_d := int(td[&"replayed_ticks"]) - int(before[3][&"replayed_ticks"])
 
 	_check("with it off every snapshot replays the lead (%d ticks)" % replayed_a, replayed_a >= TICKS * LEAD / 2)
 	_check("with it on most are skipped (%d of %d reconciles)" % [skipped_b, reconciles_b],
@@ -3421,6 +3460,25 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	# to the server's quantised state; a correction B missed would be a metre or more.
 	_check("and lands where replaying everything does (worst %.4f m, last %.4f m apart)" % [worst_apart, final_apart],
 		worst_apart < 0.05)
+	_check("predict_tick skips as much (%d of %d reconciles, %d ticks) and counts its time (%d ticks, %d us)"
+		% [skipped_c, reconciles_c, replayed_c, int(tc[&"client_ticks"]) - int(before[2][&"client_ticks"]), int(tc[&"predict_usec"]) - int(before[2][&"predict_usec"])],
+		skipped_c >= reconciles_c - overruled * 3 - 2 and replayed_c * 4 < replayed_a
+		and int(tc[&"client_ticks"]) - int(before[2][&"client_ticks"]) >= TICKS - 2)
+	_check("where simulating by hand, unremembered, replays most of the lead anyway (%d ticks against %d)" % [replayed_d, replayed_c],
+		replayed_d > replayed_c * 2)
+	var c_apart := moving[2].position.distance_to(moving[0].position)
+	_check("and predict_tick lands where replaying everything does (%.4f m)" % c_apart, c_apart < 0.05)
+	# What predict_tick simulates is what the server decodes (predict_wire_input).
+	var raw := DemoInput.new()
+	raw.tick = 7
+	raw.move = Vector2(0.123456, -0.654321)
+	var sent := DotNetWriter.new()
+	raw.write(sent)
+	var decoded := DemoInput.new()
+	decoded.read(DotNetReader.new(sent.to_bytes()))
+	raw.round_trip()
+	_check("round_trip rounds an input to what the server decodes (%s against %s)" % [raw.move, decoded.move],
+		raw.move == decoded.move and raw.tick == 7 and not is_equal_approx(raw.move.x, 0.123456))
 
 	host.stop()
 	remove_child(host)

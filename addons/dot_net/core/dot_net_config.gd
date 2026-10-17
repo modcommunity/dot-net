@@ -139,6 +139,11 @@ extends DotConfig
 ## left as the prediction had it; a game turns it on after its prediction suites pass.
 @export var skip_matching_replays: bool = false
 
+## Whether [method DotNetManager.predict_tick] rounds each input to the wire
+## ([method DotNetInput.round_trip]) before it is simulated, so the prediction runs on
+## the command the server decodes. On by default; off only to measure what it costs not to.
+@export var predict_wire_input: bool = true
+
 ## Position error before a predicted entity is corrected, in metres.
 ##
 ## Below this the prediction is treated as right, which stops floating-point noise

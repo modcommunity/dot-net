@@ -153,6 +153,21 @@ func _net_simulate(_tick: int, _delta: float) -> void:
 	pass
 
 
+## Whether simulating this behaviour on its owning client would change anything now.
+## Asked on a predicted entity after a reconcile has rewound it to the server's state.
+##
+## [b]A replay of a simulation that does nothing is the whole lead for nothing.[/b] A dead
+## player simulates nothing, while the server moves its body anyway (a fall, a push, a
+## spectator's view), so no snapshot can match the prediction and every one replayed the
+## whole input lead to land where the rewind had already put it: game-arena's client,
+## dead, replayed 10 ticks on every snapshot (2026-10-17). False when every behaviour of
+## the entity says so, and the rewind is kept without a replay. Default true. Decide from
+## the rewound state ([method _net_state_applied] has run), so the snapshot that
+## respawns the player replays as usual.
+func _net_predicts() -> bool:
+	return true
+
+
 ## Called on a receiving peer after a batch of properties is applied.
 ##
 ## For work that should happen once per update rather than once per property.

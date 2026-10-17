@@ -46,6 +46,17 @@ var _last_replay_ticks: int = 0
 var _worst_error: float = 0.0
 var _skipped: int = 0
 
+## Why a reconcile could not be skipped: property name -> count, plus [code]&"(no prediction)"[/code]
+## for a server tick this client never remembered predicting. The first property that differed
+## is the one counted. What says which part of a game's state the prediction gets wrong.
+var _mismatches: Dictionary = {}
+## Reconciles that rewound and did not replay, because the entity was not predicting
+## (DotNetBehaviour._net_predicts).
+var _unpredicted := 0
+## The newest of them, with both values: whether a mismatch is a real divergence or a
+## rounding one is the first question and the counts cannot answer it.
+var _last_mismatch: Dictionary = {}
+
 ## net_id -> {tick: {property: value}}: what each predicted tick produced, for
 ## [member DotNetConfig.skip_matching_replays]. Trimmed to the unacknowledged window.
 var _predicted: Dictionary = {}
@@ -61,10 +72,15 @@ func _init(p_config: DotNetConfig) -> void:
 ##
 ## Called on the client each tick, after the input for that tick has been recorded.
 ## The same code path the server runs, which is what makes the two agree.
+##
+## [param input], when given, is handed to each behaviour's [code]_net_apply_input[/code]
+## first, exactly as a replay does: the host that records its own command and predicts it
+## in one go ([method DotNetManager.predict_tick]).
 func predict(
 	identities: Array[DotNetIdentity],
 	tick: int,
-	delta: float
+	delta: float,
+	input: DotNetInput = null
 ) -> void:
 	if not config.enable_prediction:
 		return
@@ -74,6 +90,8 @@ func predict(
 			continue
 
 		for behaviour in identity.behaviours:
+			if input != null and behaviour.has_method("_net_apply_input"):
+				behaviour.call("_net_apply_input", input, tick)
 			behaviour._net_simulate(tick, delta)
 		_remember(identity, tick)
 
@@ -104,6 +122,7 @@ func _predicted_matches(identity: DotNetIdentity, server_tick: int, values: Dict
 	var ticks: Dictionary = _predicted.get(identity.net_id, {})
 	var mine: Dictionary = ticks.get(server_tick, {})
 	if mine.is_empty():
+		_note_mismatch(&"(no prediction)")
 		return false
 	var compared := 0
 	for behaviour in identity.behaviours:
@@ -111,11 +130,19 @@ func _predicted_matches(identity: DotNetIdentity, server_tick: int, values: Dict
 			if not values.has(declaration.property):
 				continue
 			if not mine.has(declaration.property):
+				_note_mismatch(declaration.property)
 				return false
 			if not declaration.matches(mine[declaration.property], values[declaration.property]):
+				_note_mismatch(declaration.property)
+				_last_mismatch = {"tick": server_tick, "property": declaration.property,
+					"predicted": mine[declaration.property], "received": values[declaration.property]}
 				return false
 			compared += 1
 	return compared > 0
+
+
+func _note_mismatch(property: StringName) -> void:
+	_mismatches[property] = int(_mismatches.get(property, 0)) + 1
 
 
 ## Drops the remembered ticks up to [param through]: acknowledged, never compared again.
@@ -197,11 +224,19 @@ func reconcile(
 		# that had stopped it.
 		return DotResult.success(0)
 
-	# 2. Replay every input the server has not confirmed yet.
+	# 2. Replay every input the server has not confirmed yet, unless nothing of the entity
+	# would simulate (DotNetBehaviour._net_predicts): then the rewound state is the answer.
 	var replayed := 0
 	var replay_tick := server_tick + 1
+	var predicting := false
+	for behaviour in identity.behaviours:
+		if behaviour._net_predicts():
+			predicting = true
+			break
+	if not predicting:
+		_unpredicted += 1
 
-	while replay_tick <= current_tick:
+	while predicting and replay_tick <= current_tick:
 		var input := input_buffer.peek(replay_tick)
 
 		# [b]A hole is not a gap.[/b] A tick with no input, but older and newer ones in the buffer,
@@ -417,4 +452,7 @@ func describe() -> Dictionary:
 		"correction_rate": "%.1f%%" % (correction_rate() * 100.0),
 		"worst_error": "%.3f m" % _worst_error,
 		"pending": _corrections.size(),
+		"mismatches": _mismatches.duplicate(),
+		"unpredicted": _unpredicted,
+		"last_mismatch": _last_mismatch.duplicate(),
 	}

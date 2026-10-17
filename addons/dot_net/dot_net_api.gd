@@ -10,5 +10,9 @@ extends RefCounted
 # 8: DotNetBehaviour.extrapolated_value(property, velocity_property, tick) and
 #    DotNetConfig.remote_extrapolation_sec: a remote where it is at an input tick, to bump against.
 # 9: DotNetManager.perf_counters(), running totals of snapshot, reconcile and predict time.
-const LEVEL := 9
+# 10: DotNetManager.predict_tick(tick, input), and DotNetPredictor.predict's optional input:
+#     a host with its own client tick predicts through the predictor, which remembers the tick
+#     and rounds the input to the wire first (DotNetInput.round_trip, config.predict_wire_input).
+#     DotNetBehaviour._net_predicts(): false keeps a reconcile's rewind without a replay.
+const LEVEL := 10
 const OLDEST := 1
