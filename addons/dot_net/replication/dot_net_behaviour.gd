@@ -121,6 +121,17 @@ class PeerView extends RefCounted:
 	## it on buys. See [method DotNetManager.receive_ack].
 	var strict: bool = false
 
+	## The snapshot serial ([member DotNetBehaviour._read_serial]) whose reads [member believed]
+	## matches, property for property, or -1 when it is not known to match any. What lets
+	## [method DotNetBehaviour.collect_dirty] share one answer between peers.
+	var synced_serial: int = -1
+
+	## What [method DotNetBehaviour.collect_dirty] last returned for this peer, and in which
+	## snapshot: [method DotNetBehaviour.write_state] given that same array in that same
+	## snapshot leaves [member believed] equal to the snapshot's reads.
+	var collected: Array[DotNetVar] = []
+	var collected_serial: int = -1
+
 
 # --- Subclass interface ----------------------------------------------------
 
@@ -219,6 +230,11 @@ var _snapshot_reads_open: bool = false
 ## set, as a bitmask of declaration indices. See [method write_state].
 var _encoded: Dictionary = {}
 
+## The last declarations array [method _signature] was worked out for within this snapshot,
+## and its answer.
+var _signed: Array = []
+var _signed_key: int = -1
+
 ## Declaration -> its index in [member net_vars], built once [method _bind] has the list.
 var _index_of: Dictionary = {}
 
@@ -227,14 +243,50 @@ var _index_of: Dictionary = {}
 var _align_mask: int = 0
 
 
+## One per [method begin_snapshot_reads]. A [PeerView] names the snapshot its record
+## matches by this, and [member _reads_by_serial] keeps that snapshot's reads.
+var _read_serial: int = 0
+
+## Serial -> that snapshot's reads, for the last [constant _KEPT_READS] snapshots: what a
+## peer in step was last brought up to, for [method collect_dirty] to compare against.
+var _reads_by_serial: Dictionary = {}
+
+## Within one snapshot: [code]synced serial * 2 + is owner[/code] -> the dirty set every
+## peer in step from that serial is owed. See [method collect_dirty].
+var _shared_dirty: Dictionary = {}
+
+## Whether this snapshot's dirty sets may be shared: nothing declared with an epsilon or a
+## rate limit, whose answers depend on more than the two values compared. Worked out per
+## snapshot, since both are exported and may change after [method _bind].
+var _share_dirty: bool = false
+
+## How many snapshots' reads are kept. A staggered server's peer is a snapshot period behind
+## the newest serial (one serial per tick), so this covers up to 16 ticks between snapshots;
+## a peer further behind than that takes the per-peer path, which is never wrong.
+const _KEPT_READS := 17
+
+
 func begin_snapshot_reads() -> void:
-	_snapshot_reads.clear()
+	# A fresh dictionary rather than a cleared one: the last one is kept, by serial.
+	_read_serial += 1
+	_snapshot_reads = {}
+	_reads_by_serial[_read_serial] = _snapshot_reads
+	_reads_by_serial.erase(_read_serial - _KEPT_READS)
+	_shared_dirty.clear()
 	_encoded.clear()
+	_signed = []
 	_snapshot_reads_open = true
+	_share_dirty = _config == null or _config.share_dirty_sets
+	if _share_dirty:
+		for declaration in net_vars:
+			if declaration.epsilon > 0.0 or declaration.max_rate > 0.0:
+				_share_dirty = false
+				break
 
 
 func end_snapshot_reads() -> void:
-	_snapshot_reads.clear()
+	_snapshot_reads = {}
+	_shared_dirty.clear()
 	_encoded.clear()
 	_snapshot_reads_open = false
 
@@ -354,9 +406,34 @@ func collect_dirty(
 	force: bool = false,
 	until_acked: bool = false
 ) -> Array[DotNetVar]:
-	var out: Array[DotNetVar] = []
 	var view := _view_for(peer_id)
 	var owner := identity.owner_peer_id
+
+	# [b]A peer in step shares its answer with every other peer in step from the same
+	# snapshot.[/b] When this peer's record is exactly the reads of snapshot K (its
+	# `synced_serial`), what it is owed now is what changed between K and now -- the same
+	# for every such peer, so compared once and shared. Without it this loop compared every
+	# property of every entity once per peer: 32 players is a thousand entity-peer pairs a
+	# snapshot, and on a full server nearly every one is a non-owner one snapshot behind.
+	# The rule is the per-peer one below with nothing per peer left in it: no force, nothing
+	# owed (the predicted entity, a property once lost), and no epsilon or rate limit
+	# (`_share_dirty`), whose answers depend on more than the two values.
+	var shareable := _snapshot_reads_open and _share_dirty and not force
+	if shareable and not until_acked and view.synced_serial > 0 and view.relost.is_empty():
+		var key := view.synced_serial * 2 + (1 if peer_id == owner else 0)
+		var shared: Variant = _shared_dirty.get(key)
+		if shared == null:
+			shared = _dirty_since(view.synced_serial, peer_id)
+			if shared != null:
+				_shared_dirty[key] = shared
+		if shared != null:
+			view.collected = shared
+			view.collected_serial = _read_serial
+			if (shared as Array).is_empty():
+				view.synced_serial = _read_serial
+			return shared
+
+	var out: Array[DotNetVar] = []
 	# Only asked for when something here is rate-limited: a clock read per behaviour per
 	# peer per snapshot is a thousand of them a tick on a full server, for nothing.
 	var now := -1
@@ -426,6 +503,46 @@ func collect_dirty(
 
 		out.append(declaration)
 
+	# Whatever was owed, what is not in `out` already equals this snapshot's read, so once
+	# `out` is written (or at once, when it is empty) the record is this snapshot's reads.
+	if shareable:
+		view.collected = out
+		view.collected_serial = _read_serial
+		if out.is_empty():
+			view.synced_serial = _read_serial
+
+	return out
+
+
+## What a peer whose record is exactly the reads of snapshot [param since] is owed now:
+## the visible properties whose value differs from that read, by [method collect_dirty]'s
+## own rule. [code]null[/code] when those reads are gone or lack one of the properties, for
+## the caller to take the per-peer path. The result is shared; nothing may modify it.
+func _dirty_since(since: int, peer_id: int) -> Variant:
+	var then: Dictionary = _reads_by_serial.get(since, {})
+	if then.is_empty() and not net_vars.is_empty():
+		return null
+	var owner := identity.owner_peer_id
+	var out: Array[DotNetVar] = []
+	for declaration in net_vars:
+		match declaration.audience:
+			DotNetVar.Audience.OWNER:
+				if peer_id != owner:
+					continue
+			DotNetVar.Audience.OBSERVERS:
+				if peer_id == owner:
+					continue
+		var property := declaration.property
+		if not then.has(property):
+			return null
+		var old: Variant = then[property]
+		var current: Variant
+		if _snapshot_reads.has(property):
+			current = _snapshot_reads[property]
+		else:
+			current = _read_for_send(property)
+		if typeof(old) != typeof(current) or old != current:
+			out.append(declaration)
 	return out
 
 
@@ -488,6 +605,14 @@ func write_state(
 		writer.write_shifted_run(encoded[0], int(encoded[1]))
 	var recorded: Dictionary = encoded[2]
 
+	# The very array [method collect_dirty] gave this peer in this snapshot, written: the
+	# record is now this snapshot's reads. Anything else written leaves it unknown.
+	if _snapshot_reads_open and view.collected_serial == _read_serial \
+			and is_same(declarations, view.collected):
+		view.synced_serial = _read_serial
+	else:
+		view.synced_serial = -1
+
 	if recorded.is_empty():
 		return
 
@@ -536,7 +661,16 @@ func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 	# of a byte the encoding starts at; such a set is encoded at the bit it will be laid in
 	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
 	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
-	var key := _signature(declarations) if _snapshot_reads_open else -1
+	var key := -1
+	if _snapshot_reads_open:
+		# A shared dirty set ([method collect_dirty]) arrives as the same array for peer
+		# after peer, and is asked twice per peer (here and from [method state_bits]).
+		if is_same(declarations, _signed):
+			key = _signed_key
+		else:
+			key = _signature(declarations)
+			_signed = declarations
+			_signed_key = key
 	var aligned := false
 	if key >= 0:
 		# The set's bitmask against the byte-aligned declarations', rather than a call
@@ -775,6 +909,7 @@ func _view_for(peer_id: int) -> PeerView:
 ## send was dropped falls back to the confirmed one — or to absent, which reads as
 ## dirty and re-sends it.
 func _rebuild_believed(view: PeerView) -> void:
+	view.synced_serial = -1
 	view.believed = view.acked.duplicate()
 
 	for entry in view.pending:

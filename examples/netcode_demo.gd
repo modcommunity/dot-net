@@ -366,7 +366,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 419
+const CHECKS := 421
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -431,6 +431,7 @@ func _run() -> void:
 	_test_freed_entity()
 	_test_unregistered_mid_tick()
 	_test_acked_baselines()
+	_test_shared_dirty_sets()
 	_test_standing_still()
 	_test_remote_bumps()
 	_test_reconcile_once_per_frame()
@@ -2620,6 +2621,158 @@ func _test_acked_baselines() -> void:
 
 	for entity in [first, limited, lonely, untracked]:
 		_out_of_tree(entity)
+
+
+
+# --- Shared dirty sets -----------------------------------------------------
+
+## A behaviour with nothing that keeps its dirty sets apart (no epsilon, no rate limit), and
+## one of everything else that decides them: an owner-only, an observers-only and a
+## spawn-only property, and a string, whose encoding depends on the bit it starts at.
+class Sharing extends DotNetBehaviour:
+	var position: Vector3 = Vector3.ZERO
+	var health: int = 100
+	var tag: String = ""
+	var secret: bool = false
+	var seen: int = 0
+	var kind: int = 1
+
+	func _register_net_vars() -> void:
+		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
+		replicate(&"health", DotNetVar.Type.UINT).bits(8)
+		replicate(&"tag", DotNetVar.Type.STRING)
+		replicate(&"secret", DotNetVar.Type.BOOL).to_owner_only()
+		replicate(&"seen", DotNetVar.Type.UINT).bits(4).to_observers_only()
+		replicate(&"kind", DotNetVar.Type.UINT).bits(4).once()
+
+
+var _share_rng := RandomNumberGenerator.new()
+
+
+## [member DotNetConfig.share_dirty_sets] against the per-peer rule it short-cuts, run side by
+## side on two copies of one entity through the same snapshots: changes or none, peers left
+## out (interest) or held back (budget), snapshots lost, acknowledged late or never, the
+## owner's predicted entity owed until confirmed. Every peer's dirty set and bytes must be
+## the same both ways, every snapshot; and the shared path must actually be taken.
+func _test_shared_dirty_sets() -> void:
+	print("")
+	print("[shared dirty sets]")
+	_share_rng.seed = 4242
+
+	var owner := 3
+	var peers: Array[int] = [2, 3, 4, 5, 6, 7]
+	var copies: Array[Sharing] = []
+	for share in [true, false]:
+		var config := DotNetConfig.new()
+		config.share_dirty_sets = share
+		var identity := DotNetIdentity.new()
+		identity.owner_peer_id = owner
+		identity.authority = DotNetIdentity.Authority.SHARED
+		var behaviour := Sharing.new()
+		identity.behaviours = [behaviour]
+		behaviour.identity = identity
+		behaviour._bind(config)
+		copies.append(behaviour)
+
+	var sent: Dictionary = {}     # peer -> ticks sent and not yet resolved, in order
+	var acked: Dictionary = {}    # peer -> newest tick it has acknowledged
+	for peer in peers:
+		sent[peer] = []
+		acked[peer] = 0
+
+	var mismatches := 0
+	var first_mismatch := ""
+	var shared_answers := 0
+	var written := 0
+
+	for snapshot in range(1, 401):
+		var tick := snapshot * 4
+
+		# The same change to both copies: most snapshots move, some change nothing at all.
+		var roll := _share_rng.randf()
+		var changes := {}
+		if roll < 0.7:
+			changes[&"position"] = Vector3(_share_rng.randi_range(0, 3), 0, 0)
+		if roll < 0.15:
+			changes[&"health"] = _share_rng.randi_range(90, 92)
+		if _share_rng.randf() < 0.05:
+			changes[&"tag"] = ["", "a", "bb", "ccc"][_share_rng.randi_range(0, 3)]
+		if _share_rng.randf() < 0.05:
+			changes[&"secret"] = _share_rng.randf() < 0.5
+		if _share_rng.randf() < 0.05:
+			changes[&"seen"] = _share_rng.randi_range(0, 2)
+		if _share_rng.randf() < 0.02:
+			changes[&"kind"] = _share_rng.randi_range(1, 2)
+		for behaviour in copies:
+			for property in changes:
+				behaviour.set(property, changes[property])
+			behaviour.begin_snapshot_reads()
+
+		var answers := {}  # peer -> the sharing copy's answer, to count the shared ones
+		for peer in peers:
+			# Peer 7 never acknowledges (the no-ack host); the rest do, late and with loss.
+			var strict := peer != 7
+			var acked_tick := int(acked[peer])
+			var relevant := _share_rng.randf() < 0.9
+			var starved := _share_rng.randf() < 0.1
+			var arrives := _share_rng.randf() < 0.85
+			var acks_now := strict and _share_rng.randf() < 0.8
+			if not relevant:
+				continue
+
+			var lists: Array = []
+			var bytes: Array = []
+			for behaviour in copies:
+				behaviour.sync_peer_acks(peer, acked_tick, strict)
+				behaviour.trim_pending(peer, tick - 32 * 4)
+				var dirty := behaviour.collect_dirty(peer, false, peer == owner)
+				var names := []
+				for declaration in dirty:
+					names.append(declaration.property)
+				lists.append(names)
+				var writer := DotNetWriter.new()
+				# Entities start at any bit of a byte, so the string's alignment is exercised.
+				writer.write_bits(0, snapshot % 8)
+				if not starved:
+					behaviour.write_state(writer, dirty, peer, tick)
+				bytes.append(writer.to_bytes())
+				if behaviour == copies[0]:
+					for other in answers:
+						if is_same(answers[other], dirty):
+							shared_answers += 1
+							break
+					answers[peer] = dirty
+
+			if lists[0] != lists[1] or bytes[0] != bytes[1]:
+				mismatches += 1
+				if first_mismatch == "":
+					first_mismatch = "snapshot %d peer %d: %s vs %s" % [snapshot, peer, lists[0], lists[1]]
+			if not starved:
+				written += 1
+				if arrives:
+					(sent[peer] as Array).append(tick)
+			if acks_now and not (sent[peer] as Array).is_empty():
+				# Acknowledges the newest that arrived, as a client does.
+				acked[peer] = int((sent[peer] as Array).back())
+
+		for behaviour in copies:
+			behaviour.end_snapshot_reads()
+
+	_check(
+		"shared dirty sets match per-peer ones (%d of %d differ%s)"
+			% [mismatches, written, "" if first_mismatch == "" else ": " + first_mismatch],
+		mismatches == 0
+	)
+	# Armed: with the sharing off, or never taken, no two peers are handed one answer.
+	_check(
+		"and peers in step were handed one shared answer (%d)" % shared_answers,
+		shared_answers > 100
+	)
+
+	for behaviour in copies:
+		var identity := behaviour.identity
+		behaviour.free()
+		identity.free()
 
 
 ## A server that holds a predicted entity still, and a client that predicts it moving.

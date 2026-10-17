@@ -45,6 +45,16 @@ extends DotConfig
 ## phase rather than all of them.
 @export var stagger_snapshots: bool = false
 
+## Whether peers in step share one dirty set per entity per snapshot
+## ([method DotNetBehaviour.collect_dirty]).
+##
+## A peer whose record of an entity is exactly that entity's state at an earlier snapshot
+## is owed exactly the properties that changed since, and so is every other peer whose
+## record is that same snapshot: the comparison is made once and the answer shared, rather
+## than once per peer. Same properties, same bytes. On by default; off only to measure
+## what the sharing saves (game-g2gfast [code]tools/load_probe[/code]).
+@export var share_dirty_sets: bool = true
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.
