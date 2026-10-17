@@ -235,6 +235,11 @@ var _encoded: Dictionary = {}
 var _signed: Array = []
 var _signed_key: int = -1
 
+## The last shared set [method _encoded_for] found with nothing byte-aligned in it, and its
+## encoding: what [method write_state] reuses for the next peer given that same array.
+var _fast_declarations: Array = []
+var _fast_encoded: Array = []
+
 ## Declaration -> its index in [member net_vars], built once [method _bind] has the list.
 var _index_of: Dictionary = {}
 
@@ -275,6 +280,8 @@ func begin_snapshot_reads() -> void:
 	_shared_dirty.clear()
 	_encoded.clear()
 	_signed = []
+	_fast_declarations = []
+	_fast_encoded = []
 	_snapshot_reads_open = true
 	_share_dirty = _config == null or _config.share_dirty_sets
 	if _share_dirty:
@@ -585,7 +592,10 @@ func write_state(
 	peer_id: int = 0,
 	tick: int = 0
 ) -> void:
-	var view := _view_for(peer_id)
+	# Inlined [method _view_for]: a call per entity per peer on a full server.
+	var view: PeerView = _views.get(peer_id)
+	if view == null:
+		view = _view_for(peer_id)
 
 	# [b]Encoded once per snapshot for each distinct set of properties, not once per peer.[/b]
 	# Inside a snapshot every property is read once (see [member _snapshot_reads]), so the
@@ -596,13 +606,23 @@ func write_state(
 	# sent, what is unconfirmed -- is still per peer, below; the values recorded are one
 	# dictionary shared by every peer's pending entry, which nothing writes to after this.
 	var pad := writer.bit_length() & 7
-	var found := _encoded_for(declarations, pad)
-	var encoded: Array = found[0]
-
-	if bool(found[1]):
-		writer.write_bit_run(encoded[0], pad, int(encoded[1]))
+	var encoded: Array
+	var aligned := false
+	if _snapshot_reads_open and is_same(declarations, _fast_declarations):
+		# The set the last peer was given, again: a shared dirty set arrives as one array for
+		# peer after peer, and one with nothing byte-aligned in it is the same encoding at
+		# any bit, so there is nothing to look up. Skips a call, an array and two dictionary
+		# lookups per entity per peer.
+		encoded = _fast_encoded
 	else:
-		writer.write_shifted_run(encoded[0], int(encoded[1]))
+		var found := _encoded_for(declarations, pad)
+		encoded = found[0]
+		aligned = found[1]
+
+	if aligned:
+		writer.write_bit_run(encoded[0], pad, encoded[1])
+	else:
+		writer.write_shifted_run(encoded[0], encoded[1])
 	var recorded: Dictionary = encoded[2]
 
 	# The very array [method collect_dirty] gave this peer in this snapshot, written: the
@@ -695,6 +715,9 @@ func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 	if encoded.is_empty():
 		encoded = _encode(declarations, at)
 
+	if key >= 0 and not aligned:
+		_fast_declarations = declarations
+		_fast_encoded = encoded
 	return [encoded, aligned]
 
 
