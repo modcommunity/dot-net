@@ -149,25 +149,6 @@ extends DotConfig
 ## left as the prediction had it; a game turns it on after its prediction suites pass.
 @export var skip_matching_replays: bool = false
 
-## Extra position difference, in metres, that [member skip_matching_replays] still calls a
-## match. Zero (the default) is "as nearly as the wire carries it".
-##
-## [b]Why a game wants a few centimetres.[/b] A character sliding along a wall or up a ramp
-## is not bit-identical on both sides: the client's replayed contact and the server's land a
-## centimetre or two apart. game-arena's dm_atrium, a moving player, 30 ms each way: 82% of
-## snapshots differed by about 2 cm at a wall and each replayed the whole lead, 0.69 ms of a
-## native frame with 5 ms spikes against 0.06 ms on the open dm_box (2026-10-18), and a
-## browser pays several times that. Inside the slack the prediction stands, a difference
-## nobody can see; past it the replay runs as before, so the error stays bounded by this.
-## A replay to the server's value would not even converge here: the next wall contact
-## re-derives the same few centimetres.
-@export_range(0.0, 0.5, 0.001) var skip_position_slack: float = 0.0
-
-## The same for velocity, in metres per second. A grounded tick on one side and a tick
-## still falling on the other differ by a tick of gravity (about 0.3 m/s at 64 Hz) for one
-## snapshot; a difference that lasts shows up in position and replays there.
-@export_range(0.0, 10.0, 0.01) var skip_velocity_slack: float = 0.0
-
 ## Whether [method DotNetManager.predict_tick] rounds each input to the wire
 ## ([method DotNetInput.round_trip]) before it is simulated, so the prediction runs on
 ## the command the server decodes. On by default; off only to measure what it costs not to.

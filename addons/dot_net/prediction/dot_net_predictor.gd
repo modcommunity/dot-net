@@ -132,24 +132,13 @@ func _predicted_matches(identity: DotNetIdentity, server_tick: int, values: Dict
 			if not mine.has(declaration.property):
 				_note_mismatch(declaration.property)
 				return false
-			if not declaration.matches(mine[declaration.property], values[declaration.property], _skip_slack(declaration)):
+			if not declaration.matches(mine[declaration.property], values[declaration.property]):
 				_note_mismatch(declaration.property)
 				_last_mismatch = {"tick": server_tick, "property": declaration.property,
 					"predicted": mine[declaration.property], "received": values[declaration.property]}
 				return false
 			compared += 1
 	return compared > 0
-
-
-## What [method _predicted_matches] forgives on top of the wire's own error: the config's
-## position or velocity slack, by the property's type; nothing for any other type.
-func _skip_slack(declaration: DotNetVar) -> float:
-	match declaration.type:
-		DotNetVar.Type.VECTOR3_POSITION:
-			return config.skip_position_slack
-		DotNetVar.Type.VECTOR3_VELOCITY:
-			return config.skip_velocity_slack
-	return 0.0
 
 
 func _note_mismatch(property: StringName) -> void:
