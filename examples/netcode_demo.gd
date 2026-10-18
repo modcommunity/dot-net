@@ -366,7 +366,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 421
+const CHECKS := 423
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1505,6 +1505,32 @@ func _test_budget() -> void:
 
 	_check("high priority sent more often", high_first > low_first)
 	_check("low priority is not starved (%d of 90)" % low_first, low_first > 0)
+
+	# The order accumulate returns (an integer sort of the accumulators' bits) against a
+	# plain descending sort of the same numbers, with ties, zeros and a wide range.
+	var many: Array[DotNetIdentity] = []
+	var accumulators := {}
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77
+	for i in 40:
+		var entity := DotNetIdentity.new()
+		entity.net_id = 100 + i
+		many.append(entity)
+		accumulators[entity.net_id] = [0.0, 1.0, 1.0, 0.25, 3.5e6, 1e-9][i % 6] * float(1 + i % 7) \
+			if i % 5 != 0 else rng.randf_range(0.0, 50.0)
+	var by_bits := DotNetBudget._by_accumulator(many, accumulators)
+	var descending := true
+	for i in range(1, by_bits.size()):
+		if float(accumulators[by_bits[i - 1].net_id]) < float(accumulators[by_bits[i].net_id]):
+			descending = false
+	var same_members := by_bits.size() == many.size()
+	for entity in many:
+		if not by_bits.has(entity):
+			same_members = false
+	_check("accumulate orders by accumulator, highest first, losing nobody",
+		descending and same_members)
+	for entity in many:
+		entity.free()
 
 
 func _test_interpolation() -> void:
@@ -2674,6 +2700,27 @@ func _test_shared_dirty_sets() -> void:
 		behaviour._bind(config)
 		copies.append(behaviour)
 
+	# A run shifted once per bit of a byte and kept (DotNetBehaviour._shifted, what write_state
+	# lays in for every peer after the first at that bit) against the shift per write it
+	# replaced, at every bit, over a written prefix that is not zero.
+	var source := PackedByteArray([0xA5, 0x3C, 0xFF, 0x01, 0x80])
+	var shifts_agree := true
+	for bits in [1, 7, 8, 9, 17, 33, 40]:
+		var data := source.slice(0, (bits + 7) >> 3)
+		if bits & 7 != 0:
+			data[data.size() - 1] &= (1 << (bits & 7)) - 1
+		var entry := [data, bits, {}, []]
+		for pad in range(1, 8):
+			var per_write := DotNetWriter.new()
+			per_write.write_bits(0x55, pad)
+			per_write.write_shifted_run(data, bits)
+			var kept := DotNetWriter.new()
+			kept.write_bits(0x55, pad)
+			kept.write_bit_run(copies[0]._shifted(entry, pad), pad, pad + bits)
+			if per_write.to_bytes() != kept.to_bytes() or per_write.bit_length() != kept.bit_length():
+				shifts_agree = false
+	_check("a run shifted once per bit is the bits a shift per write gives", shifts_agree)
+
 	var sent: Dictionary = {}     # peer -> ticks sent and not yet resolved, in order
 	var acked: Dictionary = {}    # peer -> newest tick it has acknowledged
 	for peer in peers:
@@ -2723,16 +2770,23 @@ func _test_shared_dirty_sets() -> void:
 			var lists: Array = []
 			var bytes: Array = []
 			for behaviour in copies:
-				behaviour.sync_peer_acks(peer, acked_tick, strict)
-				behaviour.trim_pending(peer, tick - 32 * 4)
-				var dirty := behaviour.collect_dirty(peer, false, peer == owner)
+				# The sharing copy the way DotNetManager asks (one fused call), the other the
+				# three calls that are its definition: the two must agree, list and bytes.
+				var dirty: Array[DotNetVar]
+				if behaviour == copies[0]:
+					dirty = behaviour.collect_for_peer(peer, acked_tick, strict, tick - 32 * 4, peer == owner)
+				else:
+					behaviour.sync_peer_acks(peer, acked_tick, strict)
+					behaviour.trim_pending(peer, tick - 32 * 4)
+					dirty = behaviour.collect_dirty(peer, false, peer == owner)
 				var names := []
 				for declaration in dirty:
 					names.append(declaration.property)
 				lists.append(names)
 				var writer := DotNetWriter.new()
 				# Entities start at any bit of a byte, so the string's alignment is exercised.
-				writer.write_bits(0, snapshot % 8)
+				if snapshot % 8 > 0:
+					writer.write_bits(0, snapshot % 8)
 				if not starved:
 					behaviour.write_state(writer, dirty, peer, tick)
 				bytes.append(writer.to_bytes())

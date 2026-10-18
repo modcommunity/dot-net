@@ -858,6 +858,7 @@ func _send_to_peer(
 
 	var written := 0
 	var remaining_bytes := budget.remaining(peer_id)
+	var peer_budget := budget.for_peer(peer_id)
 
 	# Entities with nothing to say, listed by id at the end of a part rather than written with
 	# an empty body, for a peer that has said it reads the list. See
@@ -888,10 +889,10 @@ func _send_to_peer(
 		var dirties: Array = []
 		for behaviour in identity.behaviours:
 			# Resolve what this peer has confirmed before deciding what is dirty, so
-			# a property whose only send was lost is dirty again and goes out here.
-			behaviour.sync_peer_acks(peer_id, acked_tick, strict)
-			behaviour.trim_pending(peer_id, oldest_pending)
-			dirties.append(behaviour.collect_dirty(peer_id, false, predicted_by_peer))
+			# a property whose only send was lost is dirty again and goes out here:
+			# sync_peer_acks, trim_pending and collect_dirty, as one call.
+			dirties.append(behaviour.collect_for_peer(
+				peer_id, acked_tick, strict, oldest_pending, predicted_by_peer))
 
 		if compact:
 			var anything := false
@@ -932,8 +933,11 @@ func _send_to_peer(
 
 		var before := writer.byte_length()
 
-		writer.write_uint(identity.net_id, DotNetRegistry.ID_BITS)
-		writer.write_uint(identity.behaviours.size(), 6)
+		# The id and then the behaviour count, as one field: bits are written low first, so
+		# this is the same bits as the two writes, for one call per entity per peer.
+		writer.write_bits(identity.net_id & ((1 << DotNetRegistry.ID_BITS) - 1) \
+			| ((identity.behaviours.size() & 0x3F) << DotNetRegistry.ID_BITS),
+			DotNetRegistry.ID_BITS + 6)
 
 		for b in identity.behaviours.size():
 			identity.behaviours[b].write_state(writer, dirties[b], peer_id, tick)
@@ -949,7 +953,10 @@ func _send_to_peer(
 
 		var spent := writer.byte_length() - before
 		remaining_bytes -= spent
-		budget.note_sent(peer_id, identity.net_id, spent)
+		# budget.note_sent, inlined: a call and a lookup of the same record per entity.
+		peer_budget.accumulators[identity.net_id] = 0.0
+		peer_budget.starved_ticks[identity.net_id] = 0
+		peer_budget.bytes_this_second += spent
 		counts[counts.size() - 1] += 1
 		written += 1
 

@@ -62,7 +62,7 @@ func write_bits(value: int, bits: int) -> void:
 	var remaining := bits
 	# Masking first means a caller passing a value wider than `bits` truncates
 	# rather than corrupting the following fields.
-	var v := value & _mask(bits)
+	var v := value if bits >= 64 else value & ((1 << bits) - 1)
 
 	while remaining > 0:
 		var byte_index := _bit_pos >> 3
@@ -75,7 +75,9 @@ func write_bits(value: int, bits: int) -> void:
 				return
 			_bytes.append(0)
 
-		_bytes[byte_index] |= (v & _mask(take)) << bit_offset
+		# The masks written out rather than through `_mask`: `take` is at most 8, and a
+		# static call per byte was most of what writing an entity's header cost.
+		_bytes[byte_index] |= (v & ((1 << take) - 1)) << bit_offset
 
 		v >>= take
 		_bit_pos += take

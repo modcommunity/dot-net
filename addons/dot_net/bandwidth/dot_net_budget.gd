@@ -98,12 +98,44 @@ func accumulate(
 		budget.accumulators[identity.net_id] = current \
 			+ maxf(0.0, score) + _starvation_boost(waited)
 
-	var ordered := candidates.duplicate()
-	ordered.sort_custom(func(a: DotNetIdentity, b: DotNetIdentity) -> bool:
-		return float(budget.accumulators.get(a.net_id, 0.0)) \
-			> float(budget.accumulators.get(b.net_id, 0.0))
-	)
+	return _by_accumulator(candidates, budget.accumulators)
 
+
+## [param candidates], highest accumulator first.
+##
+## [b]A native sort of integers, not [code]sort_custom[/code].[/b] A comparator is a GDScript
+## call and two dictionary lookups per comparison, about a hundred and sixty comparisons per
+## peer per snapshot at 32 players: 0.7 ms of a 128-tick server's tick (game-g2gfast
+## tools/load_probe). An accumulator is never negative (it starts at 0 and only grows by
+## non-negative amounts), and a non-negative double's IEEE bits order exactly as the double
+## does, so each key is those bits with the candidate's index in the lowest bits. Those bits
+## are the bottom of the mantissa: two accumulators within a few parts in 2^40 of each other
+## are taken as equal and kept in candidate order, which a comparator sort did not promise
+## for true ties either.
+static func _by_accumulator(
+	candidates: Array[DotNetIdentity], accumulators: Dictionary
+) -> Array[DotNetIdentity]:
+	var count := candidates.size()
+	var ordered: Array[DotNetIdentity] = []
+	if count == 0:
+		return ordered
+	var values := PackedFloat64Array()
+	values.resize(count)
+	for i in count:
+		values[i] = maxf(0.0, float(accumulators.get(candidates[i].net_id, 0.0)))
+	var index_bits := 1
+	while (1 << index_bits) < count:
+		index_bits += 1
+	var low := (1 << index_bits) - 1
+	var keys := values.to_byte_array().to_int64_array()
+	for i in count:
+		# Descending by value, then ascending by index: the value's bits inverted (still
+		# non-negative, since the sign bit is clear) and the index as it is.
+		keys[i] = ((0x7FFFFFFFFFFFFFFF - keys[i]) & ~low) | i
+	keys.sort()
+	ordered.resize(count)
+	for i in count:
+		ordered[i] = candidates[keys[i] & low]
 	return ordered
 
 

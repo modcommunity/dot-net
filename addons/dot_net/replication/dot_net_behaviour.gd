@@ -413,7 +413,39 @@ func collect_dirty(
 	force: bool = false,
 	until_acked: bool = false
 ) -> Array[DotNetVar]:
-	var view := _view_for(peer_id)
+	return _collect_dirty(_view_for(peer_id), peer_id, force, until_acked)
+
+
+## [method sync_peer_acks], [method trim_pending] and [method collect_dirty] for one peer, in
+## that order, as one call: what [DotNetManager] asks of every behaviour of every entity for
+## every peer each snapshot, a thousand times a snapshot at 32 players, where three calls and
+## three lookups of the same [PeerView] were a measurable part of the cost. The three are
+## still the definitions; this is them, with the view looked up once.
+func collect_for_peer(
+	peer_id: int,
+	acked_tick: int,
+	strict: bool,
+	oldest_tick: int,
+	until_acked: bool
+) -> Array[DotNetVar]:
+	var view: PeerView = _views.get(peer_id)
+	if view == null:
+		view = _view_for(peer_id)
+	if strict:
+		view.strict = true
+	if acked_tick > view.last_ack:
+		_sync_view(view, acked_tick)
+	if not view.pending.is_empty() and int(view.pending[0]["tick"]) < oldest_tick:
+		_trim_view(view, oldest_tick)
+	return _collect_dirty(view, peer_id, false, until_acked)
+
+
+func _collect_dirty(
+	view: PeerView,
+	peer_id: int,
+	force: bool,
+	until_acked: bool
+) -> Array[DotNetVar]:
 	var owner := identity.owner_peer_id
 
 	# [b]A peer in step shares its answer with every other peer in step from the same
@@ -621,6 +653,14 @@ func write_state(
 
 	if aligned:
 		writer.write_bit_run(encoded[0], pad, encoded[1])
+	elif pad != 0 and _snapshot_reads_open:
+		# [b]Shifted once per bit of a byte, not once per peer.[/b] Laying a run in at a
+		# bit other than 0 shifts every byte of it, a GDScript loop over the whole entity,
+		# and it was the largest single cost left in a 32-player snapshot (game-g2gfast
+		# tools/load_probe: 1.4 ms of a tick) -- for bits that are the same for every peer
+		# landing at the same bit. Entities start at every bit in turn, so this is at most
+		# eight shifts per set per snapshot, against one per peer. Then a byte copy.
+		writer.write_bit_run(_shifted(encoded, pad), pad, pad + int(encoded[1]))
 	else:
 		writer.write_shifted_run(encoded[0], encoded[1])
 	var recorded: Dictionary = encoded[2]
@@ -653,6 +693,31 @@ func write_state(
 		return
 
 	view.pending.append({"tick": tick, "values": recorded})
+
+
+## [param encoded]'s bits (an [method _encode] result begun at bit 0) moved [param pad] bits
+## up, low bits zero: what [method DotNetWriter.write_bit_run] copies for a writer standing
+## [param pad] bits into a byte. Kept on the entry, which lives for one snapshot.
+func _shifted(encoded: Array, pad: int) -> PackedByteArray:
+	if encoded.size() < 5:
+		encoded.append([null, null, null, null, null, null, null, null])
+	var by_pad: Array = encoded[4]
+	var cached: Variant = by_pad[pad]
+	if cached != null:
+		return cached
+	var data: PackedByteArray = encoded[0]
+	var bits := int(encoded[1])
+	var needed := (bits + 7) >> 3
+	var out := PackedByteArray()
+	out.resize((pad + bits + 7) >> 3)
+	var back := 8 - pad
+	for i in needed:
+		var b := data[i]
+		out[i] |= (b << pad) & 0xFF
+		if i + 1 < out.size():
+			out[i + 1] = b >> back
+	by_pad[pad] = out
+	return out
 
 
 ## Bits [method write_state] would add for [param declarations] to a writer standing
@@ -801,6 +866,11 @@ func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 	if acked_tick <= view.last_ack:
 		return
 
+	_sync_view(view, acked_tick)
+
+
+## [method sync_peer_acks] past its early-outs: [param acked_tick] is newer than the view's.
+func _sync_view(view: PeerView, acked_tick: int) -> void:
 	view.last_ack = acked_tick
 
 	if view.pending.is_empty():
@@ -872,6 +942,13 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 	# that trims nothing on all but the rare snapshot a peer stops acknowledging.
 	if int(view.pending[0]["tick"]) >= oldest_tick:
 		return
+
+	_trim_view(view, oldest_tick)
+
+
+## [method trim_pending] past its early-out: the oldest pending entry is older than
+## [param oldest_tick].
+func _trim_view(view: PeerView, oldest_tick: int) -> void:
 
 	# The aged-out entries are a prefix (pending is in tick order), so they come off the
 	# front and nothing else is touched. Walking the whole list into a new one was a pass
