@@ -381,9 +381,10 @@ func quantum() -> float:
 ## [b]False is always safe.[/b] The predictor uses this to skip a replay whose starting
 ## state it already had; a "differs" that did not need to costs one replay, and a "matches"
 ## that should not have would leave a misprediction standing. Hence the generous slack
-## only where the wire itself is inexact.
-func matches(predicted: Variant, received: Variant) -> bool:
-	var slack := maxf(epsilon, quantum() * 1.5)
+## only where the wire itself is inexact. [param extra_slack] widens it on purpose, for a
+## caller that accepts a known small divergence ([member DotNetConfig.skip_position_slack]).
+func matches(predicted: Variant, received: Variant, extra_slack: float = 0.0) -> bool:
+	var slack := maxf(epsilon, quantum() * 1.5) + maxf(0.0, extra_slack)
 	match type:
 		Type.BOOL:
 			return bool(predicted) == bool(received)

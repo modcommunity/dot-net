@@ -366,7 +366,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 423
+const CHECKS := 433
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -437,6 +437,7 @@ func _run() -> void:
 	_test_reconcile_once_per_frame()
 	_test_skip_matching_replays(false)
 	_test_skip_matching_replays(true)
+	_test_skip_slack()
 	_test_staggered_snapshots()
 	_test_reordered_and_repeated()
 	_test_snapshot_parts()
@@ -3534,6 +3535,38 @@ func _test_reconcile_once_per_frame() -> void:
 ## snapshot runs that hook with the server's older state, and the manager then puts only
 ## the properties back; a skip that left it there had the next tick simulate from a round
 ## trip ago (game-arena's headless_feel, 2026-10-16: 300 mm, 31 corrections at 40 ms).
+## DotNetConfig.skip_position_slack / skip_velocity_slack: a wall contact a couple of
+## centimetres apart on each side matches with the slack and not without it, a real miss
+## does not match either way, and only positions and velocities get it. The values are the
+## ones game-arena's dm_atrium logged (2026-10-18).
+func _test_skip_slack() -> void:
+	print("")
+	print("[skip slack forgives a wall contact, not a miss]")
+	var cfg := DotNetConfig.new()
+	var pos := DotNetVar.make(&"p", DotNetVar.Type.VECTOR3_POSITION)
+	pos.bind_config(cfg)
+	var vel := DotNetVar.make(&"v", DotNetVar.Type.VECTOR3_VELOCITY)
+	vel.bind_config(cfg)
+	var yaw := DotNetVar.make(&"y", DotNetVar.Type.ANGLE)
+	var at_wall := Vector3(-6.326502, 0.003906, -29.67377)
+	var server := Vector3(-6.347705, 0.003906, -29.65257)
+	_check("2 cm at a wall differs with no slack", not pos.matches(at_wall, server))
+	_check("2 cm at a wall matches with 3 cm of slack", pos.matches(at_wall, server, 0.03))
+	_check("10 cm does not match with 3 cm of slack", not pos.matches(at_wall + Vector3(0.1, 0.0, 0.0), server, 0.03))
+	var falling := Vector3(7.692307, -0.342247, 0.02442)
+	var grounded := Vector3(7.594627, 0.02442, 0.02442)
+	_check("a tick of gravity differs with no slack", not vel.matches(falling, grounded))
+	_check("a tick of gravity matches with 0.5 m/s of slack", vel.matches(falling, grounded, 0.5))
+	_check("a jump does not match with 0.5 m/s of slack", not vel.matches(falling + Vector3(0.0, 5.0, 0.0), grounded, 0.5))
+	cfg.skip_position_slack = 0.03
+	cfg.skip_velocity_slack = 0.5
+	var predictor := DotNetPredictor.new(cfg)
+	_check("the predictor hands positions the position slack", is_equal_approx(predictor._skip_slack(pos), 0.03))
+	_check("the predictor hands velocities the velocity slack", is_equal_approx(predictor._skip_slack(vel), 0.5))
+	_check("anything else gets none", predictor._skip_slack(yaw) == 0.0)
+	_check("the defaults change nothing", DotNetConfig.new().skip_position_slack == 0.0 and DotNetConfig.new().skip_velocity_slack == 0.0)
+
+
 func _test_skip_matching_replays(own_state: bool) -> void:
 	print("")
 	print("[replays skipped when the prediction matched%s]" % (", own simulation state" if own_state else ""))
