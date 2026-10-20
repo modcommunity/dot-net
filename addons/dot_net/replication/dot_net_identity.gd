@@ -294,11 +294,34 @@ func is_predicted() -> bool:
 	return authority == Authority.SHARED and is_owner and not is_authoritative
 
 
+## [method world_position] as it is now, kept and answered until [method thaw_position].
+##
+## What [DotNetManager] does to every identity before it builds snapshots on worker threads
+## ([member DotNetConfig.snapshot_workers]): interest asks for positions, and a worker that
+## reads [code]global_position[/code] gets an error and zero in a debug build and a value
+## racing the physics step in a release one. One read per entity on the main thread, where
+## the per-peer path read it once per entity per peer.
+func freeze_position() -> void:
+	_position_frozen = false
+	_frozen_position = world_position()
+	_position_frozen = true
+
+
+func thaw_position() -> void:
+	_position_frozen = false
+
+
+var _frozen_position: Vector3 = Vector3.ZERO
+var _position_frozen: bool = false
+
+
 ## World position, for interest management and lag compensation.
 ##
 ## Reads whichever transform the entity actually has, so a 2D game works without a
 ## separate code path.
 func world_position() -> Vector3:
+	if _position_frozen:
+		return _frozen_position
 	if entity == null or not is_instance_valid(entity):
 		return Vector3.ZERO
 

@@ -74,7 +74,8 @@ func _candidates(
 	var centre := observer.world_position()
 	var reach := int(ceilf(radius / maxf(1.0, cell_size)))
 
-	var out: Array[DotNetIdentity] = []
+	# Untyped: a worker may build it (DotNetInterest.relevance says why).
+	var out: Array = []
 
 	var cx := int(floorf(centre.x / cell_size))
 	var cy := 0 if ignore_vertical else int(floorf(centre.y / cell_size))
@@ -153,3 +154,9 @@ func describe() -> Dictionary:
 	d["cells"] = _cells.size()
 	d["indexed"] = _indexed_count
 	return d
+
+
+## Thread-safe as itself, not as a subclass: see [method DotNetInterest.is_thread_safe].
+## Reads only frozen positions, the identities' fields and its own exports, and [member _cells], built on the main thread by [method _prepare].
+func is_thread_safe() -> bool:
+	return get_script() == DotNetInterestGrid

@@ -132,6 +132,114 @@ class PeerView extends RefCounted:
 	var collected: Array[DotNetVar] = []
 	var collected_serial: int = -1
 
+	## Containers this view still shares with the view it is a [method shadow] of, one bit
+	## each ([constant SHARES_ACKED] and on); 0 for a view of its own, which is every view in
+	## [member DotNetBehaviour._views].
+	var shares: int = 0
+
+	const SHARES_ACKED := 1
+	const SHARES_BELIEVED := 2
+	const SHARES_PENDING := 4
+	const SHARES_LAST_SENT := 8
+	const SHARES_RELOST := 16
+
+	## A copy that shares every container with this one until it writes to it, when it takes
+	## its own: what a snapshot built on a worker thread resolves and records into, so that
+	## building never changes the live view and building twice gives the same answer
+	## ([member DotParallel.verify]). Duplicating every container up front instead would copy
+	## the whole record per entity per peer per snapshot; most of a peer's views change only
+	## [member believed] and [member pending], and only when something is written.
+	func shadow() -> PeerView:
+		var copy := PeerView.new()
+		copy.acked = acked
+		copy.believed = believed
+		copy.pending = pending
+		copy.last_sent_ms = last_sent_ms
+		copy.last_ack = last_ack
+		copy.relost = relost
+		copy.strict = strict
+		copy.synced_serial = synced_serial
+		copy.collected = collected
+		copy.collected_serial = collected_serial
+		copy.shares = SHARES_ACKED | SHARES_BELIEVED | SHARES_PENDING | SHARES_LAST_SENT | SHARES_RELOST
+		return copy
+
+	func own_acked() -> Dictionary:
+		if shares & SHARES_ACKED:
+			acked = acked.duplicate()
+			shares &= ~SHARES_ACKED
+		return acked
+
+	func own_relost() -> Dictionary:
+		if shares & SHARES_RELOST:
+			relost = relost.duplicate()
+			shares &= ~SHARES_RELOST
+		return relost
+
+	## Drops the [param count] oldest pending entries.
+	func drop_pending(count: int) -> void:
+		if shares & SHARES_PENDING:
+			# A slice is the copy and the drop in one, where duplicating first would copy
+			# the entries about to go.
+			pending = pending.slice(count)
+			shares &= ~SHARES_PENDING
+		elif count >= pending.size():
+			pending.clear()
+		else:
+			for i in count:
+				pending.pop_front()
+
+	## Everything this view records, as plain values, for a test to compare two views by.
+	func snapshot() -> Dictionary:
+		var entries := []
+		for entry in pending:
+			entries.append([int(entry["tick"]), (entry["values"] as Dictionary).duplicate()])
+		var names := []
+		for declaration in collected:
+			names.append(declaration.property)
+		return {
+			"acked": acked.duplicate(), "believed": believed.duplicate(), "pending": entries,
+			"last_sent_ms": last_sent_ms.duplicate(), "last_ack": last_ack,
+			"relost": relost.duplicate(), "strict": strict, "synced_serial": synced_serial,
+			"collected": names, "collected_serial": collected_serial,
+		}
+
+
+## Within one snapshot, what [method write_state] and [method collect_dirty] remember between
+## peers: each distinct set of properties encoded, the last set signed, and the dirty sets
+## shared by peers in step. One per behaviour for the manager's own thread
+## ([member _cache]), and one per behaviour per task when snapshots are built on workers,
+## because these are filled in as peers ask and two threads filling one would race. A
+## memo of answers that depend only on the snapshot's reads, so any number of them give the
+## same bits.
+class EncodeCache extends RefCounted:
+	## The encoding of each distinct set of properties, by the bit of a byte it starts at
+	## (always 0 for a set with nothing byte-aligned in it) and then by the set, as a bitmask
+	## of declaration indices. See [method DotNetBehaviour.write_state].
+	var encoded: Dictionary = {}
+
+	## The last declarations array [method DotNetBehaviour._signature] was worked out for,
+	## and its answer.
+	var signed: Array = []
+	var signed_key: int = -1
+
+	## The last shared set found with nothing byte-aligned in it, and its encoding: what
+	## [method DotNetBehaviour.write_state] reuses for the next peer given that same array.
+	var fast_declarations: Array = []
+	var fast_encoded: Array = []
+
+	## [code]synced serial * 2 + is owner[/code] -> the dirty set every peer in step from that
+	## serial is owed. See [method DotNetBehaviour.collect_dirty].
+	var shared_dirty: Dictionary = {}
+
+	func clear() -> void:
+		encoded.clear()
+		signed = []
+		signed_key = -1
+		fast_declarations = []
+		fast_encoded = []
+		shared_dirty.clear()
+
 
 # --- Subclass interface ----------------------------------------------------
 
@@ -225,20 +333,15 @@ func _net_read_property(property: StringName) -> Variant:
 var _snapshot_reads: Dictionary = {}
 var _snapshot_reads_open: bool = false
 
-## Within one snapshot: what each distinct set of properties encodes to, by the bit of a
-## byte it starts at (always 0 for a set with nothing byte-aligned in it) and then by the
-## set, as a bitmask of declaration indices. See [method write_state].
-var _encoded: Dictionary = {}
+## Within one snapshot: the encodings, signatures and shared dirty sets worked out so far, for
+## the calling thread. See [EncodeCache].
+var _cache: EncodeCache = EncodeCache.new()
 
-## The last declarations array [method _signature] was worked out for within this snapshot,
-## and its answer.
-var _signed: Array = []
-var _signed_key: int = -1
-
-## The last shared set [method _encoded_for] found with nothing byte-aligned in it, and its
-## encoding: what [method write_state] reuses for the next peer given that same array.
-var _fast_declarations: Array = []
-var _fast_encoded: Array = []
+## The snapshot's clock, read once by the manager for every peer ([method begin_snapshot_reads]),
+## or -1 outside one: what [member DotNetVar.max_rate] is measured against. One reading per
+## snapshot rather than one per peer makes the answer the same however the peers are split
+## between threads, and the same when built twice.
+var _snapshot_now_ms: int = -1
 
 ## Declaration -> its index in [member net_vars], built once [method _bind] has the list.
 var _index_of: Dictionary = {}
@@ -256,10 +359,6 @@ var _read_serial: int = 0
 ## peer in step was last brought up to, for [method collect_dirty] to compare against.
 var _reads_by_serial: Dictionary = {}
 
-## Within one snapshot: [code]synced serial * 2 + is owner[/code] -> the dirty set every
-## peer in step from that serial is owed. See [method collect_dirty].
-var _shared_dirty: Dictionary = {}
-
 ## Whether this snapshot's dirty sets may be shared: nothing declared with an epsilon or a
 ## rate limit, whose answers depend on more than the two values compared. Worked out per
 ## snapshot, since both are exported and may change after [method _bind].
@@ -271,18 +370,29 @@ var _share_dirty: bool = false
 const _KEPT_READS := 17
 
 
-func begin_snapshot_reads() -> void:
+## Opens a snapshot's reads. [param now_ms] is the snapshot's clock (-1 reads it here).
+##
+## [param for_workers] is for a snapshot built on worker threads ([member
+## DotNetConfig.snapshot_workers]): every property is read now, on this thread, rather than
+## when first asked for, and the bandwidth estimates are worked out, so that nothing a worker
+## asks of this behaviour writes to it. A property read is [method _net_read_property], which
+## a game overrides and which may read a node; a node read off the main thread is an error in
+## a debug build and a racing value in a release one.
+func begin_snapshot_reads(now_ms: int = -1, for_workers: bool = false) -> void:
 	# A fresh dictionary rather than a cleared one: the last one is kept, by serial.
 	_read_serial += 1
 	_snapshot_reads = {}
 	_reads_by_serial[_read_serial] = _snapshot_reads
 	_reads_by_serial.erase(_read_serial - _KEPT_READS)
-	_shared_dirty.clear()
-	_encoded.clear()
-	_signed = []
-	_fast_declarations = []
-	_fast_encoded = []
+	_cache.clear()
+	_snapshot_now_ms = now_ms if now_ms >= 0 else Time.get_ticks_msec()
 	_snapshot_reads_open = true
+	if for_workers:
+		for declaration in net_vars:
+			if not _snapshot_reads.has(declaration.property):
+				_snapshot_reads[declaration.property] = _net_read_property(declaration.property)
+		_estimate(true)
+		_estimate(false)
 	_share_dirty = _config == null or _config.share_dirty_sets
 	if _share_dirty:
 		for declaration in net_vars:
@@ -293,8 +403,8 @@ func begin_snapshot_reads() -> void:
 
 func end_snapshot_reads() -> void:
 	_snapshot_reads = {}
-	_shared_dirty.clear()
-	_encoded.clear()
+	_cache.clear()
+	_snapshot_now_ms = -1
 	_snapshot_reads_open = false
 
 
@@ -413,7 +523,7 @@ func collect_dirty(
 	force: bool = false,
 	until_acked: bool = false
 ) -> Array[DotNetVar]:
-	return _collect_dirty(_view_for(peer_id), peer_id, force, until_acked)
+	return _collect_dirty(_view_for(peer_id), peer_id, force, until_acked, _cache)
 
 
 ## [method sync_peer_acks], [method trim_pending] and [method collect_dirty] for one peer, in
@@ -431,20 +541,60 @@ func collect_for_peer(
 	var view: PeerView = _views.get(peer_id)
 	if view == null:
 		view = _view_for(peer_id)
+	return collect_for_view(view, peer_id, acked_tick, strict, oldest_tick, until_acked, _cache)
+
+
+## [method collect_for_peer] against a given view and cache: a [method PeerView.shadow] or a
+## new view from [method shadow_view], and a task's own [EncodeCache], for a snapshot built off
+## the main thread. Changes nothing but [param view] and [param cache], provided the
+## snapshot's reads were opened [code]for_workers[/code].
+func collect_for_view(
+	view: PeerView,
+	peer_id: int,
+	acked_tick: int,
+	strict: bool,
+	oldest_tick: int,
+	until_acked: bool,
+	cache: EncodeCache
+) -> Array[DotNetVar]:
 	if strict:
 		view.strict = true
 	if acked_tick > view.last_ack:
 		_sync_view(view, acked_tick)
 	if not view.pending.is_empty() and int(view.pending[0]["tick"]) < oldest_tick:
 		_trim_view(view, oldest_tick)
-	return _collect_dirty(view, peer_id, false, until_acked)
+	return _collect_dirty(view, peer_id, false, until_acked, cache)
+
+
+## The view to build this snapshot's record for [param peer_id] in, off the main thread: a
+## [method PeerView.shadow] of the live one, or a new one (the peer has never been sent this
+## entity). Nothing is stored; [method install_view] does that, on the main thread.
+func shadow_view(peer_id: int) -> PeerView:
+	var view: PeerView = _views.get(peer_id)
+	if view == null:
+		return PeerView.new()
+	return view.shadow()
+
+
+## Makes [param view] (from [method shadow_view], then built into) the live view for
+## [param peer_id]. Main thread: it writes [member _views].
+func install_view(peer_id: int, view: PeerView) -> void:
+	view.shares = 0
+	_views[peer_id] = view
+
+
+## The live view's [method PeerView.snapshot], or an empty dictionary. For tests.
+func peer_view_snapshot(peer_id: int) -> Dictionary:
+	var view: PeerView = _views.get(peer_id)
+	return view.snapshot() if view != null else {}
 
 
 func _collect_dirty(
 	view: PeerView,
 	peer_id: int,
 	force: bool,
-	until_acked: bool
+	until_acked: bool,
+	cache: EncodeCache
 ) -> Array[DotNetVar]:
 	var owner := identity.owner_peer_id
 
@@ -460,11 +610,11 @@ func _collect_dirty(
 	var shareable := _snapshot_reads_open and _share_dirty and not force
 	if shareable and not until_acked and view.synced_serial > 0 and view.relost.is_empty():
 		var key := view.synced_serial * 2 + (1 if peer_id == owner else 0)
-		var shared: Variant = _shared_dirty.get(key)
+		var shared: Variant = cache.shared_dirty.get(key)
 		if shared == null:
 			shared = _dirty_since(view.synced_serial, peer_id)
 			if shared != null:
-				_shared_dirty[key] = shared
+				cache.shared_dirty[key] = shared
 		if shared != null:
 			view.collected = shared
 			view.collected_serial = _read_serial
@@ -496,7 +646,7 @@ func _collect_dirty(
 
 		if not force and declaration.max_rate > 0.0:
 			if now < 0:
-				now = Time.get_ticks_msec()
+				now = _snapshot_now_ms if _snapshot_now_ms >= 0 else Time.get_ticks_msec()
 			var interval := 1000.0 / declaration.max_rate
 			var last := float(view.last_sent_ms.get(property, -100000))
 			if float(now) - last < interval:
@@ -535,7 +685,7 @@ func _collect_dirty(
 			if _is_unconfirmed(view, declaration, current):
 				owed = true
 			else:
-				view.relost.erase(property)
+				view.own_relost().erase(property)
 
 		if not dirty and not (owed and _is_unconfirmed(view, declaration, current)):
 			continue
@@ -628,6 +778,17 @@ func write_state(
 	var view: PeerView = _views.get(peer_id)
 	if view == null:
 		view = _view_for(peer_id)
+	write_for_view(writer, declarations, view, tick, _cache)
+
+
+## [method write_state] into a given view with a given cache; see [method collect_for_view].
+func write_for_view(
+	writer: DotNetWriter,
+	declarations: Array[DotNetVar],
+	view: PeerView,
+	tick: int,
+	cache: EncodeCache
+) -> void:
 
 	# [b]Encoded once per snapshot for each distinct set of properties, not once per peer.[/b]
 	# Inside a snapshot every property is read once (see [member _snapshot_reads]), so the
@@ -640,14 +801,14 @@ func write_state(
 	var pad := writer.bit_length() & 7
 	var encoded: Array
 	var aligned := false
-	if _snapshot_reads_open and is_same(declarations, _fast_declarations):
+	if _snapshot_reads_open and is_same(declarations, cache.fast_declarations):
 		# The set the last peer was given, again: a shared dirty set arrives as one array for
 		# peer after peer, and one with nothing byte-aligned in it is the same encoding at
 		# any bit, so there is nothing to look up. Skips a call, an array and two dictionary
 		# lookups per entity per peer.
-		encoded = _fast_encoded
+		encoded = cache.fast_encoded
 	else:
-		var found := _encoded_for(declarations, pad)
+		var found := _encoded_for(declarations, pad, cache)
 		encoded = found[0]
 		aligned = found[1]
 
@@ -679,19 +840,32 @@ func write_state(
 	# One merge rather than a loop of assignments, and a send time only for what is
 	# rate-limited, since nothing else reads one ([member DotNetVar.max_rate]): at 32
 	# players this loop ran for every property of every entity for every peer.
+	#
+	# A shadow view (a snapshot built on a worker) takes its own copy of what it writes to
+	# first, here inline rather than through PeerView's own_* helpers: this runs per entity
+	# per peer, and on the main thread's own views the test is all it costs.
+	if view.shares & PeerView.SHARES_BELIEVED:
+		view.believed = view.believed.duplicate()
+		view.shares &= ~PeerView.SHARES_BELIEVED
 	view.believed.merge(recorded, true)
 	var rated: Array = encoded[3]
 	if not rated.is_empty():
-		var now := Time.get_ticks_msec()
+		var now := _snapshot_now_ms if _snapshot_now_ms >= 0 else Time.get_ticks_msec()
+		if view.shares & PeerView.SHARES_LAST_SENT:
+			view.last_sent_ms = view.last_sent_ms.duplicate()
+			view.shares &= ~PeerView.SHARES_LAST_SENT
 		for property: StringName in rated:
 			view.last_sent_ms[property] = now
 
 	if tick <= 0:
 		# Untracked: assume delivered, which is the only assumption available when
 		# the caller has not said which snapshot this belongs to.
-		view.acked.merge(recorded, true)
+		view.own_acked().merge(recorded, true)
 		return
 
+	if view.shares & PeerView.SHARES_PENDING:
+		view.pending = view.pending.duplicate()
+		view.shares &= ~PeerView.SHARES_PENDING
 	view.pending.append({"tick": tick, "values": recorded})
 
 
@@ -728,8 +902,8 @@ func _shifted(encoded: Array, pad: int) -> PackedByteArray:
 ## [DotNetManager] decides where a snapshot is cut into parts with
 ## ([member DotNetConfig.mtu]); [method estimated_bits] is a full update's guess and can be
 ## several times the real figure, or short of it for a string.
-func state_bits(declarations: Array[DotNetVar], pad: int) -> int:
-	var found := _encoded_for(declarations, pad & 7)
+func state_bits(declarations: Array[DotNetVar], pad: int, cache: EncodeCache = null) -> int:
+	var found := _encoded_for(declarations, pad & 7, cache if cache != null else _cache)
 	var encoded: Array = found[0]
 	if bool(found[1]):
 		return int(encoded[1]) - (pad & 7)
@@ -739,7 +913,7 @@ func state_bits(declarations: Array[DotNetVar], pad: int) -> int:
 ## The encoding of [param declarations] for a writer [param pad] bits into a byte, as
 ## [code][encoded, aligned][/code]: the [method _encode] result, and whether it was encoded at
 ## that bit (copied with [method DotNetWriter.write_bit_run]) or at bit 0 (shifted into place).
-func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
+func _encoded_for(declarations: Array[DotNetVar], pad: int, cache: EncodeCache) -> Array:
 	var encoded: Array = []
 	# [b]One shared copy, shifted into place -- unless something in it is byte-aligned.[/b] A
 	# string or bytes aligns before its bytes, so where its padding falls depends on the bit
@@ -750,12 +924,12 @@ func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 	if _snapshot_reads_open:
 		# A shared dirty set ([method collect_dirty]) arrives as the same array for peer
 		# after peer, and is asked twice per peer (here and from [method state_bits]).
-		if is_same(declarations, _signed):
-			key = _signed_key
+		if is_same(declarations, cache.signed):
+			key = cache.signed_key
 		else:
 			key = _signature(declarations)
-			_signed = declarations
-			_signed_key = key
+			cache.signed = declarations
+			cache.signed_key = key
 	var aligned := false
 	if key >= 0:
 		# The set's bitmask against the byte-aligned declarations', rather than a call
@@ -769,20 +943,20 @@ func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 	var at := pad if aligned else 0
 
 	if key >= 0:
-		var at_pad: Dictionary = _encoded.get(at, {})
+		var at_pad: Dictionary = cache.encoded.get(at, {})
 		if at_pad.has(key):
 			encoded = at_pad[key]
 		else:
 			encoded = _encode(declarations, at)
 			at_pad[key] = encoded
-			_encoded[at] = at_pad
+			cache.encoded[at] = at_pad
 
 	if encoded.is_empty():
 		encoded = _encode(declarations, at)
 
 	if key >= 0 and not aligned:
-		_fast_declarations = declarations
-		_fast_encoded = encoded
+		cache.fast_declarations = declarations
+		cache.fast_encoded = encoded
 	return [encoded, aligned]
 
 
@@ -892,7 +1066,7 @@ func _sync_view(view: PeerView, acked_tick: int) -> void:
 		resolved += 1
 
 		if entry_tick == acked_tick or not view.strict:
-			view.acked.merge(entry["values"], true)
+			view.own_acked().merge(entry["values"], true)
 		else:
 			# Sent before a snapshot the peer has already applied, and still
 			# unconfirmed. Dropped without promotion, so it goes out again -- and stays
@@ -901,16 +1075,12 @@ func _sync_view(view: PeerView, acked_tick: int) -> void:
 			# send is always the held one.
 			dropped = true
 			for property: StringName in entry["values"]:
-				view.relost[property] = true
+				view.own_relost()[property] = true
 
 	if resolved == 0:
 		return
 
-	if resolved == count:
-		view.pending.clear()
-	else:
-		for i in resolved:
-			view.pending.pop_front()
+	view.drop_pending(resolved)
 	# [b]Only a DROP changes what the peer is believed to hold.[/b] `believed` is `acked`
 	# with every pending entry laid over it in tick order, and the entries resolved here
 	# are the oldest ones; promoting them moves their values from the front of that
@@ -964,18 +1134,14 @@ func _trim_view(view: PeerView, oldest_tick: int) -> void:
 			break
 
 		if not view.strict:
-			view.acked.merge(entry["values"], true)
+			view.own_acked().merge(entry["values"], true)
 		else:
 			for property: StringName in entry["values"]:
-				view.relost[property] = true
+				view.own_relost()[property] = true
 
 		aged += 1
 
-	if aged == count:
-		view.pending.clear()
-	else:
-		for i in aged:
-			view.pending.pop_front()
+	view.drop_pending(aged)
 
 	# Promoted (not strict) leaves `believed` as it was; see [method sync_peer_acks].
 	if view.strict:
@@ -990,6 +1156,17 @@ func _trim_view(view: PeerView, oldest_tick: int) -> void:
 ## connected rather than to everyone currently playing.
 func forget_peer(peer_id: int) -> void:
 	_views.erase(peer_id)
+
+
+## The live view for [param peer_id], made when there is none. Main thread.
+func view_for(peer_id: int) -> PeerView:
+	# _view_for's body again rather than a call to it: asked per behaviour per peer per
+	# snapshot by the manager's inline build.
+	var view: PeerView = _views.get(peer_id)
+	if view == null:
+		view = PeerView.new()
+		_views[peer_id] = view
+	return view
 
 
 func _view_for(peer_id: int) -> PeerView:
@@ -1011,6 +1188,7 @@ func _view_for(peer_id: int) -> PeerView:
 func _rebuild_believed(view: PeerView) -> void:
 	view.synced_serial = -1
 	view.believed = view.acked.duplicate()
+	view.shares &= ~PeerView.SHARES_BELIEVED
 
 	for entry in view.pending:
 		view.believed.merge(entry["values"], true)
@@ -1239,7 +1417,17 @@ func estimated_bits(peer_id: int) -> int:
 	# Asked once per entity per peer per snapshot, and its answer depends only on
 	# whether the peer is the owner (see [method DotNetVar.visible_to]) -- so two
 	# numbers, worked out once and again only if the declarations change.
+	# The cached answer here rather than behind [method _estimate]: one call fewer per
+	# behaviour per peer per snapshot is measurable on the inline path.
 	var is_owner := peer_id == identity.owner_peer_id
+	if _estimate_for == net_vars.size():
+		var cached := _estimate_owner if is_owner else _estimate_other
+		if cached >= 0:
+			return cached
+	return _estimate(is_owner)
+
+
+func _estimate(is_owner: bool) -> int:
 	if _estimate_for != net_vars.size():
 		_estimate_owner = -1
 		_estimate_other = -1
@@ -1247,9 +1435,12 @@ func estimated_bits(peer_id: int) -> int:
 	var cached := _estimate_owner if is_owner else _estimate_other
 	if cached >= 0:
 		return cached
+	var owner := identity.owner_peer_id
+	# Any peer id that is not the owner's stands for every one that is not.
+	var peer_id := owner if is_owner else owner + 1
 	var total := 6
 	for declaration in net_vars:
-		if declaration.visible_to(peer_id, identity.owner_peer_id):
+		if declaration.visible_to(peer_id, owner):
 			total += 6 + declaration.estimated_bits()
 	if is_owner:
 		_estimate_owner = total

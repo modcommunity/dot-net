@@ -89,3 +89,9 @@ func describe() -> Dictionary:
 	d["radius"] = radius
 	d["tag_radii"] = radius_by_tag
 	return d
+
+
+## Thread-safe as itself, not as a subclass: see [method DotNetInterest.is_thread_safe].
+## Reads only frozen positions, the identities' fields and its own exports.
+func is_thread_safe() -> bool:
+	return get_script() == DotNetInterestDistance

@@ -111,6 +111,22 @@ func _score(
 
 # --- Public API ------------------------------------------------------------
 
+## Whether [method relevance], [method ranked] and [method _score] may run on a worker
+## thread, for several peers at once ([member DotNetConfig.snapshot_workers]). False unless a
+## strategy says otherwise, and the built-in ones say so only for themselves (their own script,
+## not a subclass), because a subclass is a game's code and nothing here can tell whether it
+## reads a node, a physics space or a shared container. Return true from a subclass when
+## [method _is_relevant], [method _candidates] and [method _score] read nothing but
+## [method DotNetIdentity.world_position] (frozen for the snapshot), the identities' own fields,
+## [param context] and the strategy's own exports, and write nothing at all. [method _prepare]
+## runs on the main thread before the fork and may do anything.
+##
+## A strategy that answers false keeps every snapshot on the manager's thread: correct, and as
+## fast as before the option existed.
+func is_thread_safe() -> bool:
+	return false
+
+
 ## The entities [param observer] should receive, with the cache and linger applied.
 func relevant_for(
 	observer: DotNetIdentity,
@@ -118,7 +134,35 @@ func relevant_for(
 	peer_id: int,
 	context: Dictionary
 ) -> Array[DotNetIdentity]:
-	var now := Time.get_ticks_msec()
+	var answer := relevance(observer, all, peer_id, context)
+	commit_relevance(peer_id, answer)
+	var out: Array[DotNetIdentity] = []
+	out.assign(answer[0])
+	return out
+
+
+## [method relevant_for] without its writes: [code][relevant, cache entry, lingering][/code],
+## the last two null when the cached answer was used, for [method commit_relevance] to store.
+## What a snapshot built on a worker thread asks, since the cache is shared by every peer.
+##
+## [b]The list is an untyped [Array][/b], here and in [method ranked] and [method _evaluate].
+## Appending a node to an [code]Array[DotNetIdentity][/code] checks its script through
+## [method Node.get_script], which refuses a worker thread for a node in the tree: the append
+## fails with "The caller thread can't call the function get_script()" and the entity is
+## silently missing from the snapshot. A main-thread caller wanting the typed list
+## [method Array.assign]s it, as [method relevant_for] does.
+##
+## The time is [code]context["now_ms"][/code] when the caller gives one, which the manager
+## does once per snapshot: read here per peer, two peers a millisecond apart on either side of
+## the evaluation interval could get a cached and a fresh answer in one snapshot, and the same
+## snapshot built twice could differ.
+func relevance(
+	observer: DotNetIdentity,
+	all: Array[DotNetIdentity],
+	peer_id: int,
+	context: Dictionary
+) -> Array:
+	var now := int(context["now_ms"]) if context.has("now_ms") else Time.get_ticks_msec()
 
 	if evaluation_interval_sec > 0.0 and _cache.has(peer_id):
 		var cached: Dictionary = _cache[peer_id]
@@ -138,18 +182,19 @@ func relevant_for(
 			# the cache never expires at all and the entity is never sent even once. The
 			# position still looks right the whole time, because the owning client is
 			# predicting it; what does not arrive is everything it cannot predict.
-			return _resolve(_pinned(cached["ids"], observer, all), all)
+			return [_resolve(_pinned(cached["ids"], observer, all), all), null, null]
 
 	var relevant := _evaluate(observer, all, context)
 
 	var ids := {}
-	for identity in relevant:
+	for identity: DotNetIdentity in relevant:
 		ids[identity.net_id] = true
 
 	# Anything that was relevant and no longer is keeps being sent for a while.
 	# Without this an entity pacing across the boundary costs a full spawn and
 	# despawn several times a second.
-	var linger := _lingering.get(peer_id, {}) as Dictionary
+	# A copy: the stored one is written to below, and this must not write.
+	var linger := (_lingering.get(peer_id, {}) as Dictionary).duplicate()
 	var previous: Dictionary = _cache.get(peer_id, {}).get("ids", {})
 
 	for net_id in previous:
@@ -171,10 +216,15 @@ func relevant_for(
 			ids[net_id] = true
 			relevant.append(identity)
 
-	_lingering[peer_id] = still_lingering
-	_cache[peer_id] = {"at_ms": now, "ids": ids}
+	return [relevant, {"at_ms": now, "ids": ids}, still_lingering]
 
-	return relevant
+
+## Stores what [method relevance] worked out for [param peer_id]. Main thread.
+func commit_relevance(peer_id: int, answer: Array) -> void:
+	if answer[1] == null:
+		return
+	_lingering[peer_id] = answer[2]
+	_cache[peer_id] = answer[1]
 
 
 ## Adds what an observer must receive whatever the cache says.
@@ -216,13 +266,14 @@ func _evaluate(
 	observer: DotNetIdentity,
 	all: Array[DotNetIdentity],
 	context: Dictionary
-) -> Array[DotNetIdentity]:
-	var out: Array[DotNetIdentity] = []
+) -> Array:
+	# Untyped, and so is pool: see [method relevance].
+	var out: Array = []
 
 	var candidates: Variant = _candidates(observer, all, context)
-	var pool: Array[DotNetIdentity] = candidates if candidates is Array else all
+	var pool: Array = candidates if candidates is Array else all
 
-	for identity in pool:
+	for identity: DotNetIdentity in pool:
 		# always_relevant bypasses the strategy entirely. For objectives, bosses and
 		# anything whose absence would be a bug rather than an optimisation.
 		if identity.always_relevant:
@@ -255,12 +306,24 @@ func prioritise(
 	peer_id: int = 0
 ) -> Array[DotNetIdentity]:
 	_note_cap(peer_id, entities.size(), limit, context)
+	var out: Array[DotNetIdentity] = []
+	out.assign(ranked(observer, entities, limit, context))
+	return out
 
+
+## [method prioritise] without its bookkeeping (the cap's log lines, see [method note_cap]):
+## the part a worker thread may run.
+func ranked(
+	observer: DotNetIdentity,
+	entities: Array,
+	limit: int,
+	context: Dictionary
+) -> Array:
 	if limit <= 0 or entities.size() <= limit:
 		return entities
 
 	var scored: Array = []
-	for identity in entities:
+	for identity: DotNetIdentity in entities:
 		scored.append({
 			"identity": identity,
 			# always_relevant entities are pinned above everything else, so the cap
@@ -272,7 +335,7 @@ func prioritise(
 		return float(a["score"]) > float(b["score"])
 	)
 
-	var out: Array[DotNetIdentity] = []
+	var out: Array = []
 	for i in range(limit):
 		out.append(scored[i]["identity"])
 
@@ -297,6 +360,12 @@ func prioritise(
 ## the cap, for the same reason: a set hovering at the cap would otherwise flap once
 ## a snapshot. [param peer_id] 0 is a caller outside the snapshot loop — a test or
 ## a tool asking directly — and is not reported.
+## The entity cap's record and log lines for one peer: [method prioritise]'s first step, for a
+## caller that ranked with [method ranked] off the main thread. Main thread (it logs).
+func note_cap(peer_id: int, count: int, limit: int, context: Dictionary) -> void:
+	_note_cap(peer_id, count, limit, context)
+
+
 func _note_cap(peer_id: int, count: int, limit: int, context: Dictionary) -> void:
 	if peer_id == 0 or limit <= 0:
 		return
@@ -333,8 +402,8 @@ static func _find(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 	return null
 
 
-func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array[DotNetIdentity]:
-	var out: Array[DotNetIdentity] = []
+func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array:
+	var out: Array = []
 	for identity in all:
 		if ids.has(identity.net_id):
 			out.append(identity)

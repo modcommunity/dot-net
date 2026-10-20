@@ -14,5 +14,10 @@ extends RefCounted
 #     a host with its own client tick predicts through the predictor, which remembers the tick
 #     and rounds the input to the wire first (DotNetInput.round_trip, config.predict_wire_input).
 #     DotNetBehaviour._net_predicts(): false keeps a reconcile's rewind without a replay.
-const LEVEL := 10
+# 11: DotNetConfig.snapshot_workers (env DOT_NET_SNAPSHOT_WORKERS, --net-snapshot-workers):
+#     per-peer snapshots built on worker threads through dot-core's DotParallel, off by default.
+#     DotNetInterest.is_thread_safe(), relevance() / commit_relevance(), ranked() / note_cap();
+#     DotNetBudget.accumulated(); DotNetBehaviour.EncodeCache, collect_for_view, write_for_view,
+#     shadow_view / install_view / view_for / peer_view_snapshot; DotNetIdentity.freeze_position.
+const LEVEL := 11
 const OLDEST := 1

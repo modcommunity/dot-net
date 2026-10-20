@@ -98,7 +98,9 @@ func accumulate(
 		budget.accumulators[identity.net_id] = current \
 			+ maxf(0.0, score) + _starvation_boost(waited)
 
-	return _by_accumulator(candidates, budget.accumulators)
+	var ordered: Array[DotNetIdentity] = []
+	ordered.assign(_by_accumulator(candidates, budget.accumulators))
+	return ordered
 
 
 ## [param candidates], highest accumulator first.
@@ -112,11 +114,39 @@ func accumulate(
 ## are the bottom of the mantissa: two accumulators within a few parts in 2^40 of each other
 ## are taken as equal and kept in candidate order, which a comparator sort did not promise
 ## for true ties either.
-static func _by_accumulator(
-	candidates: Array[DotNetIdentity], accumulators: Dictionary
-) -> Array[DotNetIdentity]:
+## [method accumulate] without writing anything: [code][ordered, accumulators, waits][/code],
+## the candidates in the order to serve them and each candidate's new accumulator and wait,
+## in candidate order, for the caller to store once the snapshot is built. What a snapshot
+## built on a worker thread asks: [param budget] is the peer's record (from [method for_peer],
+## made on the main thread), read and not written.
+func accumulated(
+	budget: PeerBudget,
+	candidates: Array,
+	scores: Dictionary
+) -> Array:
 	var count := candidates.size()
-	var ordered: Array[DotNetIdentity] = []
+	var values := PackedFloat64Array()
+	var waits := PackedInt32Array()
+	values.resize(count)
+	waits.resize(count)
+	var by_id := {}
+	for i in count:
+		var identity: DotNetIdentity = candidates[i]
+		var score := float(scores.get(identity.net_id, identity.priority))
+		var current := float(budget.accumulators.get(identity.net_id, 0.0))
+		var waited := int(budget.starved_ticks.get(identity.net_id, 0)) + 1
+		waits[i] = waited
+		values[i] = current + maxf(0.0, score) + _starvation_boost(waited)
+		by_id[identity.net_id] = values[i]
+	return [_by_accumulator(candidates, by_id), values, waits]
+
+
+## Untyped in and out, because a worker thread calls it: see [method DotNetInterest.relevance].
+static func _by_accumulator(
+	candidates: Array, accumulators: Dictionary
+) -> Array:
+	var count := candidates.size()
+	var ordered: Array = []
 	if count == 0:
 		return ordered
 	var values := PackedFloat64Array()

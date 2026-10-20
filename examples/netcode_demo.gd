@@ -366,7 +366,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 423
+const CHECKS := 432
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -441,6 +441,7 @@ func _run() -> void:
 	_test_reordered_and_repeated()
 	_test_snapshot_parts()
 	_test_unchanged_entities()
+	_test_snapshot_threads()
 	_test_input_batches()
 	_test_input_lead()
 	_test_dropped_time()
@@ -4356,6 +4357,177 @@ func _build_counted(_context: Dictionary) -> Node:
 	counted.identity = identity
 	counted._bind(DotNetConfig.new())
 	return body
+
+
+func _test_snapshot_threads() -> void:
+	print("")
+	print("[snapshot threads]")
+
+	# The same scripted ten-peer game three times: snapshots built on this thread, on four
+	# workers, and on four workers with DotParallel.verify running every build twice. Every
+	# payload sent, and every PeerView and budget accumulator after each tick's apply, must
+	# come out byte for byte the same. The scenario is built to reach the state a build hands
+	# back: distance interest that changes with motion, an owner per peer, loss in the acks,
+	# a budget that starves, parts at a small MTU, and half the peers on the old wire format.
+	var was_verify := DotParallel.verify
+	var failures_before := DotParallel.verify_failures
+
+	DotParallel.verify = false
+	var off: Dictionary = _threads_scenario("ThreadsOff", 0, false)
+	var on: Dictionary = _threads_scenario("ThreadsOn", 4, false)
+	DotParallel.verify = true
+	var verified: Dictionary = _threads_scenario("ThreadsVerify", 4, false)
+	var runs_after := DotParallel.verify_runs
+	DotParallel.verify = false
+	var broken: Dictionary = _threads_scenario("ThreadsBroken", 4, true)
+	DotParallel.verify = was_verify
+
+	_check("the scenario sent parts to ten peers (%d payloads)" % (off["payloads"] as Array).size(),
+		int(off["peers_fed"]) == 10 and (off["payloads"] as Array).size() > 300)
+	_check("it starved entities and split snapshots into parts (%d starved, %d multi-part)"
+			% [off["starved"], off["split"]],
+		int(off["starved"]) > 0 and int(off["split"]) > 0)
+	_check("with workers available the pooled path ran (%d of %d snapshots)"
+			% [on["pooled"], on["snapshots"]],
+		not DotParallel.available() or int(on["pooled"]) == int(on["snapshots"]))
+	_check("threads off never pools", int(off["pooled"]) == 0)
+	_check("four workers send the same payloads, byte for byte",
+		_first_difference(off["payloads"], on["payloads"]) == "")
+	_check("four workers leave the same PeerViews and budgets after every tick",
+		_first_difference(off["states"], on["states"]) == "")
+	_check("four workers with verify: same payloads and state",
+		_first_difference(off["payloads"], verified["payloads"]) == ""
+			and _first_difference(off["states"], verified["states"]) == "")
+	_check("verify re-ran every build and found nothing (%d runs)" % (runs_after),
+		DotParallel.verify_failures == failures_before
+			and (not DotParallel.available() or int(verified["pooled"]) > 0))
+	# Armed: a pooled build whose views are dropped on the floor must be seen to differ, or
+	# the comparisons above prove nothing.
+	_check("armed: dropping the views a build hands back is caught",
+		not DotParallel.available()
+			or _first_difference(off["states"], broken["states"]) != "")
+
+
+## One run of [method _test_snapshot_threads]'s game; everything it sent and kept, as bytes.
+func _threads_scenario(label: String, workers: int, skip_views: bool) -> Dictionary:
+	const PEERS := 10
+	const ENTITIES := 40
+	const TICKS := 40
+
+	var host := _parts_manager(label, true, 320)
+	host.config.snapshot_workers = workers
+	# 1500 B per window of ten ticks (the window is scripted below): well under what the
+	# entities in view want, so the accumulator decides who waits.
+	host.config.per_client_budget = 1500
+	var distance := DotNetInterestDistance.new()
+	distance.radius = 14.0
+	distance.evaluation_interval_sec = 0.0
+	host.interest = distance
+	host._test_skip_view_install = skip_views
+
+	var payloads: Array = []
+	var peers_fed := {}
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if d == DotNetMessage.Delivery.UNRELIABLE:
+			payloads.append([peer_id, payload])
+			peers_fed[peer_id] = true
+	host.start()
+	host.spawner.register_factory(&"counted", _build_counted)
+
+	var modern := host.messages.schema_payload()
+	host.messages.features = 0
+	var legacy := host.messages.schema_payload()
+	host.messages.features = DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS | DotNetMessageRegistry.FEATURE_INPUT_LEAD
+	for i in PEERS:
+		var peer := 2 + i
+		host.add_peer(peer)
+		var _adopted := host.receive(modern if i % 2 == 0 else legacy, peer)
+
+	var behaviours: Array[Counted] = []
+	for i in PEERS + ENTITIES:
+		# The first ten are the peers' own (the observers interest measures from).
+		var owner := 2 + i if i < PEERS else 0
+		var spawned: DotNetIdentity = host.spawner.spawn(&"counted", owner, Transform3D.IDENTITY, 0).value
+		spawned.interest_linger_sec = 0.0
+		behaviours.append(spawned.behaviours[0] as Counted)
+
+	var states: Array = []
+	var starved := 0
+	var split := 0
+	for tick in range(1, TICKS + 1):
+		for i in behaviours.size():
+			var c := behaviours[i]
+			# A pure function of (entity, tick): a slow circle per entity, the peers' own
+			# drifting through the crowd so the set in view changes.
+			var phase := float(i) * 0.7 + float(tick) * (0.05 if i >= PEERS else 0.12)
+			var r := 4.0 + float(i % 7) * 3.0
+			var p := Vector3(cos(phase) * r, 0.0, sin(phase) * r)
+			c.position = p
+			(c.identity.get_parent() as Node3D).position = p
+			if tick % 3 != i % 3:
+				c.velocity = Vector3(float((i + tick) % 5), 0.0, 0.0)
+			if (tick + i) % 7 == 0:
+				c.health = 100 - ((tick * 3 + i) % 60)
+			c.grounded = (tick + i) % 4 != 0
+
+		# The budget's window is a wall-clock second, which one run can cross at a different
+		# tick from another; hold it open and roll it every ten ticks instead.
+		for i in PEERS:
+			var w := host.budget.for_peer(2 + i)
+			w.window_started_ms = Time.get_ticks_msec()
+			if tick % 10 == 1:
+				w.bytes_this_second = 0
+		var before := payloads.size()
+		host.server_tick(tick)
+		var per_peer := {}
+		for k in range(before, payloads.size()):
+			var peer: int = payloads[k][0]
+			per_peer[peer] = int(per_peer.get(peer, 0)) + 1
+		for peer: int in per_peer:
+			if int(per_peer[peer]) > 1:
+				split += 1
+
+		# Lossy acks: each peer loses a different third, and the last never acks at all.
+		for i in PEERS - 1:
+			if (tick + i) % 3 != 0:
+				var _acked := host.receive_ack(2 + i, tick)
+
+		var state := []
+		for i in PEERS:
+			var b := host.budget.for_peer(2 + i)
+			starved += b.starved_this_tick
+			state.append([b.accumulators, b.starved_ticks, b.bytes_this_second])
+		for c in behaviours:
+			for i in PEERS:
+				state.append(c.peer_view_snapshot(2 + i))
+		states.append(var_to_bytes(state))
+
+	var out := {
+		"payloads": payloads, "states": states, "peers_fed": peers_fed.size(),
+		"starved": starved, "split": split, "pooled": host._snapshot_pooled,
+		"snapshots": TICKS,
+	}
+	for c in behaviours:
+		var body := c.identity.get_parent()
+		if body.is_inside_tree():
+			body.get_parent().remove_child(body)
+		body.free()
+	remove_child(host)
+	host.free()
+	return out
+
+
+## "" when [param a] and [param b] hold the same bytes in the same order, else the first index
+## and size that differ.
+func _first_difference(a: Array, b: Array) -> String:
+	if a.size() != b.size():
+		return "%d entries against %d" % [a.size(), b.size()]
+	for i in a.size():
+		var x: PackedByteArray = var_to_bytes(a[i])
+		var y: PackedByteArray = var_to_bytes(b[i])
+		if x != y:
+			return "entry %d (%d B against %d B)" % [i, x.size(), y.size()]
+	return ""
 
 
 func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:

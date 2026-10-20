@@ -68,6 +68,22 @@ On the wire, an entity with nothing dirty for this peer is listed by id in the p
 
 What is left after that is the game half of the tick, not the network.
 
+## Snapshots on worker threads
+
+`DotNetConfig.snapshot_workers` (default 0, off; -1 is the processor count less one, at most eight; environment `DOT_NET_SNAPSHOT_WORKERS`, command line `--net-snapshot-workers`) builds each peer's snapshot on dot-core's `DotParallel`, a fork/join on the engine's worker pool that returns inside the tick. Most of a big server's snapshot time is per peer and independent, so it divides by the workers; everything else in the tick stays on the main thread.
+
+How it stays the same answer:
+
+- **Everything a worker reads is frozen first.** `begin_snapshot_reads(now_ms, true)` reads every property and both bit estimates before the fork, and each identity's position is copied (`freeze_position`), because a worker may not touch a node. The clock is read once per snapshot (`context["now_ms"]`), so interest linger and `max_rate` see the same instant on every thread.
+- **A build is pure.** One task per worker owns a contiguous run of peers (the pool gives a task an item index, never a worker index) and its own `EncodeCache`s, created before the fork. A peer's `PeerView` is a copy-on-write shadow (`shadow_view`); interest answers through `relevance` and `ranked`, and the budget through `accumulated`, none of which write.
+- **The changes come back and are applied on the main thread in peer order**: interest's cache and cap notes, the views (`install_view`), the budget's accumulators in the order the inline path leaves them, the counters, then `send_fn`. With 0 workers the same build runs inline on the live views, so both halves are the same code.
+- **Opt-in per interest strategy.** `DotNetInterest.is_thread_safe()` is false unless a strategy says otherwise; the built-in All, Distance and Grid say true for exactly their own class, so a subclass that overrides `_is_relevant` is inline until it opts in. A custom `DotNetVar` codec runs on a worker too: it must not touch nodes.
+- **Off on the web**, threads or not (`DotParallel.available()`), and wherever it is off the reason is logged once and shown in `describe_lines()`.
+
+`DOT_PARALLEL_VERIFY=1` (or `DotParallel.verify`) runs every build twice, once inline in reverse peer order, and reports any difference; `netcode_demo`'s `[snapshot threads]` section compares every payload, `PeerView` and budget after each tick, byte for byte, at 0 workers, 4, and 4 with verify, and checks it notices a build whose views are dropped.
+
+**What it costs today: it is slower, so leave it off.** Measured with the shipped surf load probe (32 and 64 players, acknowledgements on, 6-core VM), snapshot time per tick was 3.25 / 11.99 ms before this change, 3.71 / 13.44 ms with 0 workers and 5.42 / 15.20 ms with 4. A pure build costs about half as much again per peer as the inline one (a shadow `PeerView` per behaviour per peer, then `install_view` for each on the main thread, which at 64 players is 15 ms of apply per snapshot), and four GDScript workers ran the build only about 1.6 times faster than one. The inline path pays for the split too (the build returns its changes instead of writing them), about 14% of snapshot time. Until the apply is cheap and the views are not copied per peer, the switch is for testing the pure path, not for capacity.
+
 ## Identities
 
 - **Net ids are never reused.** A reused id means a snapshot in flight for a dead entity is applied to a live one.

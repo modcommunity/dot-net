@@ -55,6 +55,23 @@ extends DotConfig
 ## what the sharing saves (game-g2gfast [code]tools/load_probe[/code]).
 @export var share_dirty_sets: bool = true
 
+## Worker threads that build per-peer snapshots: 0 builds every peer's on the thread that
+## ticks (the default), -1 is the processor count less one (at most [constant
+## DotParallel.AUTO_MAX]), n is at most n. Environment [code]DOT_NET_SNAPSHOT_WORKERS[/code],
+## command line [code]--net-snapshot-workers[/code].
+##
+## The peers are cut into one contiguous run per worker, each built from a frozen copy of the
+## world (positions, every property read once, the clock read once) into new records, which
+## the thread that ticks then stores and sends in peer order: the bytes are the same with any
+## number of workers. Used only when [method DotParallel.available] (never in a browser) and
+## the interest strategy says [method DotNetInterest.is_thread_safe]; otherwise it is 0 and
+## [method DotNetManager.describe_lines] says why. Off by default because what a worker may
+## not touch includes a game's [method DotNetBehaviour._net_read_property] override (read
+## before the fork, so safe) and its custom codecs ([code]Type.CUSTOM[/code], called on the
+## worker), and a game turns it on knowing its codecs read nothing but their argument.
+## See game-dev docs/server-threading.md for the measurement and the design.
+@export_range(-1, 64) var snapshot_workers: int = 0
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.
@@ -316,6 +333,13 @@ func cli_prefix() -> String:
 
 
 func validate() -> DotResult:
+	if snapshot_workers < -1:
+		return DotResult.fail(
+			DotError.CODE_INVALID,
+			"snapshot_workers must be -1 (automatic), 0 (off) or a worker count.",
+			str(snapshot_workers)
+		)
+
 	if snapshot_rate > tick_rate:
 		return DotResult.fail(
 			DotError.CODE_INVALID,
