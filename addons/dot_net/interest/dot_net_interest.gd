@@ -128,17 +128,74 @@ func is_thread_safe() -> bool:
 
 
 ## The entities [param observer] should receive, with the cache and linger applied.
+##
+## The manager's own path, writing the cache as it goes. [method relevance] and
+## [method commit_relevance] are the same answer split for a worker thread; kept apart
+## rather than this calling them, because the split's copies and untyped lists cost every
+## snapshot on this thread (see [method DotNetManager._send_to_peer]).
 func relevant_for(
 	observer: DotNetIdentity,
 	all: Array[DotNetIdentity],
 	peer_id: int,
 	context: Dictionary
 ) -> Array[DotNetIdentity]:
-	var answer := relevance(observer, all, peer_id, context)
-	commit_relevance(peer_id, answer)
-	var out: Array[DotNetIdentity] = []
-	out.assign(answer[0])
-	return out
+	var now := int(context["now_ms"]) if context.has("now_ms") else Time.get_ticks_msec()
+
+	if evaluation_interval_sec > 0.0 and _cache.has(peer_id):
+		var cached: Dictionary = _cache[peer_id]
+		var age := float(now - int(cached["at_ms"])) / 1000.0
+
+		if age < evaluation_interval_sec:
+			# Pinned before the cache is consulted, not after [method _evaluate] runs.
+			# The cache is a cache of *which entities existed and where* at one instant,
+			# and an entity spawned since is in nobody's cached set — so without this an
+			# observer does not receive its own newly spawned entity until the cache
+			# expires, and neither does anything marked always relevant.
+			#
+			# [b]That is not a small window.[/b] In a game where players respawn, split or
+			# spawn projectiles, a quarter of a second of an entity that exists only by
+			# prediction is a monster that pops into place on every respawn — and on a
+			# host that ticks faster than the wall clock, which is every headless test,
+			# the cache never expires at all and the entity is never sent even once. The
+			# position still looks right the whole time, because the owning client is
+			# predicting it; what does not arrive is everything it cannot predict.
+			return _resolve(_pinned(cached["ids"], observer, all), all)
+
+	var relevant := _evaluate(observer, all, context)
+
+	var ids := {}
+	for identity in relevant:
+		ids[identity.net_id] = true
+
+	# Anything that was relevant and no longer is keeps being sent for a while.
+	# Without this an entity pacing across the boundary costs a full spawn and
+	# despawn several times a second.
+	var linger := _lingering.get(peer_id, {}) as Dictionary
+	var previous: Dictionary = _cache.get(peer_id, {}).get("ids", {})
+
+	for net_id in previous:
+		if not ids.has(net_id) and not linger.has(net_id):
+			linger[net_id] = now
+
+	var still_lingering := {}
+	for net_id in linger:
+		if ids.has(net_id):
+			continue
+
+		var identity := _find(all, net_id)
+		if identity == null:
+			continue
+
+		var elapsed := float(now - int(linger[net_id])) / 1000.0
+		if elapsed < identity.interest_linger_sec:
+			still_lingering[net_id] = linger[net_id]
+			ids[net_id] = true
+			relevant.append(identity)
+
+	_lingering[peer_id] = still_lingering
+	_cache[peer_id] = {"at_ms": now, "ids": ids}
+
+	return relevant
 
 
 ## [method relevant_for] without its writes: [code][relevant, cache entry, lingering][/code],
@@ -182,9 +239,12 @@ func relevance(
 			# the cache never expires at all and the entity is never sent even once. The
 			# position still looks right the whole time, because the owning client is
 			# predicting it; what does not arrive is everything it cannot predict.
-			return [_resolve(_pinned(cached["ids"], observer, all), all), null, null]
+			var resolved: Array = []
+			_resolve_into(resolved, _pinned(cached["ids"], observer, all), all)
+			return [resolved, null, null]
 
-	var relevant := _evaluate(observer, all, context)
+	var relevant: Array = []
+	_evaluate_into(relevant, observer, all, context)
 
 	var ids := {}
 	for identity: DotNetIdentity in relevant:
@@ -266,10 +326,20 @@ func _evaluate(
 	observer: DotNetIdentity,
 	all: Array[DotNetIdentity],
 	context: Dictionary
-) -> Array:
-	# Untyped, and so is pool: see [method relevance].
-	var out: Array = []
+) -> Array[DotNetIdentity]:
+	var out: Array[DotNetIdentity] = []
+	_evaluate_into(out, observer, all, context)
+	return out
 
+
+## [method _evaluate] into [param out]: typed on the manager's thread, untyped on a worker
+## (see [method relevance]).
+func _evaluate_into(
+	out: Array,
+	observer: DotNetIdentity,
+	all: Array[DotNetIdentity],
+	context: Dictionary
+) -> void:
 	var candidates: Variant = _candidates(observer, all, context)
 	var pool: Array = candidates if candidates is Array else all
 
@@ -290,8 +360,6 @@ func _evaluate(
 		if _is_relevant(observer, identity, context):
 			out.append(identity)
 
-	return out
-
 
 ## Sorts by score and truncates to the entity cap.
 ##
@@ -306,13 +374,17 @@ func prioritise(
 	peer_id: int = 0
 ) -> Array[DotNetIdentity]:
 	_note_cap(peer_id, entities.size(), limit, context)
+
+	if limit <= 0 or entities.size() <= limit:
+		return entities
+
 	var out: Array[DotNetIdentity] = []
-	out.assign(ranked(observer, entities, limit, context))
+	_rank_into(out, observer, entities, limit, context)
 	return out
 
 
-## [method prioritise] without its bookkeeping (the cap's log lines, see [method note_cap]):
-## the part a worker thread may run.
+## [method prioritise] without its bookkeeping (the cap's log lines, see [method note_cap]),
+## into an untyped list: the part a worker thread may run.
 func ranked(
 	observer: DotNetIdentity,
 	entities: Array,
@@ -322,6 +394,18 @@ func ranked(
 	if limit <= 0 or entities.size() <= limit:
 		return entities
 
+	var out: Array = []
+	_rank_into(out, observer, entities, limit, context)
+	return out
+
+
+func _rank_into(
+	out: Array,
+	observer: DotNetIdentity,
+	entities: Array,
+	limit: int,
+	context: Dictionary
+) -> void:
 	var scored: Array = []
 	for identity: DotNetIdentity in entities:
 		scored.append({
@@ -335,11 +419,8 @@ func ranked(
 		return float(a["score"]) > float(b["score"])
 	)
 
-	var out: Array = []
 	for i in range(limit):
 		out.append(scored[i]["identity"])
-
-	return out
 
 
 ## Reports the edges of "the cap is cutting what this peer should see".
@@ -402,12 +483,16 @@ static func _find(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 	return null
 
 
-func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array:
-	var out: Array = []
+func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array[DotNetIdentity]:
+	var out: Array[DotNetIdentity] = []
+	_resolve_into(out, ids, all)
+	return out
+
+
+func _resolve_into(out: Array, ids: Dictionary, all: Array[DotNetIdentity]) -> void:
 	for identity in all:
 		if ids.has(identity.net_id):
 			out.append(identity)
-	return out
 
 
 ## Forgets a peer's cached set. Call on disconnect.

@@ -4363,20 +4363,20 @@ func _test_snapshot_threads() -> void:
 	print("")
 	print("[snapshot threads]")
 
-	# The same scripted ten-peer game three times: snapshots built on this thread, on four
-	# workers, and on four workers with DotParallel.verify running every build twice. Every
-	# payload sent, and every PeerView and budget accumulator after each tick's apply, must
-	# come out byte for byte the same. The scenario is built to reach the state a build hands
-	# back: distance interest that changes with motion, an owner per peer, loss in the acks,
-	# a budget that starves, parts at a small MTU, and half the peers on the old wire format.
+	# The same scripted ten-peer game built on this thread, on four workers, and on two with
+	# DotParallel.verify on. Every payload sent, and every PeerView and budget accumulator after
+	# each tick, must come out byte for byte the same. The scenario is built to reach every
+	# per-peer record a build writes: distance interest that changes with motion, an owner per
+	# peer, loss in the acks, a budget that starves, parts at a small MTU, and half the peers on
+	# the old wire format.
 	var was_verify := DotParallel.verify
-	var failures_before := DotParallel.verify_failures
+	var runs_before := DotParallel.verify_runs
 
 	DotParallel.verify = false
 	var off: Dictionary = _threads_scenario("ThreadsOff", 0, false)
 	var on: Dictionary = _threads_scenario("ThreadsOn", 4, false)
 	DotParallel.verify = true
-	var verified: Dictionary = _threads_scenario("ThreadsVerify", 4, false)
+	var verified: Dictionary = _threads_scenario("ThreadsVerify", 2, false)
 	var runs_after := DotParallel.verify_runs
 	DotParallel.verify = false
 	var broken: Dictionary = _threads_scenario("ThreadsBroken", 4, true)
@@ -4391,25 +4391,30 @@ func _test_snapshot_threads() -> void:
 			% [on["pooled"], on["snapshots"]],
 		not DotParallel.available() or int(on["pooled"]) == int(on["snapshots"]))
 	_check("threads off never pools", int(off["pooled"]) == 0)
-	_check("four workers send the same payloads, byte for byte",
+	_check("four workers send the same payloads, byte for byte %s" % _first_difference(off["payloads"], on["payloads"]),
 		_first_difference(off["payloads"], on["payloads"]) == "")
-	_check("four workers leave the same PeerViews and budgets after every tick",
+	_check("four workers leave the same PeerViews and budgets after every tick %s"
+			% _first_difference(off["states"], on["states"]),
 		_first_difference(off["states"], on["states"]) == "")
-	_check("four workers with verify: same payloads and state",
+	_check("two workers with verify on: same payloads and state",
 		_first_difference(off["payloads"], verified["payloads"]) == ""
-			and _first_difference(off["states"], verified["states"]) == "")
-	_check("verify re-ran every build and found nothing (%d runs)" % (runs_after),
-		DotParallel.verify_failures == failures_before
+			and _first_difference(off["states"], verified["states"]) == ""
 			and (not DotParallel.available() or int(verified["pooled"]) > 0))
-	# Armed: a pooled build whose views are dropped on the floor must be seen to differ, or
-	# the comparisons above prove nothing.
-	_check("armed: dropping the views a build hands back is caught",
+	# A build writes its peers' records in place, so running it twice would advance every
+	# view and accumulator twice: verify must leave these tasks alone. The byte comparison
+	# with the inline path above is what proves them instead.
+	_check("verify never re-runs a build that writes in place (%d re-runs)"
+			% (runs_after - runs_before),
+		runs_after == runs_before)
+	# Armed: a pooled build that ignores its peer's acks must be seen to differ, or the
+	# comparisons above prove nothing.
+	_check("armed: a pooled build that ignores acks is caught",
 		not DotParallel.available()
-			or _first_difference(off["states"], broken["states"]) != "")
+			or _first_difference(off["payloads"], broken["payloads"]) != "")
 
 
 ## One run of [method _test_snapshot_threads]'s game; everything it sent and kept, as bytes.
-func _threads_scenario(label: String, workers: int, skip_views: bool) -> Dictionary:
+func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 	const PEERS := 10
 	const ENTITIES := 40
 	const TICKS := 40
@@ -4423,7 +4428,7 @@ func _threads_scenario(label: String, workers: int, skip_views: bool) -> Diction
 	distance.radius = 14.0
 	distance.evaluation_interval_sec = 0.0
 	host.interest = distance
-	host._test_skip_view_install = skip_views
+	host._test_skew_pooled = skew
 
 	var payloads: Array = []
 	var peers_fed := {}

@@ -17,7 +17,8 @@ extends RefCounted
 # 11: DotNetConfig.snapshot_workers (env DOT_NET_SNAPSHOT_WORKERS, --net-snapshot-workers):
 #     per-peer snapshots built on worker threads through dot-core's DotParallel, off by default.
 #     DotNetInterest.is_thread_safe(), relevance() / commit_relevance(), ranked() / note_cap();
-#     DotNetBudget.accumulated(); DotNetBehaviour.EncodeCache, collect_for_view, write_for_view,
-#     shadow_view / install_view / view_for / peer_view_snapshot; DotNetIdentity.freeze_position.
+#     DotNetBudget.accumulate_record(); DotNetBehaviour.EncodeCache, collect_for_view,
+#     write_for_view, state_bits_cached, view_for, peer_view_snapshot;
+#     DotNetIdentity.freeze_position.
 const LEVEL := 11
 const OLDEST := 1

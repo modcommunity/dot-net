@@ -98,8 +98,29 @@ func accumulate(
 		budget.accumulators[identity.net_id] = current \
 			+ maxf(0.0, score) + _starvation_boost(waited)
 
-	var ordered: Array[DotNetIdentity] = []
-	ordered.assign(_by_accumulator(candidates, budget.accumulators))
+	return _by_accumulator(candidates, budget.accumulators)
+
+
+## [method accumulate] for a worker thread: the same writes, into [param budget] (the peer's
+## record from [method for_peer], made on the manager's thread, and written by no other
+## thread), and the order as an untyped list (see [method DotNetInterest.relevance]).
+func accumulate_record(
+	budget: PeerBudget,
+	candidates: Array,
+	scores: Dictionary
+) -> Array:
+	for identity: DotNetIdentity in candidates:
+		var score := float(scores.get(identity.net_id, identity.priority))
+		var current := float(budget.accumulators.get(identity.net_id, 0.0))
+
+		var waited := int(budget.starved_ticks.get(identity.net_id, 0)) + 1
+		budget.starved_ticks[identity.net_id] = waited
+
+		budget.accumulators[identity.net_id] = current \
+			+ maxf(0.0, score) + _starvation_boost(waited)
+
+	var ordered: Array = []
+	_order_into(candidates, budget.accumulators, ordered)
 	return ordered
 
 
@@ -114,41 +135,22 @@ func accumulate(
 ## are the bottom of the mantissa: two accumulators within a few parts in 2^40 of each other
 ## are taken as equal and kept in candidate order, which a comparator sort did not promise
 ## for true ties either.
-## [method accumulate] without writing anything: [code][ordered, accumulators, waits][/code],
-## the candidates in the order to serve them and each candidate's new accumulator and wait,
-## in candidate order, for the caller to store once the snapshot is built. What a snapshot
-## built on a worker thread asks: [param budget] is the peer's record (from [method for_peer],
-## made on the main thread), read and not written.
-func accumulated(
-	budget: PeerBudget,
-	candidates: Array,
-	scores: Dictionary
-) -> Array:
-	var count := candidates.size()
-	var values := PackedFloat64Array()
-	var waits := PackedInt32Array()
-	values.resize(count)
-	waits.resize(count)
-	var by_id := {}
-	for i in count:
-		var identity: DotNetIdentity = candidates[i]
-		var score := float(scores.get(identity.net_id, identity.priority))
-		var current := float(budget.accumulators.get(identity.net_id, 0.0))
-		var waited := int(budget.starved_ticks.get(identity.net_id, 0)) + 1
-		waits[i] = waited
-		values[i] = current + maxf(0.0, score) + _starvation_boost(waited)
-		by_id[identity.net_id] = values[i]
-	return [_by_accumulator(candidates, by_id), values, waits]
-
-
-## Untyped in and out, because a worker thread calls it: see [method DotNetInterest.relevance].
 static func _by_accumulator(
-	candidates: Array, accumulators: Dictionary
-) -> Array:
+	candidates: Array[DotNetIdentity], accumulators: Dictionary
+) -> Array[DotNetIdentity]:
+	var ordered: Array[DotNetIdentity] = []
+	_order_into(candidates, accumulators, ordered)
+	return ordered
+
+
+## [method _by_accumulator] into [param ordered], typed or not: untyped from
+## [method accumulate_record] on a worker thread (see [method DotNetInterest.relevance]).
+static func _order_into(
+	candidates: Array, accumulators: Dictionary, ordered: Array
+) -> void:
 	var count := candidates.size()
-	var ordered: Array = []
 	if count == 0:
-		return ordered
+		return
 	var values := PackedFloat64Array()
 	values.resize(count)
 	for i in count:
@@ -166,7 +168,6 @@ static func _by_accumulator(
 	ordered.resize(count)
 	for i in count:
 		ordered[i] = candidates[keys[i] & low]
-	return ordered
 
 
 ## Extra priority for an entity that has waited too long.
