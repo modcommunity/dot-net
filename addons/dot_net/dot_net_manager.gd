@@ -777,6 +777,11 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 
 # --- Snapshots -------------------------------------------------------------
 
+## Observers frozen by [method _freeze_job] because they were registered after the tick's
+## identity list was read; thawed with the rest.
+var _late_frozen: Array[DotNetIdentity] = []
+
+
 ## Builds and sends a snapshot to every peer, filtered and prioritised per peer.
 ## [param phase] and [param period]: only the peers whose id falls on this phase, when
 ## snapshots are staggered ([member DotNetConfig.stagger_snapshots]); -1 is every peer.
@@ -856,6 +861,10 @@ func _send_snapshots(
 	if pooled:
 		for identity in identities:
 			identity.thaw_position()
+		for identity in _late_frozen:
+			if is_instance_valid(identity):
+				identity.thaw_position()
+		_late_frozen.clear()
 
 	snapshot_sent.emit(tick, sent_to)
 
@@ -1257,6 +1266,13 @@ func _freeze_job(peer_id: int, tick: int) -> SnapshotJob:
 	var job := SnapshotJob.new()
 	job.peer_id = peer_id
 	job.observer = _observer_for(peer_id)
+	# [b]The observer may not be in [code]identities[/code][/b], which was read before input
+	# and simulation: a peer's first entity registered during this tick (a join, a respawn) is
+	# found by [method _observer_for] but was never frozen, and interest would read its
+	# [code]global_position[/code] on a worker. Frozen here, on the main thread.
+	if job.observer != null and not job.observer.is_position_frozen():
+		job.observer.freeze_position()
+		_late_frozen.append(job.observer)
 
 	# How early this peer's commands have been arriving, for its clock to steer by: in every
 	# part, so a lost part does not lose it, behind an empty tail where the part has none.

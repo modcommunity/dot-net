@@ -307,6 +307,10 @@ func freeze_position() -> void:
 	_position_frozen = true
 
 
+func is_position_frozen() -> bool:
+	return _position_frozen
+
+
 func thaw_position() -> void:
 	_position_frozen = false
 

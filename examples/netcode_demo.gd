@@ -167,6 +167,53 @@ class Counted extends Movement:
 		last_applied = tick
 
 
+## A [Counted] with the property kinds the pooled build has to encode the same as the inline
+## one: a string and a byte array (byte-aligned, so their bits depend on where they start),
+## and a property limited to a rate far too slow to send twice in a run.
+class Rich extends Counted:
+	var title: String = ""
+	var blob: PackedByteArray = PackedByteArray()
+	var rated: int = 0
+
+	func _register_net_vars() -> void:
+		super._register_net_vars()
+		replicate(&"title", DotNetVar.Type.STRING)
+		replicate(&"blob", DotNetVar.Type.BYTES)
+		replicate(&"rated", DotNetVar.Type.UINT).bits(16).at_most(0.01)
+
+
+## A [Movement] that, on one tick and from inside its `_net_simulate`, spawns the first entity
+## a peer owns: that peer's observer is registered after the tick's identity list was read.
+class SpawnsFirst extends Movement:
+	var host: DotNetManager = null
+	var peer: int = 0
+	var at_tick: int = 3
+	var spawned: bool = false
+
+	func _net_simulate(tick: int, delta: float) -> void:
+		super._net_simulate(tick, delta)
+		if not spawned and tick == at_tick and host != null:
+			spawned = true
+			var _made := host.spawner.spawn(&"counted", peer, Transform3D.IDENTITY, tick)
+
+
+## Distance interest that records whether it was ever asked about an observer whose position
+## was not frozen, from any thread: the worker's read the freeze exists to prevent.
+class FrozenProbe extends DotNetInterestDistance:
+	var unfrozen_asks: int = 0
+	var asks_with_observer: int = 0
+
+	func _is_relevant(observer: DotNetIdentity, entity: DotNetIdentity, context: Dictionary) -> bool:
+		if observer != null:
+			asks_with_observer += 1
+			if not observer.is_position_frozen():
+				unfrozen_asks += 1
+		return super._is_relevant(observer, entity, context)
+
+	func is_thread_safe() -> bool:
+		return true
+
+
 ## A bot the server walks back and forth along x at a constant speed, reversing at once at
 ## each end: a pure function of the tick ([method at]), so the server's truth at any tick is
 ## known without asking the server. On a receiving client it records what it last heard.
@@ -366,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 432
+const CHECKS := 444
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -4359,6 +4406,21 @@ func _build_counted(_context: Dictionary) -> Node:
 	return body
 
 
+func _build_rich(context: Dictionary) -> Node:
+	var body := _build_counted(context)
+	var identity := body.get_node("NetIdentity") as DotNetIdentity
+	var old := identity.behaviours[0]
+	body.remove_child(old)
+	old.free()
+	var rich := Rich.new()
+	rich.name = "Movement"
+	body.add_child(rich)
+	identity.behaviours = [rich]
+	rich.identity = identity
+	rich._bind(DotNetConfig.new())
+	return body
+
+
 func _test_snapshot_threads() -> void:
 	print("")
 	print("[snapshot threads]")
@@ -4380,6 +4442,17 @@ func _test_snapshot_threads() -> void:
 	var runs_after := DotParallel.verify_runs
 	DotParallel.verify = false
 	var broken: Dictionary = _threads_scenario("ThreadsBroken", 4, true)
+	# The paths the first scenario leaves out (evaluation interval 0, no linger, no stagger,
+	# nothing rate-limited, no strings): serial against pooled again for each.
+	var extra := {}
+	for variant: String in ["cache", "grid"]:
+		DotParallel.verify = false
+		var serial: Dictionary = _threads_scenario("Extra" + variant + "Off", 0, false, variant)
+		var pooled: Dictionary = _threads_scenario("Extra" + variant + "On", 3, false, variant)
+		DotParallel.verify = true
+		var checked: Dictionary = _threads_scenario("Extra" + variant + "Verify", 2, false, variant)
+		DotParallel.verify = false
+		extra[variant] = [serial, pooled, checked]
 	DotParallel.verify = was_verify
 
 	_check("the scenario sent parts to ten peers (%d payloads)" % (off["payloads"] as Array).size(),
@@ -4412,9 +4485,89 @@ func _test_snapshot_threads() -> void:
 		not DotParallel.available()
 			or _first_difference(off["payloads"], broken["payloads"]) != "")
 
+	for variant: String in extra:
+		var runs: Array = extra[variant]
+		var serial: Dictionary = runs[0]
+		_check("%s: the scenario sent snapshots under a held cache, linger and stagger (%d payloads, %d cached peers)"
+				% [variant, (serial["payloads"] as Array).size(), serial["cache_hits"]],
+			(serial["payloads"] as Array).size() > 100 and int(serial["cache_hits"]) > 0)
+		for k in [1, 2]:
+			var other: Dictionary = runs[k]
+			_check("%s: %s workers send the same payloads and state as the inline path (payloads: %s; state: %s; pooled %d)"
+					% [variant, "three" if k == 1 else "two (verify on)", _first_difference(serial["payloads"], other["payloads"]),
+						_first_difference(serial["states"], other["states"]), other["pooled"]],
+				_first_difference(serial["payloads"], other["payloads"]) == ""
+					and _first_difference(serial["states"], other["states"]) == ""
+					and (not DotParallel.available() or int(other["pooled"]) > 0))
+
+	_test_first_entity_mid_tick()
+
+
+## A peer's first entity registered inside a tick, with workers on: the observer is found by
+## the snapshot but was not in the list that was frozen, so interest must be asked about a
+## frozen one. Fails (unfrozen asks) if the job takes the observer as it finds it.
+func _test_first_entity_mid_tick() -> void:
+	var host := _parts_manager("MidTick", true, 1200)
+	host.config.snapshot_workers = 2
+	var probe := FrozenProbe.new()
+	probe.radius = 50.0
+	probe.evaluation_interval_sec = 0.0
+	host.interest = probe
+	var sent := {}
+	host.send_fn = func(peer_id: int, _payload: PackedByteArray, _d: int) -> void:
+		sent[peer_id] = int(sent.get(peer_id, 0)) + 1
+	host.start()
+	host.spawner.register_factory(&"counted", _build_counted)
+	var modern := host.messages.schema_payload()
+	for peer in [2, 3]:
+		host.add_peer(peer)
+		var _adopted := host.receive(modern, peer)
+	var keep: Array = []
+	for peer in [2, 3, 0, 0]:
+		var identity: DotNetIdentity = host.spawner.spawn(&"counted", peer, Transform3D.IDENTITY, 0).value
+		keep.append(identity)
+
+	# The spawner is the one that spawns peer 3's... a third peer, joined with no entity.
+	host.add_peer(4)
+	var _adopted4 := host.receive(modern, 4)
+	var spawner_identity := _make_entity(&"counted", 0)
+	var driver := SpawnsFirst.new()
+	driver.name = "Driver"
+	spawner_identity.get_parent().add_child(driver)
+	spawner_identity.behaviours = [driver]
+	driver.identity = spawner_identity
+	driver._bind(DotNetConfig.new())
+	driver.host = host
+	driver.peer = 4
+	driver.at_tick = 3
+	var registered := host.registry.register(spawner_identity, 0, 0, host.config)
+	_check("mid-tick: the driver entity registered", registered.ok)
+	keep.append(spawner_identity)
+
+	for tick in range(1, 7):
+		host.server_tick(tick)
+	var pooled_runs: int = host._snapshot_pooled
+	_check("mid-tick: peer 4's entity exists, spawned during tick 3", driver.spawned
+		and not host.registry.owned_by(4).is_empty())
+	_check("mid-tick: the snapshots were built on workers (%d)" % pooled_runs,
+		not DotParallel.available() or pooled_runs > 0)
+	_check("mid-tick: interest asked about the late observer (%d asks)" % probe.asks_with_observer,
+		probe.asks_with_observer > 0)
+	_check("mid-tick: never asked about an observer that was not frozen (%d asks)" % probe.unfrozen_asks,
+		not DotParallel.available() or probe.unfrozen_asks == 0)
+	_check("mid-tick: every freeze was undone",
+		not host.registry.owned_by(4)[0].is_position_frozen())
+
+	for identity: DotNetIdentity in host.registry.all():
+		var body := identity.get_parent()
+		if body != null and body.is_inside_tree():
+			body.get_parent().remove_child(body)
+	remove_child(host)
+	host.free()
+
 
 ## One run of [method _test_snapshot_threads]'s game; everything it sent and kept, as bytes.
-func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
+func _threads_scenario(label: String, workers: int, skew: bool, variant: String = "") -> Dictionary:
 	const PEERS := 10
 	const ENTITIES := 40
 	const TICKS := 40
@@ -4429,6 +4582,21 @@ func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 	distance.evaluation_interval_sec = 0.0
 	host.interest = distance
 	host._test_skew_pooled = skew
+	var rich := variant != ""
+	if rich:
+		# A cached answer is kept for good and expired by hand below (a wall-clock interval
+		# would expire at a different tick in each run); a leaver lingers for good.
+		var strategy: DotNetInterest = distance
+		if variant == "grid":
+			var grid := DotNetInterestGrid.new()
+			grid.cell_size = 8.0
+			grid.radius = 14.0
+			strategy = grid
+			host.interest = grid
+		strategy.evaluation_interval_sec = 1.0e6
+		# Staggered: three phases, a peer a tick each third.
+		host.config.snapshot_rate = 20
+		host.config.stagger_snapshots = true
 
 	var payloads: Array = []
 	var peers_fed := {}
@@ -4437,7 +4605,7 @@ func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 			payloads.append([peer_id, payload])
 			peers_fed[peer_id] = true
 	host.start()
-	host.spawner.register_factory(&"counted", _build_counted)
+	host.spawner.register_factory(&"counted", _build_rich if rich else _build_counted)
 
 	var modern := host.messages.schema_payload()
 	host.messages.features = 0
@@ -4453,7 +4621,9 @@ func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 		# The first ten are the peers' own (the observers interest measures from).
 		var owner := 2 + i if i < PEERS else 0
 		var spawned: DotNetIdentity = host.spawner.spawn(&"counted", owner, Transform3D.IDENTITY, 0).value
-		spawned.interest_linger_sec = 0.0
+		spawned.interest_linger_sec = 1.0e6 if rich else 0.0
+		# Two always-relevant entities: the pinned path under a cache hit.
+		spawned.always_relevant = rich and i >= PEERS and i < PEERS + 2
 		behaviours.append(spawned.behaviours[0] as Counted)
 
 	var states: Array = []
@@ -4474,6 +4644,11 @@ func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 			if (tick + i) % 7 == 0:
 				c.health = 100 - ((tick * 3 + i) % 60)
 			c.grounded = (tick + i) % 4 != 0
+			if c is Rich:
+				var r2 := c as Rich
+				r2.title = "unit-%d" % ((tick + i) % 6)
+				r2.blob = PackedByteArray([i % 256, tick % 256, (i * tick) % 256]).slice(0, 1 + (tick + i) % 3)
+				r2.rated = tick * 7 + i
 
 		# The budget's window is a wall-clock second, which one run can cross at a different
 		# tick from another; hold it open and roll it every ten ticks instead.
@@ -4482,6 +4657,9 @@ func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 			w.window_started_ms = Time.get_ticks_msec()
 			if tick % 10 == 1:
 				w.bytes_this_second = 0
+		if rich and tick % 8 == 0:
+			for cached: Dictionary in host.interest._cache.values():
+				cached["at_ms"] = 0
 		var before := payloads.size()
 		host.server_tick(tick)
 		var per_peer := {}
@@ -4504,14 +4682,23 @@ func _threads_scenario(label: String, workers: int, skew: bool) -> Dictionary:
 			state.append([b.accumulators, b.starved_ticks, b.bytes_this_second])
 		for c in behaviours:
 			for i in PEERS:
-				state.append(c.peer_view_snapshot(2 + i))
+				var view_state := c.peer_view_snapshot(2 + i)
+				# The wall-clock times of a rate-limited send differ between runs; which
+				# properties have one does not.
+				if view_state.has("last_sent_ms"):
+					for key in view_state["last_sent_ms"]:
+						view_state["last_sent_ms"][key] = true
+				state.append(view_state)
 		states.append(var_to_bytes(state))
 
 	var out := {
 		"payloads": payloads, "states": states, "peers_fed": peers_fed.size(),
 		"starved": starved, "split": split, "pooled": host._snapshot_pooled,
-		"snapshots": TICKS,
+		"snapshots": TICKS, "cache_hits": 0,
 	}
+	if rich:
+		# Hits that happened: a cache entry older than the first tick's can only be a hit.
+		out["cache_hits"] = host.interest._cache.size()
 	for c in behaviours:
 		var body := c.identity.get_parent()
 		if body.is_inside_tree():
