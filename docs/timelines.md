@@ -65,6 +65,10 @@ Measured against a real g2gfast server on `surf_mesa`, a separate client process
 What is left after a stall on random 60-150 ms frames is the frames themselves: a command waits for the rest of its frame to go out, and a frame longer than any in the last second is late by the difference.
 
 
+## A round trip measured across a stall
+
+**A game's ping that waited out a stall reads the stall as latency** (2026-10-22, Zombie Zone on the web, found by tracing `net.clock` on a real Chrome against the live server). The loading cover holds the game's commands, so no report exists to steer the lead until it drops; the round trip steers it meanwhile, and the ping the game feeds read 14.8 s across a 10.7 s stall. The median, the jitter and with them `_target_lead()` went to 888 ticks and the clock snapped nine times in one frame, then back. `_note_rtt` holds a sample to `RTT_STALL_SECONDS` past the median of the untouched samples when a stall the clock saw (`_stalls`: frames and dropped stretches over 0.25 s) ends inside the sample's span and explains half its excess; `rtt_held` in `describe()` counts them. Held rather than dropped, because the frames a stall leaves behind do delay a command.
+
 ## The receive timeline
 
 The timeline the clock walks is the RECEIVE timeline: `received_tick()`, the newest snapshot tick as the quickest recent packets place it. `server_tick()` is that plus the flight time (`one_way_ticks()`).

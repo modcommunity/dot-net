@@ -64,6 +64,12 @@ const SNAP_THRESHOLD_SECONDS := 1.0
 var _rtt_samples: Array[float] = []
 const RTT_SAMPLE_COUNT := 16
 
+## A frame this long (seconds) is a stall a round trip measured across may hold.
+const RTT_STALL_SECONDS := 0.25
+
+## Stalls remembered, as [code]Vector2(wall second it ended, seconds)[/code]: the newest few.
+const RTT_STALL_MEMORY := 8
+
 ## Simulation rate in ticks per second.
 var tick_rate: int = 60
 
@@ -285,6 +291,12 @@ var _engine_frame_ticks: PackedInt64Array = [0, 0]
 var _frame_waits: Array[Vector2] = []
 var _lost_seconds: float = 0.0
 var _lost_count: int = 0
+var _last_wall_usec: int = 0
+var _stalls: Array[Vector2] = []
+var _rtt_rejected: int = 0
+## The median of the samples no stall touched: what a held one is held near, so held ones do not
+## raise it a step each.
+var _rtt_base: float = 0.0
 
 
 func _init(p_tick_rate: int = 60, p_is_authority: bool = false) -> void:
@@ -467,6 +479,7 @@ func note_engine_frame(frame: int, wall_usec: int, physics_frames: int, physics_
 		max_steps: int = 8) -> void:
 	if is_authority or frame == _engine_frame:
 		return
+	_last_wall_usec = wall_usec
 	# Steps that ran before this frame: the engine counts the step running now.
 	var before := physics_frames - 1
 	if _engine_frame < 0 or physics_rate != _engine_rate or physics_rate <= 0:
@@ -492,6 +505,7 @@ func note_engine_frame(frame: int, wall_usec: int, physics_frames: int, physics_
 	# one: a host flushes a frame's packets at its end, or at the next frame's poll.
 	var sent_after := _engine_frame_ticks[0]
 	_engine_frame_ticks = [_engine_frame_ticks[1], tick]
+	_note_stall(wall_usec, float(wall_usec - _engine_prev_wall) / 1000000.0)
 	_credit_dropped(maxf(settled, _uncovered(wall_usec, before, physics_rate, max_steps)))
 	_discount_long_frame(wall_usec, float(wall_usec - _engine_prev_wall) / 1000000.0, sent_after)
 	_engine_prev_wall = wall_usec
@@ -510,6 +524,7 @@ func note_engine_time(wall_usec: int, physics_frames: int, physics_rate: int,
 		max_steps: int = 8) -> void:
 	if is_authority or _engine_frame < 0 or _engine_physics0 < 0 or physics_rate != _engine_rate:
 		return
+	_last_wall_usec = wall_usec
 	# This frame's commands go out at its end, after this, and the previous frame's may have
 	# waited for this frame's poll.
 	_credit_dropped(_uncovered(wall_usec, physics_frames, physics_rate, max_steps))
@@ -558,6 +573,7 @@ func _credit_dropped(gap: float) -> void:
 	if lost <= 0.0:
 		return
 	_engine_credited += lost
+	_note_stall(_last_wall_usec, lost)
 	_lost_seconds += lost
 	_lost_count += 1
 	# Local time and both timelines move on by it: the steps that would have carried them never
@@ -580,7 +596,8 @@ func _credit_dropped(gap: float) -> void:
 			_settle_open = false
 	if ticks >= 1.0:
 		DotLog.debug(CHANNEL, "the engine dropped time; local time follows the wall clock",
-			{"seconds": snappedf(lost, 0.001), "ticks": snappedf(ticks, 0.1)})
+			{"seconds": snappedf(lost, 0.001), "ticks": snappedf(ticks, 0.1),
+			"tick": tick, "received": _received_tick, "synced": _synced})
 
 
 ## A frame with a physics step just ended at [param wall_usec], [param seconds] after it began; the commands produced
@@ -749,6 +766,11 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 
 	var first := not _synced or (not _synced_with_rtt and _rtt_ms > 0.0)
 	_follow_arrival(server_tick, first)
+	if DotLog.enabled(DotLog.Level.TRACE, CHANNEL):
+		var traced := _state_fields()
+		traced["server_tick"] = server_tick
+		traced["rtt_in"] = snappedf(rtt_ms, 0.1)
+		DotLog.trace(CHANNEL, "snapshot sampled", traced)
 
 	if _lead_live and not first:
 		# The input timeline is the server's report's to steer ([method _steer_lead], every
@@ -787,8 +809,11 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		var snap := snap_threshold_ticks()
 		if (behind > snap and round_trip - tick > snap) or (behind < -snap and round_trip - tick < -snap):
 			_snap_count += 1
-			DotLog.warn(CHANNEL, "clock snapped; predicted state is stale",
-				{"error_ticks": behind, "snaps": _snap_count})
+			var fields := _state_fields()
+			fields["error_ticks"] = behind
+			fields["snaps"] = _snap_count
+			fields["round_trip_error"] = round_trip - tick
+			DotLog.warn(CHANNEL, "clock snapped; predicted state is stale", fields)
 			tick += behind
 			_drift_scale = 1.0
 		return
@@ -815,11 +840,10 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		# Not drift — a suspended process, or a reconnect. Smoothing would take
 		# hours, and everything predicted is stale regardless.
 		_snap_count += 1
-		DotLog.warn(
-			CHANNEL,
-			"clock snapped; predicted state is stale",
-			{"error_ticks": error, "snaps": _snap_count}
-		)
+		var snap_fields := _state_fields()
+		snap_fields["error_ticks"] = error
+		snap_fields["snaps"] = _snap_count
+		DotLog.warn(CHANNEL, "clock snapped; predicted state is stale", snap_fields)
 		tick = target
 		_drift_scale = 1.0
 		return
@@ -855,6 +879,17 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 		float(error) / float(maxi(1, tick_rate)), -MAX_DRIFT_RATE, MAX_DRIFT_RATE
 	)
 	_drift_scale = 1.0 - correction
+
+
+## The numbers a clock decision was made from, for a log line: what a snap or a lead report is
+## read against.
+func _state_fields() -> Dictionary:
+	return {
+		"tick": tick, "received": _received_tick, "local": snappedf(_local_ticks, 0.1),
+		"rtt": snappedf(_rtt_ms, 0.1), "jitter": snappedf(_jitter_ms, 0.1),
+		"one_way": one_way_ticks(), "target_lead": _target_lead(),
+		"reported": snappedf(_lead_target, 0.1), "live": _lead_live,
+	}
 
 
 ## Moves the receive timeline for one snapshot that arrived carrying [param sampled]. See
@@ -949,8 +984,10 @@ func note_input_lead(input_tick: int, arrival_lead: int) -> void:
 	if not _lead_live:
 		_lead_live = true
 		_receive_excess = 0.0
-		DotLog.info(CHANNEL, "input lead follows the server's reports",
-			{"lead": tick - server_tick(), "arrival_lead": arrival_lead})
+		var live_fields := _state_fields()
+		live_fields["lead"] = tick - server_tick()
+		live_fields["arrival_lead"] = arrival_lead
+		DotLog.info(CHANNEL, "input lead follows the server's reports", live_fields)
 
 
 ## Ticks the input timeline is behind (+) or ahead (-) of where it is being steered: the
@@ -1132,19 +1169,65 @@ func _target_lead() -> int:
 	return one_way_ticks() + margin
 
 
+## Remembers a frame or a dropped stretch of [param seconds] ending at [param wall_usec], when it
+## is long enough for a round trip measured across it to be wrong ([method _across_stall]).
+func _note_stall(wall_usec: int, seconds: float) -> void:
+	if seconds < RTT_STALL_SECONDS:
+		return
+	_stalls.append(Vector2(float(wall_usec) / 1000000.0, seconds))
+	if _stalls.size() > RTT_STALL_MEMORY:
+		_stalls.pop_front()
+
+
+## Whether a round trip of [param rtt_ms] that ended now spans a stall that explains how far it
+## is past the median: the time a ping waited for this process to read its answer is not the
+## link's ([method _note_rtt] holds it near the median). Without a wall clock to compare (nothing handed to [method note_engine_frame]) never.
+func _across_stall(rtt_ms: float) -> bool:
+	if _last_wall_usec <= 0 or _stalls.is_empty():
+		return false
+	var excess := (rtt_ms - _rtt_base) / 1000.0
+	if excess <= RTT_STALL_SECONDS:
+		return false
+	var now := float(_last_wall_usec) / 1000000.0
+	var from := now - rtt_ms / 1000.0 - 1.0
+	for stall in _stalls:
+		if stall.x >= from and stall.y >= 0.5 * excess:
+			return true
+	return false
+
+
+## Round trip samples held down because a stall explains them.
+func rtt_rejected() -> int:
+	return _rtt_rejected
+
+
 func _note_rtt(rtt_ms: float) -> void:
 	if rtt_ms <= 0.0:
 		return
 
+	var held_down := _across_stall(rtt_ms)
+	if held_down:
+		# Held to a quarter second past the median rather than dropped: the frames a stall
+		# leaves behind do delay a command, and the spread it adds to the margin covers them.
+		_rtt_rejected += 1
+		var held := _rtt_base + RTT_STALL_SECONDS * 1000.0
+		DotLog.debug(CHANNEL, "round trip held; a stall explains it",
+			{"rtt": snappedf(rtt_ms, 0.1), "held": snappedf(held, 0.1), "base": snappedf(_rtt_base, 0.1),
+			"held_count": _rtt_rejected})
+		rtt_ms = held
+
 	_rtt_samples.append(rtt_ms)
 	if _rtt_samples.size() > RTT_SAMPLE_COUNT:
 		_rtt_samples.pop_front()
+	var untouched := not held_down
 
 	# Median rather than mean: one 2-second stall from a Wi-Fi retransmit would drag
 	# a mean far enough to add a hundred ms of input latency for the next minute.
 	var sorted := _rtt_samples.duplicate()
 	sorted.sort()
 	_rtt_ms = sorted[sorted.size() / 2]
+	if untouched:
+		_rtt_base = _rtt_ms
 
 	# Jitter as mean absolute deviation from the median — cheaper than a standard
 	# deviation and less sensitive to the same outliers.
@@ -1257,6 +1340,7 @@ func describe() -> Dictionary:
 		"jitter_ms": int(_jitter_ms),
 		"drift": "%.2f%%" % drift_percent(),
 		"snaps": _snap_count,
+		"rtt_held": _rtt_rejected,
 		"catch_ups": _catch_up_count,
 		"lead_reported": _lead_live,
 		"last_arrival_lead": _last_arrival_lead,

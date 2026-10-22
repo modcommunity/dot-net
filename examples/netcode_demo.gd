@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 452
+const CHECKS := 455
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -5273,6 +5273,36 @@ func _test_cover_stalls() -> void:
 		_check("%d ticks: no snap after stalls (%d)" % [rate, int(r["snaps"])], int(r["snaps"]) == 0)
 		_check("%d ticks: lead stays within 0.5 s (%d)" % [rate, int(seen["lead_max"])],
 			int(seen["lead_max"]) <= rate / 2)
+
+	# Zombie Zone on the web (net.clock trace, 2026-10-22): the game's ping measured across a
+	# 10.7 s stall read 14.8 s, and every snapshot after it carried that as the round trip. The
+	# median, the jitter and with them the lead ran to 800 ticks and the clock snapped nine
+	# times in one frame. Armed: a round trip a stall explains is held near the median.
+	var web := DotNetClock.new(64)
+	web.follow_engine_time = false
+	web.sync_from_server(1000, 88.0)
+	var frame := 0
+	var wall := 0
+	var steps := 0
+	for _i in 20:
+		frame += 1
+		wall += 15625
+		steps += 1
+		web.note_engine_frame(frame, wall, steps, 64, 16)
+		var _t := web.advance(1.0 / 64.0)
+	frame += 1
+	wall += 10700000
+	steps += 16
+	web.note_engine_frame(frame, wall, steps, 64, 16)
+	var _t2 := web.advance(1.0 / 64.0)
+	for _i in 9:
+		web.sync_from_server(web.received_tick() + 1, 14819.0)
+	print("    64 ticks, 10.7 s stall, a ping of 14.8 s: rtt %d ms, %d held, %d snaps, lead %d" % [
+		int(web.rtt_ms()), web.rtt_rejected(), int(web.describe()["snaps"]), web.tick - web.received_tick()])
+	_check("a round trip a stall explains is held down (%d held)" % web.rtt_rejected(),
+		web.rtt_rejected() == 9)
+	_check("the estimate stays the link's (%d ms)" % int(web.rtt_ms()), web.rtt_ms() < 400.0)
+	_check("and nothing snaps (%d)" % int(web.describe()["snaps"]), int(web.describe()["snaps"]) == 0)
 	_sections_completed += 1
 
 
