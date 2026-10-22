@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 455
+const CHECKS := 457
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -5303,6 +5303,51 @@ func _test_cover_stalls() -> void:
 		web.rtt_rejected() == 9)
 	_check("the estimate stays the link's (%d ms)" % int(web.rtt_ms()), web.rtt_ms() < 400.0)
 	_check("and nothing snaps (%d)" % int(web.describe()["snaps"]), int(web.describe()["snaps"]) == 0)
+
+	# A client that runs at 3 frames a second has a "stall" in every frame; a real 600 ms link must
+	# still be believed, or the clock never adapts to it.
+	var slow := DotNetClock.new(64)
+	slow.follow_engine_time = false
+	slow.sync_from_server(1000, 40.0)
+	frame = 0
+	wall = 0
+	steps = 0
+	for _i in 60:
+		frame += 1
+		wall += 333000
+		steps += 21
+		slow.note_engine_frame(frame, wall, steps, 64, 32)
+		var _ts := slow.advance(1.0 / 64.0)
+		slow.sync_from_server(slow.received_tick() + 21, 40.0 if _i < 10 else 600.0)
+	print("    slow client: rtt %d ms, %d held, stalls %d" % [int(slow.rtt_ms()), slow.rtt_rejected(), slow._stalls.size()])
+	_check("a slow client still learns a real 600 ms link (%d ms)" % int(slow.rtt_ms()),
+		slow.rtt_ms() > 500.0)
+
+	# A big stall followed by a run of 0.3 s frames must still explain the ping across it.
+	var burst := DotNetClock.new(64)
+	burst.follow_engine_time = false
+	burst.sync_from_server(1000, 88.0)
+	frame = 0
+	wall = 0
+	steps = 0
+	for _i in 20:
+		frame += 1
+		wall += 15625
+		steps += 1
+		burst.note_engine_frame(frame, wall, steps, 64, 16)
+		var _tb := burst.advance(1.0 / 64.0)
+	frame += 1
+	wall += 10700000
+	steps += 16
+	burst.note_engine_frame(frame, wall, steps, 64, 16)
+	for _i in 6:
+		frame += 1
+		wall += 300000
+		steps += 16
+		burst.note_engine_frame(frame, wall, steps, 64, 16)
+	burst.sync_from_server(burst.received_tick() + 1, 14819.0)
+	_check("a stall is not forgotten behind later short stalls (%d held)" % burst.rtt_rejected(),
+		burst.rtt_rejected() == 1)
 	_sections_completed += 1
 
 

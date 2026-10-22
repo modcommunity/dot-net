@@ -70,6 +70,10 @@ const RTT_STALL_SECONDS := 0.25
 ## Stalls remembered, as [code]Vector2(wall second it ended, seconds)[/code]: the newest few.
 const RTT_STALL_MEMORY := 8
 
+## Wall seconds a run of held samples may last before samples are believed again: a client whose
+## every frame is a stall (a few frames a second) would otherwise never learn its real link.
+const RTT_HOLD_SECONDS := 3.0
+
 ## Simulation rate in ticks per second.
 var tick_rate: int = 60
 
@@ -294,6 +298,7 @@ var _lost_count: int = 0
 var _last_wall_usec: int = 0
 var _stalls: Array[Vector2] = []
 var _rtt_rejected: int = 0
+var _hold_since_usec: int = 0
 ## The median of the samples no stall touched: what a held one is held near, so held ones do not
 ## raise it a step each.
 var _rtt_base: float = 0.0
@@ -1206,6 +1211,12 @@ func _note_rtt(rtt_ms: float) -> void:
 		return
 
 	var held_down := _across_stall(rtt_ms)
+	if not held_down:
+		_hold_since_usec = 0
+	elif _hold_since_usec == 0:
+		_hold_since_usec = _last_wall_usec
+	elif float(_last_wall_usec - _hold_since_usec) / 1000000.0 > RTT_HOLD_SECONDS:
+		held_down = false
 	if held_down:
 		# Held to a quarter second past the median rather than dropped: the frames a stall
 		# leaves behind do delay a command, and the spread it adds to the margin covers them.
