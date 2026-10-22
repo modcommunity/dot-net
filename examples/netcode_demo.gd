@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 446
+const CHECKS := 452
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -493,6 +493,7 @@ func _run() -> void:
 	_test_input_lead()
 	_test_dropped_time()
 	_test_join_hitch()
+	_test_cover_stalls()
 	await _test_dropped_time_live()
 	await _test_integration()
 
@@ -5247,6 +5248,32 @@ func _test_dropped_time() -> void:
 	_check("read in the physics step, at most 2%% late and no snap (%d of %d, %d)" % [
 			int(polled["late"]), int(polled["ticks"]), int(polled["snaps"])],
 		int(polled["late"]) * 50 <= int(polled["ticks"]) and int(polled["snaps"]) == 0)
+
+
+## The Zombie Zone web measurement (2026-10-22): the clock synced, then a loading cover held
+## seconds of stalls, and when it dropped the clock snapped and the input lead jumped. A stall
+## after sync must leave no snap and a lead within bounds.
+func _test_cover_stalls() -> void:
+	_sections_entered += 1
+	print("")
+	print("[stalls under a loading cover after the clock synced]")
+	# Armed: at 128 the stall is 640 ticks, past the 512 the lead history holds, and the clock
+	# jumped 640 ahead (lead 651) and snapped back a second later.
+	for rate in [60, 64, 128]:
+		var seen := {"lead_max": -999, "lead_min": 999}
+		var watch := func(clock: DotNetClock, ms: float) -> void:
+			if clock.is_synced():
+				var lead := clock.tick - clock.received_tick()
+				seen["lead_max"] = maxi(int(seen["lead_max"]), lead)
+				seen["lead_min"] = mini(int(seen["lead_min"]), lead)
+		var r: Dictionary = _first_visit(rate, 16 if rate == 64 else 8, [1.7, 3.3, 3.5, 2.9, 5.0], true, 6.0, 1000.0 / 30.0, false, 1000.0 / 60.0, watch)
+		print("    %d ticks: %d snaps, %d floors, lead %d..%d, %d late of %d, %d ms dropped" % [
+			rate, int(r["snaps"]), int(r["floors"]), int(seen["lead_min"]), int(seen["lead_max"]),
+			int(r["late"]), int(r["ticks"]), int(r["lost_ms"])])
+		_check("%d ticks: no snap after stalls (%d)" % [rate, int(r["snaps"])], int(r["snaps"]) == 0)
+		_check("%d ticks: lead stays within 0.5 s (%d)" % [rate, int(seen["lead_max"])],
+			int(seen["lead_max"]) <= rate / 2)
+	_sections_completed += 1
 
 
 func _test_join_hitch() -> void:

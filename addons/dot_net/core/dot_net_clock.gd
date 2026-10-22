@@ -625,9 +625,12 @@ func _discount_long_frame(wall_usec: int, seconds: float, sent_after: int) -> vo
 	if excess <= 0.0 or longest <= 0.0 or _lead_tick.is_empty():
 		# The first frame measured has nothing to say what recurs.
 		return
-	for t in range(maxi(sent_after + 1, tick - LEAD_HISTORY + 1), tick + 1):
-		var slot := posmod(t, LEAD_HISTORY)
-		if _lead_tick[slot] == t:
+	# Every slot, not the last LEAD_HISTORY ticks: a credited stall of more than that (4 s at 128)
+	# moved `tick` past the held commands, which then kept a lead of the whole stall and the
+	# clock jumped a stall ahead.
+	for slot in LEAD_HISTORY:
+		var t := _lead_tick[slot]
+		if t > sent_after and t <= tick:
 			_lead_at[slot] -= excess
 
 
