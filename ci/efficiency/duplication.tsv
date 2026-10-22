@@ -1,0 +1,3 @@
+# duplication
+# Baselines only shrink: scripts/<gate> --update lowers or drops entries and refuses to add.
+addons/dot_net/replication/dot_net_behaviour.gd	110

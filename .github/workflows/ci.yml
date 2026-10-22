@@ -21,6 +21,8 @@ jobs:
     validate:
         uses: modcommunity/dot-ci/.github/workflows/validate.yml@v1
         with:
+            efficiency: true
+            hygiene: true
             suites: 'examples/netcode_demo examples/diagnostics_demo'
         secrets:
             DEPS_TOKEN: ${{ secrets.DOT_DEPS_TOKEN }}

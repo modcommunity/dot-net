@@ -1,0 +1,3 @@
+# frame-hazards
+# Baselines only shrink: scripts/<gate> --update lowers or drops entries and refuses to add.
+addons/dot_net/dot_net_manager.gd::_still_registered::alloc_array	1
