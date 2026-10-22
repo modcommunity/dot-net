@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 457
+const CHECKS := 461
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -5348,6 +5348,69 @@ func _test_cover_stalls() -> void:
 	burst.sync_from_server(burst.received_tick() + 1, 14819.0)
 	_check("a stall is not forgotten behind later short stalls (%d held)" % burst.rtt_rejected(),
 		burst.rtt_rejected() == 1)
+
+	# Cold start: a stall before any untouched sample leaves no median to hold near, and the
+	# first real round trips must not be pinned at 250 ms.
+	var cold := DotNetClock.new(64)
+	cold.follow_engine_time = false
+	frame = 1
+	wall = 15625
+	steps = 1
+	cold.note_engine_frame(frame, wall, steps, 64, 16)
+	frame += 1
+	wall += 2000000
+	steps += 16
+	cold.note_engine_frame(frame, wall, steps, 64, 16)
+	cold.sync_from_server(1000, 600.0)
+	for _i in 8:
+		cold.sync_from_server(cold.received_tick() + 1, 600.0)
+	print("    cold start stall: rtt %d ms, %d held" % [int(cold.rtt_ms()), cold.rtt_rejected()])
+	_check("a stall before any median does not pin a 600 ms link (%d ms)" % int(cold.rtt_ms()),
+		cold.rtt_ms() > 500.0)
+
+	# A stall inside a live lead history, then the link's real round trip again.
+	var live := DotNetClock.new(64)
+	live.follow_engine_time = false
+	live.sync_from_server(1000, 88.0)
+	frame = 0
+	wall = 0
+	steps = 0
+	for _i in 120:
+		frame += 1
+		wall += 15625
+		steps += 1
+		live.note_engine_frame(frame, wall, steps, 64, 16)
+		var _tl := live.advance(1.0 / 64.0)
+		live.sync_from_server(live.received_tick() + 1, 88.0)
+		live.note_input_lead(live.tick - 3, 4)
+	var live_before := live.is_lead_reported()
+	frame += 1
+	wall += 3000000
+	steps += 192
+	live.note_engine_frame(frame, wall, steps, 64, 16)
+	var _tl2 := live.advance(1.0 / 64.0)
+	for _i in 4:
+		live.sync_from_server(live.received_tick() + 1, 3088.0)
+	var held_in_stall := live.rtt_rejected()
+	var snaps_in_stall := int(live.describe()["snaps"])
+	var rtt_in_stall := live.rtt_ms()
+	for _i in 120:
+		frame += 1
+		wall += 15625
+		steps += 1
+		live.note_engine_frame(frame, wall, steps, 64, 16)
+		var _tl3 := live.advance(1.0 / 64.0)
+		live.sync_from_server(live.received_tick() + 1, 88.0)
+		live.note_input_lead(live.tick - 3, 4)
+	print("    live lead: reported %s, held %d, snaps %d, rtt in stall %d, after %d ms, lead %d" % [
+		live_before, held_in_stall, snaps_in_stall, int(rtt_in_stall), int(live.rtt_ms()),
+		live.tick - live.received_tick()])
+	_check("a stall in a live lead history is held and does not snap (%d held, %d snaps)" % [
+		held_in_stall, snaps_in_stall], live_before and held_in_stall == 4 and snaps_in_stall == 0)
+	_check("the estimate stays near the link inside the stall (%d ms)" % int(rtt_in_stall),
+		rtt_in_stall < 400.0)
+	_check("and returns to the real round trip after it (%d ms)" % int(live.rtt_ms()),
+		absf(live.rtt_ms() - 88.0) < 20.0 and int(live.describe()["snaps"]) == 0)
 	_sections_completed += 1
 
 

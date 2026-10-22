@@ -1188,7 +1188,8 @@ func _note_stall(wall_usec: int, seconds: float) -> void:
 ## is past the median: the time a ping waited for this process to read its answer is not the
 ## link's ([method _note_rtt] holds it near the median). Without a wall clock to compare (nothing handed to [method note_engine_frame]) never.
 func _across_stall(rtt_ms: float) -> bool:
-	if _last_wall_usec <= 0 or _stalls.is_empty():
+	# No untouched sample yet: nothing to hold near, and holding would pin every sample at 250 ms.
+	if _last_wall_usec <= 0 or _stalls.is_empty() or _rtt_base <= 0.0:
 		return false
 	var excess := (rtt_ms - _rtt_base) / 1000.0
 	if excess <= RTT_STALL_SECONDS:
