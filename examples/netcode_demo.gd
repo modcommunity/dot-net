@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 444
+const CHECKS := 446
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -3693,6 +3693,9 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 		final_apart = moving[0].position.distance_to(moving[1].position)
 		worst_apart = maxf(worst_apart, final_apart)
 
+	var hp := host.perf_counters()
+	_check("the server counts its ticks and their send time (%d ticks, %d us)" % [int(hp[&"server_ticks"]), int(hp[&"server_send_usec"])],
+		int(hp[&"server_ticks"]) == TICKS and int(hp[&"server_send_usec"]) > 0)
 	var a := guests[0].perf_counters()
 	var b := guests[1].perf_counters()
 	var replayed_a := int(a[&"replayed_ticks"]) - int(before[0][&"replayed_ticks"])

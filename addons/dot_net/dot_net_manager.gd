@@ -191,6 +191,9 @@ var _perf_reconcile_usec: int = 0
 var _perf_replayed_ticks: int = 0
 var _perf_client_ticks: int = 0
 var _perf_predict_usec: int = 0
+var _perf_server_ticks: int = 0
+var _perf_server_sim_usec: int = 0
+var _perf_server_send_usec: int = 0
 
 ## peer_id -> newest snapshot tick they have acknowledged, on the server.
 var _acks: Dictionary = {}
@@ -587,6 +590,8 @@ func server_tick(tick: int) -> void:
 		_apply_input(peer_id, input, tick)
 
 	var step := clock.tick_duration()
+	var started := Time.get_ticks_usec()
+	_perf_server_ticks += 1
 
 	# [b]The list was taken before anything ran, and a behaviour can change the world.[/b] A
 	# round that re-lays its map inside a player's `_net_simulate` unregisters the old map's
@@ -612,12 +617,15 @@ func server_tick(tick: int) -> void:
 		identities = _still_registered(identities)
 
 	var period := config.ticks_per_snapshot()
+	var simulated := Time.get_ticks_usec()
+	_perf_server_sim_usec += simulated - started
 
 	# Staggered: some peers every tick, each on its own phase. See
 	# [member DotNetConfig.stagger_snapshots].
 	if config.stagger_snapshots and period > 1:
 		history.record(identities, tick)
 		_send_snapshots(tick, identities, posmod(tick, period), period)
+		_perf_server_send_usec += Time.get_ticks_usec() - simulated
 		return
 
 	_ticks_since_snapshot += 1
@@ -626,6 +634,7 @@ func server_tick(tick: int) -> void:
 		_ticks_since_snapshot = 0
 		history.record(identities, tick)
 		_send_snapshots(tick, identities)
+		_perf_server_send_usec += Time.get_ticks_usec() - simulated
 
 
 ## Those of [param identities] still registered as themselves. An entity registered during
@@ -712,6 +721,11 @@ func perf_counters() -> Dictionary:
 		&"predict_usec": _perf_predict_usec,
 		# How far the prediction runs ahead of the newest snapshot: what each replay re-runs.
 		&"lead_ticks": clock.input_tick() - clock.received_tick() if clock != null else 0,
+		# Server side: ticks run, time simulating them (the game's tick runs inside a
+		# behaviour's _net_simulate), and time recording history and sending snapshots.
+		&"server_ticks": _perf_server_ticks,
+		&"server_sim_usec": _perf_server_sim_usec,
+		&"server_send_usec": _perf_server_send_usec,
 	}
 
 
