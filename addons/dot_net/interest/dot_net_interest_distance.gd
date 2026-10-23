@@ -94,4 +94,4 @@ func describe() -> Dictionary:
 ## Thread-safe as itself, not as a subclass: see [method DotNetInterest.is_thread_safe].
 ## Reads only frozen positions, the identities' fields and its own exports.
 func is_thread_safe() -> bool:
-	return get_script() == DotNetInterestDistance
+	return (get_script() as Script).get_global_name() == &"DotNetInterestDistance"

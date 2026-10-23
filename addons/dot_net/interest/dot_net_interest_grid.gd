@@ -159,4 +159,4 @@ func describe() -> Dictionary:
 ## Thread-safe as itself, not as a subclass: see [method DotNetInterest.is_thread_safe].
 ## Reads only frozen positions, the identities' fields and its own exports, and [member _cells], built on the main thread by [method _prepare].
 func is_thread_safe() -> bool:
-	return get_script() == DotNetInterestGrid
+	return (get_script() as Script).get_global_name() == &"DotNetInterestGrid"

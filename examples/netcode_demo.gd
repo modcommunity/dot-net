@@ -197,6 +197,11 @@ class SpawnsFirst extends Movement:
 			var _made := host.spawner.spawn(&"counted", peer, Transform3D.IDENTITY, tick)
 
 
+## A distance strategy subclassed without saying it is thread-safe.
+class PlainDistance extends DotNetInterestDistance:
+	pass
+
+
 ## Distance interest that records whether it was ever asked about an observer whose position
 ## was not frozen, from any thread: the worker's read the freeze exists to prevent.
 class FrozenProbe extends DotNetInterestDistance:
@@ -413,7 +418,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 464
+const CHECKS := 465
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1318,6 +1323,10 @@ func _test_replication() -> void:
 func _test_interest() -> void:
 	print("")
 	print("[interest]")
+
+	_check("the stock strategies are thread-safe, a subclass is not unless it says so",
+		DotNetInterestDistance.new().is_thread_safe() and DotNetInterestGrid.new().is_thread_safe()
+		and DotNetInterestAll.new().is_thread_safe() and not PlainDistance.new().is_thread_safe())
 
 	var config := DotNetConfig.new()
 	var context := {"tick": 0, "config": config}
