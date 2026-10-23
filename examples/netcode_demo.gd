@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 461
+const CHECKS := 463
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -4505,6 +4505,59 @@ func _test_snapshot_threads() -> void:
 					and (not DotParallel.available() or int(other["pooled"]) > 0))
 
 	_test_first_entity_mid_tick()
+	_test_view_count()
+
+
+## Send views exist only for what a peer is sent: the pooled path used to make one for every
+## behaviour of every entity for every peer. Two peers, entities far from both, inline and on
+## workers.
+func _test_view_count() -> void:
+	var counts := {}
+	for workers in [0, 2]:
+		var host := _parts_manager("ViewCount%d" % workers, true, 1200)
+		host.config.snapshot_workers = workers
+		var probe := FrozenProbe.new()
+		probe.radius = 5.0
+		probe.evaluation_interval_sec = 0.0
+		host.interest = probe
+		host.send_fn = func(_peer_id: int, _payload: PackedByteArray, _d: int) -> void:
+			pass
+		host.start()
+		host.spawner.register_factory(&"counted", _build_counted)
+		var modern := host.messages.schema_payload()
+		for peer in [2, 3]:
+			host.add_peer(peer)
+			var _adopted := host.receive(modern, peer)
+		var all: Array = []
+		for i in 20:
+			var owner_peer := 2 if i == 0 else (3 if i == 6 else 0)
+			var x := 0.0 if i < 6 else (100.0 if i < 12 else 1000.0)
+			var identity: DotNetIdentity = host.spawner.spawn(&"counted", owner_peer, Transform3D(Basis.IDENTITY, Vector3(x, 0, 0)), 0).value
+			all.append(identity)
+		var behaviours := 0
+		for tick in range(1, 5):
+			host.server_tick(tick)
+		var views := 0
+		var far_views := 0
+		for i in all.size():
+			var identity: DotNetIdentity = all[i]
+			behaviours += identity.behaviours.size()
+			for behaviour in identity.behaviours:
+				views += behaviour._views.size()
+				if i >= 12:
+					far_views += behaviour._views.size()
+		counts[workers] = [views, far_views, behaviours]
+		for identity: DotNetIdentity in host.registry.all():
+			var body := identity.get_parent()
+			if body != null and body.is_inside_tree():
+				body.get_parent().remove_child(body)
+		remove_child(host)
+		host.free()
+	_check("views: pooled and inline make the same (%s vs %s)" % [counts[2], counts[0]],
+		counts[2][0] == counts[0][0] and counts[2][1] == counts[0][1])
+	_check("views: only the %d relevant (peer, behaviour) pairs, not %d (%d made, %d for unseen entities)"
+			% [12, 2 * counts[2][2], counts[2][0], counts[2][1]],
+		counts[2][0] == 12 and counts[2][1] == 0)
 
 
 ## A peer's first entity registered inside a tick, with workers on: the observer is found by

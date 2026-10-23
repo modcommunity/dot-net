@@ -925,6 +925,10 @@ class SnapshotJob extends RefCounted:
 	var oldest_pending: int = 0
 	var remaining_bytes: int = 0
 	var peer_budget: DotNetBudget.PeerBudget = null
+	## Set by the interest phase ([method _interest_chunk]): what the build writes, in order.
+	var ordered: Array = []
+	var answer: Array = []
+	var cap_count: int = 0
 
 
 ## One peer's snapshot, built and not yet sent: the payloads, and what the build found that
@@ -980,15 +984,21 @@ func _send_snapshots_pooled(
 	if jobs.is_empty():
 		return 0
 
-	for identity in identities:
-		for behaviour in identity.behaviours:
-			for job in jobs:
-				var _view := behaviour.view_for(job.peer_id)
-
 	var chunks := mini(workers, jobs.size())
 	var cap := config.entity_cap()
+
+	# Interest first, on the workers, so a view is made only for what a peer is sent (as the
+	# inline path does) and not for every entity of every peer.
+	var interest_task := func(chunk: int) -> Array:
+		return _interest_chunk(jobs, chunk, chunks, identities, context, cap)
+	DotParallel.run(interest_task, chunks, &"net.snapshot", workers)
+	for job in jobs:
+		for identity: DotNetIdentity in job.ordered:
+			for behaviour in identity.behaviours:
+				var _view := behaviour.view_for(job.peer_id)
+
 	var task := func(chunk: int) -> Array:
-		return _build_chunk(jobs, chunk, chunks, identities, tick, context, cap)
+		return _build_chunk(jobs, chunk, chunks, tick)
 
 	var started := Time.get_ticks_usec()
 	_snapshot_prep_usec_total += started - prep_started
@@ -1009,17 +1019,15 @@ func _send_snapshots_pooled(
 	return sent_to
 
 
-## Builds the snapshots of peers [code][chunk * n / chunks, (chunk + 1) * n / chunks)[/code]
-## of [param jobs]. Runs on a worker: reads the frozen world, and writes only what it creates
-## and its own peers' records.
-func _build_chunk(
+## Relevance, ranking and the budget's accumulation for peers [code][chunk * n / chunks,
+## (chunk + 1) * n / chunks)[/code] of [param jobs], stored on each job. Runs on a worker:
+## reads the frozen world and writes only the job and its peer's budget record.
+func _interest_chunk(
 	jobs: Array[SnapshotJob], chunk: int, chunks: int, identities: Array[DotNetIdentity],
-	tick: int, context: Dictionary, cap: int
+	context: Dictionary, cap: int
 ) -> Array:
-	var out: Array = []
 	var from := chunk * jobs.size() / chunks
 	var to := (chunk + 1) * jobs.size() / chunks
-	var caches := {}
 	for j in range(from, to):
 		var job := jobs[j]
 		var answer := interest.relevance(job.observer, identities, job.peer_id, context)
@@ -1029,15 +1037,28 @@ func _build_chunk(
 		for identity: DotNetIdentity in relevant:
 			scores[identity.net_id] = interest._score(job.observer, identity, context)
 
-		var cap_count := relevant.size()
+		job.cap_count = relevant.size()
 		relevant = interest.ranked(job.observer, relevant, cap, context)
 		if _test_skew_pooled:
 			job.acked_tick = 0
-		var ordered := budget.accumulate_record(job.peer_budget, relevant, scores)
+		job.ordered = budget.accumulate_record(job.peer_budget, relevant, scores)
+		job.answer = answer
+	return []
 
-		var build := _build_peer(job, tick, ordered, caches)
-		build.relevance = answer
-		build.cap_count = cap_count
+
+## Builds the snapshots of peers [code][chunk * n / chunks, (chunk + 1) * n / chunks)[/code]
+## of [param jobs] from what [method _interest_chunk] stored. Runs on a worker: reads the
+## frozen world, and writes only what it creates and its own peers' records.
+func _build_chunk(jobs: Array[SnapshotJob], chunk: int, chunks: int, tick: int) -> Array:
+	var out: Array = []
+	var from := chunk * jobs.size() / chunks
+	var to := (chunk + 1) * jobs.size() / chunks
+	var caches := {}
+	for j in range(from, to):
+		var job := jobs[j]
+		var build := _build_peer(job, tick, job.ordered, caches)
+		build.relevance = job.answer
+		build.cap_count = job.cap_count
 		out.append(build)
 	return out
 
