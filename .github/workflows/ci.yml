@@ -23,6 +23,6 @@ jobs:
         with:
             efficiency: true
             hygiene: true
-            suites: 'examples/netcode_demo examples/diagnostics_demo'
+            suites: 'examples/netcode_demo examples/diagnostics_demo examples/loss_demo'
         secrets:
             DEPS_TOKEN: ${{ secrets.DOT_DEPS_TOKEN }}

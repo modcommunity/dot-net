@@ -982,10 +982,13 @@ func _sync_view(view: PeerView, acked_tick: int) -> void:
 			# unconfirmed. Dropped without promotion, so it goes out again -- and stays
 			# owed until confirmed (`relost`), because sent once more it can be lost
 			# once more, and on a link that holds back every other snapshot the next
-			# send is always the held one.
+			# send is always the held one. Erased from `acked` too: the peer may have
+			# applied it with only the acknowledgement lost, so "equals the acked value"
+			# no longer means it holds that value (a flag flipped and flipped back).
 			dropped = true
 			for property: StringName in entry["values"]:
 				view.relost[property] = true
+				view.acked.erase(property)
 
 	if resolved == 0:
 		return
@@ -1052,6 +1055,7 @@ func _trim_view(view: PeerView, oldest_tick: int) -> void:
 		else:
 			for property: StringName in entry["values"]:
 				view.relost[property] = true
+				view.acked.erase(property)
 
 		aged += 1
 
