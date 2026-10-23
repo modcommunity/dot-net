@@ -256,6 +256,7 @@ var _peers: Array[int] = []
 ## asked for workers ("" when it was not), for the one log line per change and for
 ## [method describe_lines].
 var _snapshot_threads_reason: String = "off"
+var _snapshot_threads_note: String = ""
 
 ## Snapshots built on workers, and the last one's peers, tasks and fork-to-join time.
 var _snapshot_pooled: int = 0
@@ -902,13 +903,16 @@ func _snapshot_workers() -> int:
 	if reason != _snapshot_threads_reason:
 		_snapshot_threads_reason = reason
 		if reason != "off" and reason != "":
-			DotLog.debug(CHANNEL, "snapshots are built on this thread", {
-				"asked": config.snapshot_workers, "why": reason,
-			})
+			_snapshot_threads_note = "snapshots are built inline (%s)" % reason
 		elif reason == "":
-			# INFO, once: an operator who turned this on wants to see it took, and a suite run
-			# with it forced on is how anyone knows the pooled path ran at all.
-			DotLog.info(CHANNEL, "snapshots are built on worker threads", {"workers": workers})
+			_snapshot_threads_note = (
+				"snapshot workers active: %d; interest %s pooled; custom DotNetVar codecs pooled"
+				% [workers, interest.strategy_name])
+		if reason != "off":
+			# INFO, once per change: an operator who turned this on wants to see it took or why not.
+			DotLog.info(CHANNEL, _snapshot_threads_note, {
+				"workers": workers, "asked": config.snapshot_workers if config != null else 0,
+			})
 	return workers
 
 

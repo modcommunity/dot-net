@@ -413,7 +413,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 463
+const CHECKS := 464
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -4468,6 +4468,9 @@ func _test_snapshot_threads() -> void:
 			% [on["pooled"], on["snapshots"]],
 		not DotParallel.available() or int(on["pooled"]) == int(on["snapshots"]))
 	_check("threads off never pools", int(off["pooled"]) == 0)
+	_check("snapshot workers line names the workers and the interest path (%s)" % on["note"],
+		not DotParallel.available() or (str(on["note"]).contains("workers active: 4")
+			and str(on["note"]).contains("interest distance")))
 	_check("four workers send the same payloads, byte for byte %s" % _first_difference(off["payloads"], on["payloads"]),
 		_first_difference(off["payloads"], on["payloads"]) == "")
 	_check("four workers leave the same PeerViews and budgets after every tick %s"
@@ -4750,7 +4753,7 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 
 	var out := {
 		"payloads": payloads, "states": states, "peers_fed": peers_fed.size(),
-		"starved": starved, "split": split, "pooled": host._snapshot_pooled,
+		"starved": starved, "split": split, "pooled": host._snapshot_pooled, "note": host._snapshot_threads_note,
 		"snapshots": TICKS, "cache_hits": 0,
 	}
 	if rich:
