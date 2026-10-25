@@ -207,6 +207,15 @@ var _acks: Dictionary = {}
 ## host had before [method receive_ack] existed. See [DotNetBehaviour.PeerView].
 var _ack_wired: Dictionary = {}
 
+## peer_id -> consecutive ticks with no input, and the last input it sent. Server side.
+var _starved_ticks: Dictionary = {}
+var _last_inputs: Dictionary = {}
+
+## Input tick at which the newest snapshot arrived, and the ticks predicted on a held
+## input since (DotNetConfig.prediction_hold_sec). Client side.
+var _snapshot_heard_tick := -1
+var _held_ticks := 0
+
 ## Newest tick a snapshot was built for, on the server.
 ##
 ## The bound on what a peer may claim to have acknowledged. An acknowledgement is
@@ -450,6 +459,9 @@ func stop() -> void:
 	_input_buffers.clear()
 	_acks.clear()
 	_ack_wired.clear()
+	_starved_ticks.clear()
+	_last_inputs.clear()
+	_snapshot_heard_tick = -1
 	_last_snapshot_tick = 0
 	_applied_snapshot_tick = 0
 	_receiving_tick = -1
@@ -485,11 +497,19 @@ func add_peer(peer_id: int) -> void:
 	_input_buffers[peer_id] = DotNetInput.Buffer.new(config.input_history_ticks)
 	_acks[peer_id] = 0
 	_ack_wired[peer_id] = false
+	_starved_ticks[peer_id] = 0
 
 	DotLog.debug(CHANNEL, "peer added", {"peer": peer_id})
 
 	if _running:
 		announce_schema(peer_id)
+
+
+## Ticks in [param seconds], or a number no silence reaches when it is 0 (never hold).
+func _hold_ticks(seconds: float) -> int:
+	if seconds <= 0.0:
+		return 1 << 30
+	return maxi(1, ceili(seconds * config.tick_rate))
 
 
 ## Removes a peer and everything it owned.
@@ -498,6 +518,8 @@ func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
 	_input_buffers.erase(peer_id)
 	_acks.erase(peer_id)
 	_ack_wired.erase(peer_id)
+	_starved_ticks.erase(peer_id)
+	_last_inputs.erase(peer_id)
 
 	if messages != null:
 		messages.forget_peer(peer_id)
@@ -582,12 +604,17 @@ func server_tick(tick: int) -> void:
 		var input := buffer.take(tick)
 
 		if input == null:
-			# No input for this tick. The last one is repeated by whatever consumes
-			# it — a player whose packet was lost should keep moving rather than
-			# stopping dead and jerking forward when it arrives.
+			# The consumer repeats the last input, so a lost packet keeps the player moving;
+			# past the hold it is given that input neutralised, so a blackout does not.
 			buffer.note_starved()
+			var starved: int = _starved_ticks.get(peer_id, 0) + 1
+			_starved_ticks[peer_id] = starved
+			if starved > _hold_ticks(config.starved_input_hold_sec) and _last_inputs.has(peer_id):
+				_apply_input(peer_id, (_last_inputs[peer_id] as DotNetInput).neutralised(tick), tick)
 			continue
 
+		_starved_ticks[peer_id] = 0
+		_last_inputs[peer_id] = input
 		_apply_input(peer_id, input, tick)
 
 	var step := clock.tick_duration()
@@ -690,6 +717,12 @@ func predict_tick(tick: int, input: DotNetInput = null) -> void:
 		return
 	flush_reconcile()
 	var started := Time.get_ticks_usec()
+	# Neutralised in place: the buffered and sent input is this same object, so the server
+	# and the replays see the held one too.
+	if input != null and _snapshot_heard_tick >= 0 \
+			and tick - _snapshot_heard_tick > _hold_ticks(config.prediction_hold_sec):
+		input._neutralise()
+		_held_ticks += 1
 	# The buffered input is this same object, so its replays run on the rounded one too.
 	if input != null and config.predict_wire_input:
 		input.round_trip()
@@ -1726,6 +1759,8 @@ func _entity_end_bit_cached(
 func receive_snapshot(payload: PackedByteArray) -> DotResult:
 	var started := Time.get_ticks_usec()
 	var result := _receive_snapshot(payload)
+	if result.ok:
+		_snapshot_heard_tick = clock.input_tick()
 	_perf_snapshot_usec += Time.get_ticks_usec() - started
 	_perf_snapshots += 1
 	return result
@@ -2226,6 +2261,9 @@ func describe() -> Dictionary:
 		"stats": stats.describe() if stats != null else {},
 		"interest": interest.describe() if interest != null else {},
 	}
+
+	if not is_server:
+		d["held_ticks"] = _held_ticks
 
 	if is_server:
 		d["snapshots_split"] = snapshots_split

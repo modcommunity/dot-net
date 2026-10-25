@@ -53,6 +53,11 @@ var _mismatches: Dictionary = {}
 ## Reconciles that rewound and did not replay, because the entity was not predicting
 ## (DotNetBehaviour._net_predicts).
 var _unpredicted := 0
+## net_id -> whether its last reconcile left it predicting. A reconcile from a state that was not
+## a prediction (a dead player the server respawned) moves it, but is not a misprediction.
+var _was_predicting: Dictionary = {}
+## Reconciles that moved an entity from a state it was not predicting: counted apart.
+var _unpredicted_moves := 0
 ## The newest of them, with both values: whether a mismatch is a real divergence or a
 ## rounding one is the first question and the counts cannot answer it.
 var _last_mismatch: Dictionary = {}
@@ -194,6 +199,7 @@ func reconcile(
 		for behaviour in identity.behaviours:
 			behaviour._net_state_applied(server_tick)
 		_forget_through(identity.net_id, server_tick)
+		_was_predicting[identity.net_id] = true
 		_skipped += 1
 		_last_replay_ticks = 0
 		return DotResult.success(0)
@@ -235,6 +241,8 @@ func reconcile(
 			break
 	if not predicting:
 		_unpredicted += 1
+	var from_prediction: bool = _was_predicting.get(identity.net_id, true)
+	_was_predicting[identity.net_id] = predicting
 
 	while predicting and replay_tick <= current_tick:
 		var input := input_buffer.peek(replay_tick)
@@ -312,10 +320,13 @@ func reconcile(
 	var after := _capture_visual(identity)
 	var error := _visual_error(before, after)
 
-	_worst_error = maxf(_worst_error, error)
-
-	if error > config.reconcile_position_epsilon:
-		_corrections_applied += 1
+	if not from_prediction:
+		if error > config.reconcile_position_epsilon:
+			_unpredicted_moves += 1
+	else:
+		_worst_error = maxf(_worst_error, error)
+		if error > config.reconcile_position_epsilon:
+			_corrections_applied += 1
 
 	# [b]Every move a reconciliation makes is eased, not only the ones it counts.[/b] The
 	# epsilon decides what is a misprediction worth reporting; it is not a size below
@@ -417,11 +428,13 @@ static func _visual_error(before: Dictionary, after: Dictionary) -> float:
 
 func clear() -> void:
 	_corrections.clear()
+	_was_predicting.clear()
 	_predicted.clear()
 
 
 func forget(net_id: int) -> void:
 	_corrections.erase(net_id)
+	_was_predicting.erase(net_id)
 	_predicted.erase(net_id)
 
 
@@ -454,5 +467,6 @@ func describe() -> Dictionary:
 		"pending": _corrections.size(),
 		"mismatches": _mismatches.duplicate(),
 		"unpredicted": _unpredicted,
+		"unpredicted_moves": _unpredicted_moves,
 		"last_mismatch": _last_mismatch.duplicate(),
 	}

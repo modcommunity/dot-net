@@ -78,6 +78,13 @@ func _equals(_other: DotNetInput) -> bool:
 	return false
 
 
+## Clears whatever this input would make happen and keeps where it looks: the input a
+## silent player is given ([member DotNetConfig.starved_input_hold_sec]). The default keeps
+## everything, which repeats the last input as before.
+func _neutralise() -> void:
+	pass
+
+
 # --- Public API ------------------------------------------------------------
 
 func write(writer: DotNetWriter) -> void:
@@ -118,6 +125,17 @@ func round_trip() -> void:
 	var writer := DotNetWriter.new(32)
 	write(writer)
 	read(DotNetReader.new(writer.to_bytes()))
+
+
+## A copy of this input with [method _neutralise] applied, for [param p_tick].
+func neutralised(p_tick: int) -> DotNetInput:
+	var copy: DotNetInput = (get_script() as Script).new()
+	var writer := DotNetWriter.new(32)
+	write(writer)
+	copy.read(DotNetReader.new(writer.to_bytes()))
+	copy.tick = p_tick
+	copy._neutralise()
+	return copy
 
 
 func equals(other: DotNetInput) -> bool:

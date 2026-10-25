@@ -331,6 +331,10 @@ class DemoInput extends DotNetInput:
 		# legal one is.
 		move = move.limit_length(1.0)
 
+	func _neutralise() -> void:
+		move = Vector2.ZERO
+		fire = false
+
 
 ## A game's own message type.
 class ChatMessage extends DotNetMessage:
@@ -418,7 +422,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 470
+const CHECKS := 475
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -476,6 +480,7 @@ func _run() -> void:
 	_test_render_delay()
 	_test_lag_compensation()
 	_test_prediction()
+	_test_starved_input()
 	_test_correction_offsets()
 	_test_buffer_growth()
 	_test_drawing_through_slips()
@@ -2145,6 +2150,70 @@ func _test_lag_compensation() -> void:
 ## not substitute for one: it feeds a [i]constant[/i] input for all sixty ticks, and
 ## a replay that ignores the input history lands on the right answer whenever the
 ## input never changes. The zig-zag here is the entire point.
+## A silent peer's last input is repeated for DotNetConfig.starved_input_hold_sec and then
+## neutralised, and a client with no snapshot for prediction_hold_sec predicts on a held input.
+func _test_starved_input() -> void:
+	print("[starved input]")
+	var moved := []
+	for hold in [0.25, 0.0]:
+		var s := DotNetManager.new()
+		s.is_server = true
+		s.auto_tick = false
+		s.config_file = ""
+		s.service_scope = StringName("starve_%d" % moved.size())
+		s.config = DotNetConfig.new()
+		s.config.starved_input_hold_sec = hold
+		add_child(s)
+		s.setup()
+		s.start()
+		s.add_peer(5)
+		var body := _in_tree(_make_entity(&"player", 5))
+		body.is_authoritative = true
+		var _reg := s.registry.register(body, 0, 0, s.config)
+		for tick in range(1, 6):
+			var input := DemoInput.new()
+			input.tick = tick
+			input.delta = 1.0 / 60.0
+			input.move = Vector2(1.0, 0.0)
+			var _pushed := s.input_buffer_for(5).push(input)
+		for tick in range(1, 61):
+			s.server_tick(tick)
+		var movement := body.behaviours[0] as Movement
+		moved.append([movement.position.x, movement.velocity.length()])
+		_out_of_tree(body)
+		remove_child(s)
+		s.free()
+	# 5 ticks of input, 15 repeated, then still: 20 of 60 ticks of walking.
+	_check("a silent peer is stopped after the hold (%.2f m, %.2f m/s)" % moved[0],
+		absf(float(moved[0][0]) - 10.0 * 20.0 / 60.0) < 0.05 and float(moved[0][1]) == 0.0)
+	_check("and with no hold repeats its last input for ever (%.2f m)" % float(moved[1][0]),
+		absf(float(moved[1][0]) - 10.0) < 0.05)
+
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 5
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = &"starve_client"
+	c.config = DotNetConfig.new()
+	add_child(c)
+	c.setup()
+	c.clock.sync_from_server(100, 0.0)
+	c._snapshot_heard_tick = 100
+	var held := []
+	for tick in [110, 100 + ceili(c.config.prediction_hold_sec * 60.0) + 1]:
+		var input := DemoInput.new()
+		input.tick = tick
+		input.delta = 1.0 / 60.0
+		input.move = Vector2(1.0, 0.0)
+		c.predict_tick(tick, input)
+		held.append(input.move.x)
+	_check("a client holds its input only after prediction_hold_sec without a snapshot (%s)" % str(held),
+		held[0] == 1.0 and absf(held[1]) < 0.01 and int(c.describe()["held_ticks"]) == 1)
+	remove_child(c)
+	c.free()
+
+
 func _test_prediction() -> void:
 	print("[prediction]")
 
@@ -2326,6 +2395,24 @@ func _test_prediction() -> void:
 		kept.ok and int(kept.value) == 0
 			and dead_movement.position.is_equal_approx(authoritative_at_10[&"position"])
 			and int(predictor.describe()["unpredicted"]) == unpredicted_before + 1)
+
+	# The respawn: the reconcile after one that was not predicting moves it from the server's
+	# state, not from a prediction, so it is no misprediction however far it goes.
+	var respawned_at := authoritative_at_10.duplicate()
+	respawned_at[&"position"] = (authoritative_at_10[&"position"] as Vector3) + Vector3(40.0, 0.0, 0.0)
+	var before_respawn: Dictionary = predictor.describe()
+	predictor._worst_error = 0.0
+	dead_movement.predicts = true
+	dead_movement.moves_body = true
+	var respawn := predictor.reconcile(dead, 10, respawned_at, buffer, 20, dt)
+	var after_respawn: Dictionary = predictor.describe()
+	_check("a respawn's move is not counted as a correction (worst %.2f m)" % predictor._worst_error,
+		respawn.ok and predictor._worst_error == 0.0
+			and after_respawn["corrections"] == before_respawn["corrections"]
+			and after_respawn["unpredicted_moves"] == int(before_respawn["unpredicted_moves"]) + 1)
+	predictor.reconcile(dead, 10, authoritative_at_10, buffer, 20, dt)
+	_check("the next misprediction after a respawn is counted again (%.2f m)" % predictor._worst_error,
+		predictor._worst_error > 1.0)
 	_out_of_tree(dead)
 
 	for entity in [server_entity, client_entity, lonely, untouched, holed_server, holed_client]:

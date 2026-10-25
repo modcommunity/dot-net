@@ -201,6 +201,16 @@ extends DotConfig
 ## makes the worst bump worse and the mean no better (docs/prediction.md#bumping-a-remote).
 @export_range(0.0, 1.0, 0.01) var remote_extrapolation_sec: float = 0.0
 
+## Seconds the server repeats a silent peer's last input before it applies that input
+## neutralised ([method DotNetInput._neutralise]): a lost packet keeps the player moving, a
+## blackout does not run them on for its whole length. 0 repeats for ever.
+@export_range(0.0, 5.0, 0.05) var starved_input_hold_sec: float = 0.25
+
+## Seconds without a snapshot after which a client predicts on its input neutralised, so a
+## blackout's correction is bounded by about speed x (this + [member starved_input_hold_sec])
+## rather than by its length (docs/prediction.md, "Blackouts"). 0 never holds.
+@export_range(0.0, 5.0, 0.05) var prediction_hold_sec: float = 0.5
+
 @export_group("Lag compensation")
 
 ## Rewind the world to a client's view when validating its actions.
