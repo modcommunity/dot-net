@@ -475,7 +475,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 508
+const CHECKS := 514
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1757,6 +1757,18 @@ func _test_interpolation() -> void:
 	_check("value_at with a cut is null before a teleport", interpolator.value_at(4, &"position", 101.0, 10.0) == null)
 	_check("and blends after it", interpolator.value_at(4, &"position", 105.0, 10.0) == Vector3(40.25, 0, 0))
 	_check("and without one blends across it", interpolator.value_at(4, &"position", 101.0) == Vector3(0.25, 0, 0))
+	# bracket_at / value_between: the snapshot ticks a view tick was drawn between, and the
+	# blend between exactly those two, so both ends rewind between the same samples (API 15).
+	_check("bracket_at names the two snapshot ticks around a view tick", interpolator.bracket_at(101.0) == Vector2i(100, 102))
+	_check("and one tick when the view tick is a snapshot's", interpolator.bracket_at(104.0) == Vector2i(104, 104))
+	_check("and (-1, -1) before the oldest", interpolator.bracket_at(50.0) == Vector2i(-1, -1))
+	_check("value_between blends the two samples named (a gap kept as a gap)", interpolator.value_between(4, &"position", 104, 106, 105.5) == Vector3(40.375, 0, 0))
+	_check("and is null for a sample the track does not have", interpolator.value_between(4, &"position", 103, 106, 105.0) == null)
+	var wire_spec := DotNetVar.make(&"position", DotNetVar.Type.VECTOR3_POSITION)
+	var on_wire: Vector3 = wire_spec.wire_value(Vector3(1.2345, -0.004, 7.0))
+	var round_trip := DotNetWriter.new()
+	wire_spec.write(round_trip, Vector3(1.2345, -0.004, 7.0))
+	_check("wire_value is the value a receiver reads, to the bit", on_wire == wire_spec.read(DotNetReader.new(round_trip.to_bytes())) and on_wire != Vector3(1.2345, -0.004, 7.0))
 
 	# Discrete values must not be blended into states that never existed.
 	interpolator.push(2, 100, {"weapon": 1})

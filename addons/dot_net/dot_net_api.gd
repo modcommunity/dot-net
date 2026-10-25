@@ -26,5 +26,8 @@ extends RefCounted
 #     built by the optional native library, DotNetNative; the same bytes, off by default.
 # 14: DotNetInterpolator.value_at(net_id, property, render_tick): a remote as drawn at a past render
 #     tick, counting nothing; what lag-compensated solid-player collision predicts against.
-const LEVEL := 14
+# 15: DotNetInterpolator.bracket_at(render_tick) and value_between(...): the two snapshot ticks a
+#     view tick was drawn between, so a server can rewind between the same two; and
+#     DotNetVar.wire_value(value), a value as the receiver reads it.
+const LEVEL := 15
 const OLDEST := 1

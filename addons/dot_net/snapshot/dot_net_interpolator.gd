@@ -93,6 +93,9 @@ var config: DotNetConfig
 ## net_id -> Track
 var _tracks: Dictionary = {}
 
+## Every snapshot tick pushed, sorted, the newest [constant TRACK_CAPACITY]: [method bracket_at].
+var _timeline := PackedInt32Array()
+
 ## Current delay in SNAPSHOTS, adapted from observed arrival spacing.
 ##
 ## [b]Snapshots, and converted to ticks in exactly one place.[/b] This field was called
@@ -188,6 +191,11 @@ func push(net_id: int, tick: int, values: Dictionary) -> void:
 		_tracks[net_id] = Track.new(net_id)
 
 	(_tracks[net_id] as Track).push(tick, values)
+	var at := _timeline.bsearch(tick)
+	if at >= _timeline.size() or _timeline[at] != tick:
+		_timeline.insert(at, tick)
+		if _timeline.size() > TRACK_CAPACITY:
+			_timeline.remove_at(0)
 
 
 ## Notes that a snapshot arrived, for the adaptive buffer.
@@ -416,6 +424,52 @@ func value_at(net_id: int, property: StringName, render_tick: float, cut: float 
 	return (samples[last]["values"] as Dictionary).get(property)
 
 
+## The two snapshot ticks [method value_at] blends at [param render_tick] (x older, y newer;
+## equal past the newest), over every snapshot received; (-1, -1) before the oldest. A
+## command carries them so the server rewinds between the same two ticks the client drew
+## between, a lost snapshot included (docs/prediction.md#bumping-a-remote).
+func bracket_at(render_tick: float) -> Vector2i:
+	if _timeline.is_empty() or render_tick < float(_timeline[0]):
+		return Vector2i(-1, -1)
+	var last := _timeline.size() - 1
+	if render_tick >= float(_timeline[last]):
+		return Vector2i(_timeline[last], _timeline[last])
+	var at := _timeline.bsearch(ceili(render_tick))
+	if float(_timeline[at]) == render_tick:
+		return Vector2i(_timeline[at], _timeline[at])
+	return Vector2i(_timeline[at - 1], _timeline[at])
+
+
+## [param property] blended between the samples at exactly [param older_tick] and
+## [param newer_tick] ([method bracket_at]) at [param render_tick]; null when either sample is
+## missing, or with [param cut] past a teleport as in [method value_at]. Counts nothing.
+func value_between(net_id: int, property: StringName, older_tick: int, newer_tick: int, render_tick: float, cut: float = 0.0) -> Variant:
+	var track: Track = _tracks.get(net_id)
+	if track == null or track.is_empty():
+		return null
+	var samples := track.samples
+	var i := -1
+	var j := -1
+	for k in range(samples.size()):
+		var t := int(samples[k]["tick"])
+		if t == older_tick:
+			i = k
+		if t == newer_tick:
+			j = k
+	if i < 0 or j < 0:
+		return null
+	if cut > 0.0 and _jumps_after(samples, i, property, cut):
+		return null
+	var a: Variant = (samples[i]["values"] as Dictionary).get(property)
+	var b: Variant = (samples[j]["values"] as Dictionary).get(property)
+	if a == null or b == null:
+		return b if b != null else a
+	var alpha := 0.0 if newer_tick <= older_tick else clampf((render_tick - float(older_tick)) / float(newer_tick - older_tick), 0.0, 1.0)
+	if (a is Vector3 and b is Vector3) or (a is Vector2 and b is Vector2) or (a is float and b is float):
+		return lerp(a, b, alpha)
+	return a if alpha < 0.5 else b
+
+
 ## Whether [param property] moves further than [param cut] between any two neighbouring
 ## samples from index [param from] on: a teleport [method value_at] does not reach across.
 static func _jumps_after(samples: Array, from: int, property: StringName, cut: float) -> bool:
@@ -642,6 +696,7 @@ func forget(net_id: int) -> void:
 
 func clear() -> void:
 	_tracks.clear()
+	_timeline.clear()
 	_last_arrival_ms = 0
 	_arrival_interval_ms = 0.0
 	_arrival_jitter_ms = 0.0

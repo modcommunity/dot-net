@@ -353,6 +353,14 @@ func differs(old_value: Variant, new_value: Variant) -> bool:
 	return not _values_equal(old_value, new_value)
 
 
+## [param value] as a receiver reads it after the wire: written and read back, exactly.
+## What a server collides or rewinds against when a client predicts from the received copy.
+func wire_value(value: Variant) -> Variant:
+	var writer := DotNetWriter.new(32)
+	write(writer, value)
+	return read(DotNetReader.new(writer.to_bytes()))
+
+
 ## The step between two values the wire can carry for this property: what a value moves
 ## by being quantised, at most half of it. 0 for an exact type.
 func quantum() -> float:
