@@ -34,3 +34,12 @@ A change to any of those GDScript methods is a change to `src/dot_net_native_cor
 ## What it costs
 
 `tools/snapshot_bench.tscn -- --peers=100 --npcs=213 --hash --split`, one dev VM, debug library, mean of 60 snapshots: GDScript 108.5 ms, native 26.1 ms, native with 4 workers 24.6 ms; the same digest each time. What is left is interest, ranking and the per-entity reads, all GDScript.
+
+A whole zombie-survival server tick (`tools/server_probe.tscn -- --n=N --rate=64 --acks --lead=45`, about 230 NPCs, 768 ticks, mean ms per tick, snapshot send / whole tick, on a shared VM with other jobs running):
+
+| Players | GDScript | GDScript, 4 workers | native | native, 4 workers |
+| --- | --- | --- | --- | --- |
+| 100 | 134.8 / 177.3 | 96.2 / 142.1 | 33.9 / 76.6 | 26.9 / 71.7 |
+| 128 | 181.0 / 235.3 | 120.4 / 176.1 | 49.1 / 103.4 | 33.8 / 87.7 |
+
+The snapshot send drops about fourfold; the rest of that tick (bots, brains, players) is the game's and is now the larger part.
