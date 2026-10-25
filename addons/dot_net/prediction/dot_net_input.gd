@@ -79,10 +79,19 @@ func _equals(_other: DotNetInput) -> bool:
 
 
 ## Clears whatever this input would make happen and keeps where it looks: the input a
-## silent player is given ([member DotNetConfig.starved_input_hold_sec]). The default keeps
-## everything, which repeats the last input as before.
+## silent player is given ([member DotNetConfig.starved_input_hold_sec]).
+##
+## The default calls [code]neutralise()[/code] on every member that has one (a
+## [code]DotFpsCommand[/code] zeroes its move and buttons and keeps its view angles), so a
+## game whose input is made of such commands needs no override. Override for plain fields
+## (a held-action bitmask, a slot), calling [code]super()[/code] first.
 func _neutralise() -> void:
-	pass
+	for prop in get_property_list():
+		if not (int(prop["usage"]) & PROPERTY_USAGE_SCRIPT_VARIABLE):
+			continue
+		var member: Variant = get(prop["name"])
+		if member is Object and (member as Object).has_method(&"neutralise"):
+			(member as Object).call(&"neutralise")
 
 
 # --- Public API ------------------------------------------------------------

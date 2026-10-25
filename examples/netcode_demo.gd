@@ -336,6 +336,29 @@ class DemoInput extends DotNetInput:
 		fire = false
 
 
+## A command-shaped member, as DotFpsCommand is in the games.
+class DemoCommand extends RefCounted:
+	var move := Vector2.ONE
+	var yaw := 1.5
+	var buttons := 7
+
+	func neutralise() -> void:
+		move = Vector2.ZERO
+		buttons = 0
+
+
+## An input with no _neutralise of its own: only members.
+class MemberInput extends DotNetInput:
+	var cmd := DemoCommand.new()
+	var plain := 3
+
+	func _write(_w: DotNetWriter) -> void:
+		pass
+
+	func _read(_r: DotNetReader) -> void:
+		pass
+
+
 ## A game's own message type.
 class ChatMessage extends DotNetMessage:
 	var text: String = ""
@@ -422,7 +445,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 475
+const CHECKS := 476
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -2154,6 +2177,10 @@ func _test_lag_compensation() -> void:
 ## neutralised, and a client with no snapshot for prediction_hold_sec predicts on a held input.
 func _test_starved_input() -> void:
 	print("[starved input]")
+	var mi := MemberInput.new()
+	mi._neutralise()
+	_check("the default _neutralise neutralises members and keeps the rest",
+		mi.cmd.move == Vector2.ZERO and mi.cmd.buttons == 0 and mi.cmd.yaw == 1.5 and mi.plain == 3)
 	var moved := []
 	for hold in [0.25, 0.0]:
 		var s := DotNetManager.new()
