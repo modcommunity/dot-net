@@ -275,6 +275,7 @@ var _snapshot_threads_note: String = ""
 var _native: Object = null
 var _native_note: String = ""
 var _native_tried: bool = false
+var _interest_fallback_logged: bool = false
 
 ## Snapshots built on workers, and the last one's peers, tasks and fork-to-join time.
 var _snapshot_pooled: int = 0
@@ -1028,6 +1029,9 @@ func _send_snapshots_native(
 	# Before begin_snapshot, which reads each identity's interest fields once.
 	var core_interest := config.native_interest and send_fn.is_valid() and interest.native_interest_ok()
 	var interest_cfg := interest.native_config(config) if core_interest else {}
+	if config.native_interest and send_fn.is_valid() and not core_interest and not _interest_fallback_logged:
+		_interest_fallback_logged = true
+		DotLog.info(CHANNEL, "native_interest is on but this interest strategy is not portable; interest stays in GDScript")
 	if core_interest:
 		interest_cfg["starvation_ticks"] = budget.starvation_ticks
 		interest_cfg["starvation_weight"] = budget.starvation_weight
