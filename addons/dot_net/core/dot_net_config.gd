@@ -307,6 +307,14 @@ extends DotConfig
 ## cells, much larger and it returns far more than it needs.
 @export var interest_cell_size: float = 128.0
 
+## Entities past [member far_distance] from a peer are sent in one snapshot of this many. 1 is off.
+## Applied to the default distance strategy ([member DotNetInterest.far_every]); a game that builds
+## its own strategy sets it there.
+@export_range(1, 16, 1) var far_every: int = 1
+
+## Metres beyond which an entity is far for [member far_every]. 0 is never far.
+@export var far_distance: float = 0.0
+
 ## Entities replicated to one client per snapshot, at most. 0 is unlimited.
 ##
 ## The backstop when interest management is not enough — a thousand entities in one

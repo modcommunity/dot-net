@@ -336,6 +336,8 @@ func setup() -> DotResult:
 	if interest == null:
 		var distance := DotNetInterestDistance.new()
 		distance.radius = config.interest_radius
+		distance.far_every = config.far_every
+		distance.far_distance = config.far_distance
 		interest = distance
 	elif interest is DotNetInterestGrid:
 		# The config's knob, documented since the first version and applied by
