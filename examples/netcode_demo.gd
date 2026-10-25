@@ -445,7 +445,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 480
+const CHECKS := 484
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -475,6 +475,20 @@ var client: DotNetManager
 var _in_flight: Array[Dictionary] = []
 var _drop_next: int = 0
 var _rng := RandomNumberGenerator.new()
+
+
+## Observers-only state, as a game's alive/health pair: set once, never changing again.
+class ObserverVars extends DotNetBehaviour:
+	var alive: bool = false
+	var hp: int = 0
+	var armour: int = 0
+	var wobble: int = 0
+
+	func _register_net_vars() -> void:
+		replicate(&"alive", DotNetVar.Type.BOOL).to_observers_only()
+		replicate(&"hp", DotNetVar.Type.UINT).bits(8).to_observers_only()
+		replicate(&"armour", DotNetVar.Type.UINT).bits(8)
+		replicate(&"wobble", DotNetVar.Type.UINT).bits(8)
 
 
 func _ready() -> void:
@@ -529,6 +543,7 @@ func _run() -> void:
 	_test_cover_stalls()
 	await _test_dropped_time_live()
 	await _test_integration()
+	_test_late_mirror_observer_vars()
 
 	print("")
 	_check(
@@ -5914,6 +5929,102 @@ func _test_integration() -> void:
 	var released := server.remove_peer(2)
 	_check("peer removal released its entities", released.size() == 1)
 	_check("registry emptied", server.registry.count() == 0)
+	_sections_completed += 1
+
+
+## An observer that learns of an entity after the server's first snapshots still gets the
+## state that never changes again (a game's alive/health, sent once), when it sends no
+## acknowledgement until the mirror exists: the server must send that state again then.
+func _test_late_mirror_observer_vars() -> void:
+	_sections_entered += 1
+	print("")
+	print("[late mirror]")
+
+	var s := DotNetManager.new()
+	s.is_server = true
+	s.service_scope = &"server"
+	s.local_peer_id = 1
+	s.auto_tick = false
+	s.config_file = ""
+	s.config = DotNetConfig.new()
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.service_scope = &"client"
+	c.local_peer_id = 2
+	c.auto_tick = false
+	c.config_file = ""
+	c.config = DotNetConfig.new()
+	s.config.ack_window_snapshots = 4
+	add_child(s)
+	add_child(c)
+	s.setup()
+	c.setup()
+
+	var held: Array[PackedByteArray] = []
+	s.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if peer_id != 2:
+			return
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			c.receive(payload, 1)
+		else:
+			held.append(payload)
+	s.start()
+	c.start()
+	s.add_peer(2)
+
+	var build := func(_context: Dictionary) -> Node:
+		var identity := _make_entity(&"mirror", 0)
+		var vars := ObserverVars.new()
+		vars.name = "ObserverVars"
+		identity.get_parent().add_child(vars)
+		identity.behaviours.append(vars)
+		vars.identity = identity
+		vars._bind(DotNetConfig.new())
+		return identity.get_parent()
+	s.spawner.register_factory(&"mirror", build)
+	c.spawner.register_factory(&"mirror", build)
+
+	# Owned by peer 3, so peer 2 observes it.
+	var server_entity: DotNetIdentity = s.spawner.spawn(&"mirror", 3, Transform3D.IDENTITY, 0).value
+	var server_vars := server_entity.behaviours[1] as ObserverVars
+	server_vars.alive = true
+	server_vars.hp = 87
+	server_vars.armour = 40
+
+	var later: Array = []
+	var acks: Array = []
+	var client_entity: DotNetIdentity = null
+	for tick in range(1, 91):
+		server_vars.wobble = tick % 200
+		s.server_tick(tick)
+		later.append([tick + 4, held.duplicate()])
+		held.clear()
+		for item: Array in later.duplicate():
+			if int(item[0]) <= tick:
+				for payload: PackedByteArray in item[1]:
+					c.receive_snapshot(payload)
+				later.erase(item)
+		# A loading client sends no acknowledgements until its entities exist.
+		if client_entity != null:
+			acks.append([tick + 4, c.ack_tick()])
+		for item: Array in acks.duplicate():
+			if int(item[0]) <= tick:
+				s.receive_ack(2, mini(int(item[1]), tick))
+				acks.erase(item)
+		# The mirror appears only after the first second of snapshots.
+		if tick == 30:
+			client_entity = c.spawner.spawn_remote(
+				&"mirror", server_entity.net_id, 3, Transform3D.IDENTITY, 0
+			).value
+
+	_check("the late mirror exists", client_entity != null)
+	var client_vars := client_entity.behaviours[1] as ObserverVars
+	_check("observer alive arrived (%s)" % client_vars.alive, client_vars.alive)
+	_check("observer hp arrived (%d)" % client_vars.hp, client_vars.hp == 87)
+	_check("shared armour arrived (%d)" % client_vars.armour, client_vars.armour == 40)
+
+	s.queue_free()
+	c.queue_free()
 	_sections_completed += 1
 
 

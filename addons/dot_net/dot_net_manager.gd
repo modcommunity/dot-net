@@ -207,6 +207,9 @@ var _acks: Dictionary = {}
 ## host had before [method receive_ack] existed. See [DotNetBehaviour.PeerView].
 var _ack_wired: Dictionary = {}
 
+## peer_id -> the newest snapshot tick when the peer was added. Server side.
+var _peer_added_tick: Dictionary = {}
+
 ## peer_id -> consecutive ticks with no input, and the last input it sent. Server side.
 var _starved_ticks: Dictionary = {}
 var _last_inputs: Dictionary = {}
@@ -461,6 +464,7 @@ func stop() -> void:
 	_input_buffers.clear()
 	_acks.clear()
 	_ack_wired.clear()
+	_peer_added_tick.clear()
 	_starved_ticks.clear()
 	_last_inputs.clear()
 	_snapshot_heard_tick = -1
@@ -499,6 +503,7 @@ func add_peer(peer_id: int) -> void:
 	_input_buffers[peer_id] = DotNetInput.Buffer.new(config.input_history_ticks)
 	_acks[peer_id] = 0
 	_ack_wired[peer_id] = false
+	_peer_added_tick[peer_id] = _last_snapshot_tick
 	_starved_ticks[peer_id] = 0
 
 	DotLog.debug(CHANNEL, "peer added", {"peer": peer_id})
@@ -520,6 +525,7 @@ func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
 	_input_buffers.erase(peer_id)
 	_acks.erase(peer_id)
 	_ack_wired.erase(peer_id)
+	_peer_added_tick.erase(peer_id)
 	_starved_ticks.erase(peer_id)
 	_last_inputs.erase(peer_id)
 
@@ -2130,6 +2136,14 @@ func receive_ack(peer_id: int, tick: int) -> DotResult:
 
 	if not bool(_ack_wired.get(peer_id, false)):
 		_ack_wired[peer_id] = true
+		# Sends that aged out before this first ack were assumed delivered, which a client
+		# still loading is not: it skips snapshots naming entities it has not been told of.
+		# Start over once, so state that never changes again (health, alive) is re-sent.
+		var window := config.ack_window_snapshots * config.ticks_per_snapshot()
+		if _last_snapshot_tick - int(_peer_added_tick.get(peer_id, 0)) > window:
+			for identity in registry.all():
+				for behaviour in identity.behaviours:
+					behaviour.forget_peer(peer_id)
 		DotLog.debug(
 			CHANNEL,
 			"peer is acknowledging snapshots; lost state will be re-sent",
