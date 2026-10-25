@@ -903,6 +903,10 @@ func _send_snapshots(
 				observer, relevant, config.entity_cap(), context, peer_id, scores
 			)
 			relevant = budget.accumulate(peer_id, relevant, scores)
+			if config.peer_send_budget > 0 and relevant.size() > config.peer_send_budget:
+				var kept: Array[DotNetIdentity] = []
+				_within_send_budget(kept, relevant, observer)
+				relevant = kept
 
 			if _send_to_peer(peer_id, tick, relevant):
 				sent_to += 1
@@ -1087,8 +1091,24 @@ func _interest_chunk(
 		if _test_skew_pooled:
 			job.acked_tick = 0
 		job.ordered = budget.accumulate_record(job.peer_budget, relevant, scores)
+		if config.peer_send_budget > 0 and job.ordered.size() > config.peer_send_budget:
+			var kept: Array = []
+			_within_send_budget(kept, job.ordered, job.observer)
+			job.ordered = kept
 		job.answer = answer
 	return []
+
+
+## The first [member DotNetConfig.peer_send_budget] of [param ordered] (accumulator order) into
+## [param out], and every later one [param observer]'s owner owns. Those left out keep their
+## accumulated priority and lead a later snapshot. Reads fields only, so a worker may run it.
+func _within_send_budget(out: Array, ordered: Array, observer: DotNetIdentity) -> void:
+	var limit := config.peer_send_budget
+	var owner := observer.owner_peer_id if observer != null else -1
+	for i in ordered.size():
+		var identity: DotNetIdentity = ordered[i]
+		if i < limit or (owner > 0 and identity.owner_peer_id == owner):
+			out.append(identity)
 
 
 ## Builds the snapshots of peers [code][chunk * n / chunks, (chunk + 1) * n / chunks)[/code]

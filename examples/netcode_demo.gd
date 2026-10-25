@@ -445,7 +445,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 476
+const CHECKS := 480
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1411,6 +1411,31 @@ func _test_interest() -> void:
 			seen[identity.net_id] = int(seen.get(identity.net_id, 0)) + 1
 	_check("thinning: own and near every snapshot, a far one once in far_every (%s)" % seen,
 		int(seen.get(1, 0)) == 4 and int(seen.get(2, 0)) == 4 and int(seen.get(3, 0)) == 1 and int(seen.get(4, 0)) == 1)
+
+	# Tiers: 3 is in the first band past 3000 m (every 4th), 4 in the second (every 8th).
+	thin.far_distance = 3000.0
+	thin.far_tiers = 3
+	for coherent: bool in [false, true]:
+		thin.far_coherent = coherent
+		seen = {}
+		var same := true
+		for snap in 8:
+			var ctx := {"tick": snap * config.ticks_per_snapshot(), "config": config}
+			var turns: Array[String] = []
+			for peer in [1, 2]:
+				var kept: Array = []
+				thin.thin_into(kept, observer, thin.relevant_for(observer, all, peer, ctx), peer, ctx)
+				var names := ""
+				for identity: DotNetIdentity in kept:
+					names += "%d," % identity.net_id
+					if peer == 1:
+						seen[identity.net_id] = int(seen.get(identity.net_id, 0)) + 1
+				turns.append(names)
+			same = same and turns[0] == turns[1]
+		_check("tiers: near every snapshot, band 1 one in 4, band 2 one in 8 (%s)" % seen,
+			int(seen.get(2, 0)) == 8 and int(seen.get(3, 0)) == 2 and int(seen.get(4, 0)) == 1)
+		_check("far_coherent %s: two peers %s the same far turns" % [coherent, "share" if coherent else "stagger"],
+			same == coherent)
 
 	# The grid must agree with the brute-force answer — that is the whole
 	# correctness requirement for a spatial index.
@@ -4792,6 +4817,8 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 	if variant == "thin":
 		distance.far_every = 3
 		distance.far_distance = 6.0
+		distance.far_tiers = 2
+		host.config.peer_send_budget = 4
 	var rich := variant == "cache" or variant == "grid"
 	if rich:
 		# A cached answer is kept for good and expired by hand below (a wall-clock interval

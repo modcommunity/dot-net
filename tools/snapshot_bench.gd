@@ -7,7 +7,7 @@ extends Node
 ## [codeblock]
 ## godot --headless --path . res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213
 ##     [--ticks=60] [--warm=20] [--relevance=off] [--radius=60] [--workers=N] [--cap=192]
-##     [--far-every=N --far=M] [--hash]
+##     [--far-every=N --far=M] [--far-coherent] [--far-tiers=T] [--send-budget=K] [--players-always] [--hash]
 ## [/codeblock]
 ##
 ## [code]--hash[/code] prints one digest of every payload sent, in order: two builds of dot-net
@@ -76,6 +76,12 @@ var _cap := 192
 var _far_every := 1
 var _far := 0.0
 var _hash := false
+var _send_budget := 0
+var _players_always := false
+var _far_coherent := false
+var _far_tiers := 1
+var _split := false
+var _laps := {}
 
 
 func _ready() -> void:
@@ -94,6 +100,11 @@ func _ready() -> void:
 			"--far-every": _far_every = value.to_int()
 			"--far": _far = value.to_float()
 			"--hash": _hash = true
+			"--send-budget": _send_budget = value.to_int()
+			"--players-always": _players_always = true
+			"--far-coherent": _far_coherent = true
+			"--far-tiers": _far_tiers = value.to_int()
+			"--split": _split = true
 	_run.call_deferred()
 
 
@@ -111,6 +122,7 @@ func _run() -> void:
 	config.per_client_budget = 0
 	config.max_entities_per_snapshot = _cap
 	config.snapshot_workers = _workers
+	config.peer_send_budget = _send_budget
 	host.config = config
 	add_child(host)
 	var _s := host.setup()
@@ -123,6 +135,8 @@ func _run() -> void:
 	host.interest.evaluation_interval_sec = 0.0
 	host.interest.far_every = _far_every
 	host.interest.far_distance = _far
+	host.interest.far_coherent = _far_coherent
+	host.interest.far_tiers = _far_tiers
 
 	var digest := HashingContext.new()
 	var _d := digest.start(HashingContext.HASH_MD5)
@@ -157,7 +171,10 @@ func _run() -> void:
 	for tick in range(1, _warm + _ticks + 1):
 		_move(players, npcs, tick)
 		var at := Time.get_ticks_usec()
-		host.server_tick(tick)
+		if _split and _workers == 0:
+			_split_tick(host, tick, tick > _warm)
+		else:
+			host.server_tick(tick)
 		if tick > _warm:
 			times.append(float(Time.get_ticks_usec() - at) / 1000.0)
 		acks_due.append(tick)
@@ -172,7 +189,7 @@ func _run() -> void:
 		total += t
 	var row := {
 		"peers": _peers, "npcs": _npcs, "relevance": _relevance, "workers": _workers,
-		"far_every": _far_every, "mean_ms": snappedf(total / times.size(), 0.01),
+		"far_every": _far_every, "far_tiers": _far_tiers, "send_budget": _send_budget, "mean_ms": snappedf(total / times.size(), 0.01),
 		"p50_ms": snappedf(times[times.size() / 2], 0.01),
 		"min_ms": snappedf(times[0], 0.01),
 		"bytes_per_peer": int(float(sent[1]) / float(maxi(sent[0], 1))),
@@ -180,8 +197,62 @@ func _run() -> void:
 	}
 	if _hash:
 		row["hash"] = digest.finish().hex_encode()
+	for k: String in _laps:
+		row["lap_" + k] = snappedf(float(_laps[k]) / 1000.0 / times.size(), 0.01)
 	print("BENCH %s" % JSON.stringify(row))
 	get_tree().quit(0)
+
+
+## The manager's inline snapshot path, the same calls, lapped by part (ms per tick in the row).
+func _split_tick(n: DotNetManager, tick: int, measure: bool) -> void:
+	n.clock.tick = maxi(n.clock.tick, tick)
+	var identities := n.registry.all()
+	var context := {"tick": tick, "config": n.config, "now_ms": Time.get_ticks_msec()}
+	var at := Time.get_ticks_usec()
+	var laps := _laps if measure else {}
+	for identity in identities:
+		identity.freeze_position()
+	n.interest._prepare(identities, context)
+	n.interest.index_snapshot(identities)
+	n._last_snapshot_tick = tick
+	for identity in identities:
+		for behaviour in identity.behaviours:
+			behaviour.begin_snapshot_reads(int(context["now_ms"]), false)
+	at = _lap(laps, "reads", at)
+	for peer_id in n._peers:
+		n.budget.begin_tick(peer_id)
+		var observer := n._observer_for(peer_id)
+		var relevant := n.interest.relevant_for(observer, identities, peer_id, context)
+		at = _lap(laps, "relevant", at)
+		if n.interest.thins():
+			var kept: Array[DotNetIdentity] = []
+			n.interest.thin_into(kept, observer, relevant, peer_id, context)
+			relevant = kept
+		var scores := n.interest.scores_for(observer, relevant, context)
+		at = _lap(laps, "thin_scores", at)
+		relevant = n.interest.prioritise(observer, relevant, n.config.entity_cap(), context, peer_id, scores)
+		relevant = n.budget.accumulate(peer_id, relevant, scores)
+		if n.config.peer_send_budget > 0 and relevant.size() > n.config.peer_send_budget:
+			var kept: Array[DotNetIdentity] = []
+			n._within_send_budget(kept, relevant, observer)
+			relevant = kept
+		at = _lap(laps, "rank_budget", at)
+		laps["pairs_built"] = int(laps.get("pairs_built", 0)) + relevant.size() * 1000
+		var _sent := n._send_to_peer(peer_id, tick, relevant)
+		at = _lap(laps, "build", at)
+	for identity in identities:
+		for behaviour in identity.behaviours:
+			behaviour.end_snapshot_reads()
+	n.interest.index_snapshot([])
+	for identity in identities:
+		identity.thaw_position()
+	at = _lap(laps, "reads", at)
+
+
+func _lap(laps: Dictionary, key: String, since: int) -> int:
+	var now := Time.get_ticks_usec()
+	laps[key] = int(laps.get(key, 0)) + now - since
+	return now
 
 
 func _body(behaviour: DotNetBehaviour) -> Node:
@@ -190,6 +261,7 @@ func _body(behaviour: DotNetBehaviour) -> Node:
 	identity.name = "NetIdentity"
 	identity.prefab_id = &"player" if behaviour is Player else &"npc"
 	identity.authority = DotNetIdentity.Authority.SHARED if behaviour is Player else DotNetIdentity.Authority.SERVER
+	identity.always_relevant = _players_always and behaviour is Player
 	if _hash:
 		# Linger is timed by the wall clock, so a faster build would keep entities longer.
 		identity.interest_linger_sec = 0.0

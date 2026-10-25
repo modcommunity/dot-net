@@ -321,6 +321,13 @@ extends DotConfig
 ## room. Prioritisation decides which ones make the cut.
 @export_range(0, 4096, 16) var max_entities_per_snapshot: int = 256
 
+## Entities built into one peer's snapshot, at most, taken in the budget's accumulated-priority
+## order; the rest wait their turn, so each entity's update rate follows its score
+## ([member DotNetInterest.distance_falloff]). What the peer owns always goes. 0 is off.
+## Measured to save little: each peer is cut at a different point, so peers fall out of step
+## and stop sharing dirty sets and encodings. Prefer coherent far turns (docs/replication.md).
+@export_range(0, 4096, 1) var peer_send_budget: int = 0
+
 @export_group("Limits")
 
 ## Messages one client may send per second before being throttled.

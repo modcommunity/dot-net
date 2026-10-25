@@ -53,6 +53,21 @@ const CHANNEL := "net.interest"
 ## Per-tag [member far_distance], as [code]tag -> metres[/code]; the first matching tag wins.
 @export var far_distance_by_tag: Dictionary = {}
 
+## Every peer that is far from an entity skips the same snapshots of it, rather than each its own.
+## Peers in step then share one dirty set and one encoding of it (DotNetBehaviour's sharing);
+## staggered per peer, each far peer is a different record and costs a full per-peer build.
+@export var far_coherent: bool = false
+
+## Distance bands past [member far_distance], each twice as far and sent half as often:
+## band b (from 1) goes every [code]far_every << (b - 1)[/code] snapshots. 1 is one band.
+## With a power-of-two [member far_every] and [member far_coherent] the bands nest, so they still share.
+@export_range(1, 4, 1) var far_tiers: int = 1
+
+## How fast the default [method _score] falls with distance: [code]priority / (1 + d * this)[/code].
+## Under [member DotNetConfig.peer_send_budget] an entity's share of snapshots follows its score,
+## so 0.1 sends one 100 m away about a tenth as often as one at your feet.
+@export_range(0.0, 1.0, 0.001) var distance_falloff: float = 0.01
+
 ## observer peer_id -> {at_ms, ids: Dictionary}
 var _cache: Dictionary = {}
 
@@ -117,7 +132,7 @@ func _score(
 		return 1.0
 
 	var distance := observer.world_position().distance_to(entity.world_position())
-	return entity.priority / (1.0 + distance * 0.01)
+	return entity.priority / (1.0 + distance * distance_falloff)
 
 
 # --- Public API ------------------------------------------------------------
@@ -136,14 +151,27 @@ func thin_into(out: Array, observer: DotNetIdentity, relevant: Array, peer_id: i
 		return
 	var config: DotNetConfig = context.get("config")
 	var index := int(context.get("tick", 0)) / (config.ticks_per_snapshot() if config != null else 1)
+	if not far_coherent:
+		index += peer_id
 	var here := observer.world_position()
 	for identity: DotNetIdentity in relevant:
-		if identity.owner_peer_id == observer.owner_peer_id \
-				or (index + identity.net_id + peer_id) % far_every == 0:
+		var turn := index + identity.net_id
+		if identity.owner_peer_id == observer.owner_peer_id or turn % far_every == 0 and far_tiers == 1:
 			out.append(identity)
 			continue
 		var far := _far_distance_for(identity)
-		if far <= 0.0 or here.distance_squared_to(identity.world_position()) <= far * far:
+		var limit := far * far
+		var d2 := here.distance_squared_to(identity.world_position())
+		if far <= 0.0 or d2 <= limit:
+			out.append(identity)
+			continue
+		var every := far_every
+		for _band in range(1, far_tiers):
+			limit *= 4.0
+			if d2 <= limit:
+				break
+			every <<= 1
+		if turn % every == 0:
 			out.append(identity)
 
 
@@ -593,6 +621,8 @@ func describe() -> Dictionary:
 		"interval": evaluation_interval_sec,
 		"far_every": far_every,
 		"far_distance": far_distance,
+		"far_coherent": far_coherent,
+		"far_tiers": far_tiers,
 		"cached_observers": _cache.size(),
 		"capped_observers": _cap_state.values().filter(
 			func(state: Dictionary) -> bool: return state["capped"]
