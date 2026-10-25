@@ -230,7 +230,9 @@ func relevant_for(
 			# the cache never expires at all and the entity is never sent even once. The
 			# position still looks right the whole time, because the owning client is
 			# predicting it; what does not arrive is everything it cannot predict.
-			return _resolve(_pinned(cached["ids"], observer, all), all)
+			var resolved_typed: Array[DotNetIdentity] = []
+			_resolve_pinned_into(resolved_typed, cached["ids"], observer, all)
+			return resolved_typed
 
 	var relevant := _evaluate(observer, all, context)
 
@@ -311,7 +313,7 @@ func relevance(
 			# position still looks right the whole time, because the owning client is
 			# predicting it; what does not arrive is everything it cannot predict.
 			var resolved: Array = []
-			_resolve_into(resolved, _pinned(cached["ids"], observer, all), all)
+			_resolve_pinned_into(resolved, cached["ids"], observer, all)
 			return [resolved, null, null]
 
 	var relevant: Array = []
@@ -585,6 +587,17 @@ func _find_in(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 
 var _indexed: Array[DotNetIdentity] = []
 var _by_id: Dictionary = {}
+
+
+## [method _pinned] and [method _resolve_into] in one pass over [param all], with no copy of the ids.
+func _resolve_pinned_into(
+	out: Array, ids: Dictionary, observer: DotNetIdentity, all: Array[DotNetIdentity]
+) -> void:
+	var owner := observer.owner_peer_id if observer != null else -1
+	for identity in all:
+		if ids.has(identity.net_id) or identity.always_relevant \
+				or (observer != null and identity.owner_peer_id == owner):
+			out.append(identity)
 
 
 func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array[DotNetIdentity]:

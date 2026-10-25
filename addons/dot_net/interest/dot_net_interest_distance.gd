@@ -105,8 +105,14 @@ func _evaluate_into(
 		elif identity.interest_tags.is_empty():
 			if here.distance_squared_to(identity.world_position()) <= limit_squared:
 				out.append(identity)
-		elif _is_relevant(observer, identity, context):
-			out.append(identity)
+		else:
+			var limit := radius
+			for tag in identity.interest_tags:
+				if radius_by_tag.has(tag):
+					limit = float(radius_by_tag[tag])
+					break
+			if here.distance_squared_to(identity.world_position()) <= limit * limit:
+				out.append(identity)
 
 
 ## [method DotNetInterest.scores_for] with [method _score] inlined, as above.
@@ -116,8 +122,13 @@ func scores_for(observer: DotNetIdentity, entities: Array, context: Dictionary) 
 	var out := {}
 	var here := observer.world_position()
 	var plain := maxf(1.0, radius)
+	var by_tag := radius_by_tag
 	for identity: DotNetIdentity in entities:
-		var limit := plain if identity.interest_tags.is_empty() else maxf(1.0, _radius_for(identity))
+		var limit := plain
+		for tag in identity.interest_tags:
+			if by_tag.has(tag):
+				limit = maxf(1.0, float(by_tag[tag]))
+				break
 		var distance := here.distance_to(identity.world_position())
 		out[identity.net_id] = identity.priority * (1.0 - clampf(distance / limit, 0.0, 1.0))
 	return out

@@ -287,6 +287,10 @@ var _snapshot_join_usec: int = 0
 var _snapshot_prep_usec_total: int = 0
 var _snapshot_join_usec_total: int = 0
 var _snapshot_apply_usec_total: int = 0
+## Native path only: interest and ranking for every peer (workers included), then handing the
+## lists to the core. Both sit between prep and join, and were the unmeasured half of a snapshot.
+var _snapshot_interest_usec_total: int = 0
+var _snapshot_submit_usec_total: int = 0
 ## Suites only: a pooled build treats its peer as never having acknowledged anything, so the
 ## threads-on run must come out different from the threads-off one. What proves the byte
 ## comparison is armed, and that it compares the pooled path at all.
@@ -1026,6 +1030,7 @@ func _send_snapshots_native(
 		DotNetIdentity.Authority.SHARED,
 	]))
 	var jobs: Array[SnapshotJob] = []
+	var interest_started := Time.get_ticks_usec()
 	if workers > 0 and send_fn.is_valid():
 		for peer_id in _peers:
 			if phase >= 0 and posmod(peer_id, period) != phase:
@@ -1074,12 +1079,15 @@ func _send_snapshots_native(
 			job.ordered = relevant
 			jobs.append(job)
 
+	var submit_started := Time.get_ticks_usec()
+	_snapshot_interest_usec_total += submit_started - interest_started
 	for job in jobs:
 		core.submit_peer(job.ordered, PackedInt64Array([
 			job.peer_id, job.acked_tick, 1 if job.strict else 0, 1 if job.compact else 0,
 			job.remaining_bytes, 1 if job.send_lead else 0, job.lead.x, job.lead.y,
 		]), job.peer_budget.accumulators, job.peer_budget.starved_ticks)
 	var started := Time.get_ticks_usec()
+	_snapshot_submit_usec_total += started - submit_started
 	var results: Array = core.finish_snapshot()
 	_snapshot_join_usec = Time.get_ticks_usec() - started
 	_snapshot_join_usec_total += _snapshot_join_usec

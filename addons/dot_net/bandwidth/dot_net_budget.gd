@@ -109,18 +109,28 @@ func accumulate_record(
 	candidates: Array,
 	scores: Dictionary
 ) -> Array:
+	var count := candidates.size()
+	var values := PackedFloat64Array()
+	values.resize(count)
+	var accumulators := budget.accumulators
+	var waits := budget.starved_ticks
+	var threshold := starvation_ticks
+	var weight := starvation_weight
+	var i := 0
 	for identity: DotNetIdentity in candidates:
-		var score := float(scores.get(identity.net_id, identity.priority))
-		var current := float(budget.accumulators.get(identity.net_id, 0.0))
-
-		var waited := int(budget.starved_ticks.get(identity.net_id, 0)) + 1
-		budget.starved_ticks[identity.net_id] = waited
-
-		budget.accumulators[identity.net_id] = current \
-			+ maxf(0.0, score) + _starvation_boost(waited)
+		var id := identity.net_id
+		var waited: int = int(waits.get(id, 0)) + 1
+		waits[id] = waited
+		var total: float = float(accumulators.get(id, 0.0)) + maxf(0.0, float(scores.get(id, identity.priority)))
+		if waited > threshold:
+			var over := float(waited - threshold)
+			total += over * over * weight
+		accumulators[id] = total
+		values[i] = maxf(0.0, total)
+		i += 1
 
 	var ordered: Array = []
-	_order_into(candidates, budget.accumulators, ordered)
+	_order_values_into(candidates, values, ordered)
 	return ordered
 
 
@@ -155,6 +165,14 @@ static func _order_into(
 	values.resize(count)
 	for i in count:
 		values[i] = maxf(0.0, float(accumulators.get(candidates[i].net_id, 0.0)))
+	_order_values_into(candidates, values, ordered)
+
+
+## The sort of [method _order_into], for a caller that already has the values.
+static func _order_values_into(candidates: Array, values: PackedFloat64Array, ordered: Array) -> void:
+	var count := candidates.size()
+	if count == 0:
+		return
 	var index_bits := 1
 	while (1 << index_bits) < count:
 		index_bits += 1
