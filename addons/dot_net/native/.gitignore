@@ -1,0 +1,7 @@
+# Build output; bin/ holds the shipped libraries.
+*.os
+*.o
+*.obj
+.sconsign*.dblite
+bin/*.exp
+bin/*.lib

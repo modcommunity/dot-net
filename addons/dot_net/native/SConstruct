@@ -1,0 +1,19 @@
+#!/usr/bin/env python
+# Builds the optional server-side snapshot core. Run through build.sh, which fetches the pinned godot-cpp.
+import os
+
+godot_cpp = ARGUMENTS.pop("godot_cpp", os.environ.get("DOT_NET_GODOT_CPP", "godot-cpp"))
+build_dir = ARGUMENTS.pop("build_dir", os.environ.get("DOT_NET_BUILD_DIR", "build"))
+env = SConscript(os.path.join(godot_cpp, "SConstruct"), {"api_version": "4.7"})
+
+# Bit-exact floats against GDScript: no fused multiply-add, no host-specific instruction sets.
+if env.get("is_msvc", False):
+    env.Append(CCFLAGS=["/fp:precise"])
+else:
+    env.Append(CCFLAGS=["-ffp-contract=off", "-fno-fast-math"])
+env.Append(CPPPATH=["src/"])
+VariantDir(os.path.join(build_dir, env["suffix"]), "src", duplicate=0)
+sources = Glob(os.path.join(build_dir, env["suffix"], "*.cpp"))
+library = env.SharedLibrary("bin/libdot_net_native{}{}".format(env["suffix"], env["SHLIBSUFFIX"]), source=sources)
+env.NoCache(library)
+Default(library)
