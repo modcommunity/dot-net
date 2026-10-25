@@ -270,6 +270,12 @@ var _peers: Array[int] = []
 var _snapshot_threads_reason: String = "off"
 var _snapshot_threads_note: String = ""
 
+## The native snapshot core ([DotNetNative]) while [member DotNetConfig.native] is on and it
+## loaded; [member _native_note] is what happened, for [method describe_lines].
+var _native: Object = null
+var _native_note: String = ""
+var _native_tried: bool = false
+
 ## Snapshots built on workers, and the last one's peers, tasks and fork-to-join time.
 var _snapshot_pooled: int = 0
 var _snapshot_pooled_peers: int = 0
@@ -534,6 +540,8 @@ func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
 
 	budget.forget_peer(peer_id)
 	interest.forget_peer(peer_id)
+	if _native != null:
+		_native.forget_peer(peer_id)
 
 	# Every behaviour that ever replicated to this peer holds a record of what it
 	# was believed to have. Nothing else will ever clear it, so a server churning
@@ -853,6 +861,7 @@ func _send_snapshots(
 
 	var workers := _snapshot_workers()
 	var pooled := workers > 0 and send_fn.is_valid() and not _peers.is_empty()
+	var native := _native_for_snapshot()
 
 	# Before [method DotNetInterest._prepare], which reads positions too (a grid indexes
 	# them): from here to the thaw every interest question is about one instant. Inline too:
@@ -876,11 +885,15 @@ func _send_snapshots(
 
 	# Each property read once for this snapshot rather than once per peer; see
 	# [member DotNetBehaviour._snapshot_reads]. For workers, read all of them now.
-	for identity in identities:
-		for behaviour in identity.behaviours:
-			behaviour.begin_snapshot_reads(now_ms, pooled)
+	if native == null:
+		for identity in identities:
+			for behaviour in identity.behaviours:
+				behaviour.begin_snapshot_reads(now_ms, pooled)
 
-	if pooled:
+	if native != null:
+		_snapshot_prep_usec_total += Time.get_ticks_usec() - prep_started
+		sent_to = _send_snapshots_native(native, tick, identities, phase, period, context, workers)
+	elif pooled:
 		_snapshot_prep_usec_total += Time.get_ticks_usec() - prep_started
 		sent_to = _send_snapshots_pooled(tick, identities, phase, period, context, workers)
 	else:
@@ -917,14 +930,15 @@ func _send_snapshots(
 			if _send_to_peer(peer_id, tick, relevant):
 				sent_to += 1
 
-	for identity in identities:
-		for behaviour in identity.behaviours:
-			behaviour.end_snapshot_reads()
+	if native == null:
+		for identity in identities:
+			for behaviour in identity.behaviours:
+				behaviour.end_snapshot_reads()
 
 	interest.index_snapshot([])
 	for identity in identities:
 		identity.thaw_position()
-	if pooled:
+	if pooled or native != null:
 		for identity in _late_frozen:
 			if is_instance_valid(identity):
 				identity.thaw_position()
@@ -963,6 +977,139 @@ func _snapshot_workers() -> int:
 				"workers": workers, "asked": config.snapshot_workers if config != null else 0,
 			})
 	return workers
+
+
+## The native core for this snapshot, made the first time [member DotNetConfig.native] is on,
+## or null for the GDScript path. Turned off, the behaviours it held are handed back.
+func _native_for_snapshot() -> Object:
+	if config == null or not config.native:
+		if _native != null:
+			for identity in registry.all():
+				for behaviour in identity.behaviours:
+					behaviour._native_core = null
+			_native = null
+			_native_tried = false
+			_native_note = "off"
+		return null
+	if _native == null and not _native_tried:
+		_native_tried = true
+		var res := DotNetNative.make_core(config)
+		if res.ok:
+			_native = res.value
+			_native_note = "on (%s)" % DotNetNative.describe()["from"]
+			DotLog.info(CHANNEL, "snapshots are built natively", DotNetNative.describe())
+		else:
+			_native_note = "asked, GDScript in use: %s" % res.error.message
+			DotLog.warn(CHANNEL, "native snapshots asked for but unavailable; GDScript in use",
+				{"reason": res.error.message})
+	return _native
+
+
+## [method _send_snapshots]'s peers built by [param core]: interest and the budget's ranking
+## here (or on [param workers] as the pooled path does), every peer's parts in the core, then
+## sent in peer order. The same bytes as either GDScript path.
+func _send_snapshots_native(
+	core: Object, tick: int, identities: Array[DotNetIdentity], phase: int, period: int,
+	context: Dictionary, workers: int
+) -> int:
+	var oldest_pending: int = tick - config.ack_window_snapshots * config.ticks_per_snapshot()
+	core.begin_snapshot(identities, PackedInt64Array([
+		tick, int(context["now_ms"]), config.mtu, oldest_pending, workers,
+		DotNetIdentity.Authority.SHARED,
+	]))
+	var jobs: Array[SnapshotJob] = []
+	if workers > 0 and send_fn.is_valid():
+		for peer_id in _peers:
+			if phase >= 0 and posmod(peer_id, period) != phase:
+				continue
+			budget.begin_tick(peer_id)
+			jobs.append(_freeze_job(peer_id, tick))
+		if not jobs.is_empty():
+			var chunks := mini(workers, jobs.size())
+			var cap := config.entity_cap()
+			var interest_task := func(chunk: int) -> Array:
+				return _interest_chunk(jobs, chunk, chunks, identities, context, cap)
+			DotParallel.run(interest_task, chunks, &"net.snapshot", workers)
+	else:
+		for peer_id in _peers:
+			if phase >= 0 and posmod(peer_id, period) != phase:
+				continue
+			budget.begin_tick(peer_id)
+			var observer := _observer_for(peer_id)
+			var relevant := interest.relevant_for(observer, identities, peer_id, context)
+			if interest.thins():
+				var kept: Array[DotNetIdentity] = []
+				interest.thin_into(kept, observer, relevant, peer_id, context)
+				relevant = kept
+			var scores := interest.scores_for(observer, relevant, context)
+			relevant = interest.prioritise(
+				observer, relevant, config.entity_cap(), context, peer_id, scores
+			)
+			relevant = budget.accumulate(peer_id, relevant, scores)
+			if config.peer_send_budget > 0 and relevant.size() > config.peer_send_budget:
+				var kept: Array[DotNetIdentity] = []
+				_within_send_budget(kept, relevant, observer)
+				relevant = kept
+			if not send_fn.is_valid():
+				continue
+			var job := SnapshotJob.new()
+			job.peer_id = peer_id
+			if _input_buffers.has(peer_id):
+				job.lead = (_input_buffers[peer_id] as DotNetInput.Buffer).take_lead_sample()
+			job.send_lead = job.lead.x != DotNetInput.Buffer.LEAD_NONE \
+				and messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
+			job.compact = messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
+			job.acked_tick = int(_acks.get(peer_id, 0))
+			job.strict = bool(_ack_wired.get(peer_id, false))
+			job.remaining_bytes = budget.remaining(peer_id)
+			job.peer_budget = budget.for_peer(peer_id)
+			job.ordered = relevant
+			jobs.append(job)
+
+	for job in jobs:
+		core.submit_peer(job.ordered, PackedInt64Array([
+			job.peer_id, job.acked_tick, 1 if job.strict else 0, 1 if job.compact else 0,
+			job.remaining_bytes, 1 if job.send_lead else 0, job.lead.x, job.lead.y,
+		]), job.peer_budget.accumulators, job.peer_budget.starved_ticks)
+	var started := Time.get_ticks_usec()
+	var results: Array = core.finish_snapshot()
+	_snapshot_join_usec = Time.get_ticks_usec() - started
+	_snapshot_join_usec_total += _snapshot_join_usec
+
+	var applying := Time.get_ticks_usec()
+	for i in results.size():
+		var job := jobs[i]
+		var r: Array = results[i]
+		var peer_id := job.peer_id
+		var peer_budget := job.peer_budget
+		if not job.answer.is_empty():
+			interest.commit_relevance(peer_id, job.answer)
+			interest.note_cap(peer_id, job.cap_count, config.entity_cap(), context)
+		peer_budget.starved_this_tick += int(r[3])
+		peer_budget.total_starved += int(r[3])
+		peer_budget.bytes_this_second += int(r[4])
+		if bool(r[5]):
+			snapshots_split += 1
+		unchanged_listed += int(r[6])
+		unchanged_bytes_saved += int(r[7])
+		input_leads_sent += int(r[8])
+		if not _warned_oversize and int(r[9]) >= 0:
+			_warned_oversize = true
+			var big := registry.get_identity(int(r[9]))
+			DotLog.warn(CHANNEL, "an entity's state alone is bigger than the snapshot MTU; it is sent oversized", {
+				"net_id": int(r[9]), "prefab": str(big.prefab_id) if big != null else "",
+				"bytes": int(r[10]), "mtu": config.mtu,
+			})
+		var payloads: Array = r[1]
+		var counts: PackedInt32Array = r[2]
+		for index in payloads.size():
+			var payload: PackedByteArray = payloads[index]
+			send_fn.call(peer_id, payload, DotNetMessage.Delivery.UNRELIABLE)
+			largest_part_bytes = maxi(largest_part_bytes, payload.size())
+			budget.note_packet(peer_id, payload.size())
+			stats.note_sent(payload.size(), counts[index])
+	_snapshot_apply_usec_total += Time.get_ticks_usec() - applying
+	return results.size()
 
 
 ## What one peer's snapshot is built from: everything about the peer that lives in a shared
@@ -2357,6 +2504,8 @@ func describe_lines() -> PackedStringArray:
 			unchanged_listed, unchanged_bytes_saved
 		])
 		out.append("leads      %d sent to clients" % input_leads_sent)
+		if _native_note != "":
+			out.append("native     %s" % _native_note)
 		if config.snapshot_workers != 0:
 			var n := maxi(1, _snapshot_pooled)
 			out.append("threads    %d asked, %d snapshots pooled%s; last %d peers in %d tasks; mean us: prep %d, join %d, apply %d" % [

@@ -182,6 +182,36 @@ class Rich extends Counted:
 		replicate(&"rated", DotNetVar.Type.UINT).bits(16).at_most(0.01)
 
 
+## A [Rich] with what only GDScript encodes for the native core (a custom codec that aligns, an
+## int sent as a string) and the rotations it encodes itself, for [method _test_native].
+class Coded extends Rich:
+	var code: Array = []
+	var turn: float = 0.0
+	var facing: Quaternion = Quaternion.IDENTITY
+	var aim: Vector3 = Vector3.FORWARD
+	var label: int = 0
+
+	func _register_net_vars() -> void:
+		super._register_net_vars()
+		replicate_custom(&"code", _write_code, _read_code)
+		replicate(&"turn", DotNetVar.Type.ANGLE).bits(10)
+		replicate(&"facing", DotNetVar.Type.QUATERNION)
+		replicate(&"aim", DotNetVar.Type.DIRECTION).bits(11).with_epsilon(0.01)
+		replicate(&"label", DotNetVar.Type.STRING)
+
+	func _write_code(w: DotNetWriter, value: Variant) -> void:
+		var parts: Array = value
+		w.write_uint(parts.size(), 3)
+		for part: String in parts:
+			w.write_string(part)
+
+	func _read_code(r: DotNetReader) -> Variant:
+		var out: Array = []
+		for _i in r.read_uint(3):
+			out.append(r.read_string())
+		return out
+
+
 ## A [Movement] that, on one tick and from inside its `_net_simulate`, spawns the first entity
 ## a peer owns: that peer's observer is registered after the tick's identity list was read.
 class SpawnsFirst extends Movement:
@@ -445,7 +475,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 484
+const CHECKS := 497
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -536,6 +566,7 @@ func _run() -> void:
 	_test_snapshot_parts()
 	_test_unchanged_entities()
 	_test_snapshot_threads()
+	_test_native()
 	_test_input_batches()
 	_test_input_lead()
 	_test_dropped_time()
@@ -4589,13 +4620,13 @@ func _build_counted(_context: Dictionary) -> Node:
 	return body
 
 
-func _build_rich(context: Dictionary) -> Node:
+func _build_rich(context: Dictionary, coded: bool = false) -> Node:
 	var body := _build_counted(context)
 	var identity := body.get_node("NetIdentity") as DotNetIdentity
 	var old := identity.behaviours[0]
 	body.remove_child(old)
 	old.free()
-	var rich := Rich.new()
+	var rich: Rich = Coded.new() if coded else Rich.new()
 	rich.name = "Movement"
 	body.add_child(rich)
 	identity.behaviours = [rich]
@@ -4750,6 +4781,114 @@ func _test_view_count() -> void:
 		counts[2][0] == 12 and counts[2][1] == 0)
 
 
+## The optional native core ([DotNetNative]) against the GDScript path: each encoder bit for bit
+## at every pad, and whole scripted games byte for byte, inline and on workers. Without the
+## library built every check reads as the fallback's: GDScript sends, and says why.
+func _test_native() -> void:
+	print("")
+	print("[native]")
+	var loaded := DotNetNative.load_library().ok
+	print("  native library: %s" % ("loaded" if loaded else DotNetNative.describe()["reason"]))
+
+	var declarations: Array[DotNetVar] = [
+		DotNetVar.make(&"a", DotNetVar.Type.BOOL),
+		DotNetVar.make(&"b", DotNetVar.Type.UINT).bits(7),
+		DotNetVar.make(&"c", DotNetVar.Type.INT).bits(9),
+		DotNetVar.make(&"d", DotNetVar.Type.VARINT),
+		DotNetVar.make(&"e", DotNetVar.Type.FLOAT),
+		DotNetVar.make(&"f", DotNetVar.Type.FLOAT_RANGE).range_of(-10.0, 10.0).bits(12),
+		DotNetVar.make(&"g", DotNetVar.Type.VECTOR3_POSITION),
+		DotNetVar.make(&"h", DotNetVar.Type.VECTOR3_VELOCITY),
+		DotNetVar.make(&"i", DotNetVar.Type.VECTOR3_RANGE).range_of(-5.0, 5.0).bits(10),
+		DotNetVar.make(&"j", DotNetVar.Type.DIRECTION).bits(11),
+		DotNetVar.make(&"k", DotNetVar.Type.QUATERNION),
+		DotNetVar.make(&"l", DotNetVar.Type.ANGLE).bits(9),
+		DotNetVar.make(&"m", DotNetVar.Type.STRING),
+		DotNetVar.make(&"n", DotNetVar.Type.BYTES),
+	]
+	var holder := DotNetBehaviour.new()
+	for declaration in declarations:
+		declaration.bind_config(DotNetConfig.new())
+	holder.net_vars = declarations
+	var specs: Array = holder._native_spec()[1]
+	holder.free()
+	var core: Object = ClassDB.instantiate(DotNetNative.CORE_CLASS) if loaded else null
+	var compared := 0
+	var mismatched: Array = []
+	for round in 120:
+		for index in declarations.size():
+			var value: Variant = _native_sample(declarations[index].type, round)
+			for pad in 8:
+				var w := DotNetWriter.new(64)
+				if pad > 0:
+					w.write_bits(0, pad)
+				declarations[index].write(w, value)
+				if core == null:
+					continue
+				var got: Array = core.encode_value(specs[index], value, pad)
+				compared += 1
+				if got.size() != 2 or got[0] != w.to_bytes() or int(got[1]) != w.bit_length() - pad:
+					if mismatched.size() < 3:
+						mismatched.append("%s %s pad %d" % [DotNetVar.Type.keys()[declarations[index].type], value, pad])
+	_check("native: every encoder writes DotNetVar.write's bits at every pad (%d compared; %s)" % [compared, mismatched],
+		not loaded or (compared == 120 * 14 * 8 and mismatched.is_empty()))
+
+	for variant: String in ["", "coded", "thin", "grid"]:
+		var serial: Dictionary = _threads_scenario("Native" + variant + "Off", 0, false, variant)
+		var inline: Dictionary = _threads_scenario("Native" + variant + "On", 0, false, variant, true)
+		var pooled: Dictionary = _threads_scenario("Native" + variant + "Pool", 3, false, variant, true)
+		var name := variant if variant != "" else "base"
+		_check("native %s: the run says how it built (%s)" % [name, inline["native_note"]],
+			str(inline["native_note"]).begins_with("on" if loaded else "asked, GDScript in use"))
+		for run: Array in [["inline", inline], ["three workers", pooled]]:
+			var other: Dictionary = run[1]
+			_check("native %s, %s: the same payloads %s and views and budgets %s as GDScript" % [
+					name, run[0], _first_difference(serial["payloads"], other["payloads"]),
+					_first_difference(serial["normal_states"], other["normal_states"])],
+				(serial["payloads"] as Array).size() > 100
+					and _first_difference(serial["payloads"], other["payloads"]) == ""
+					and _first_difference(serial["normal_states"], other["normal_states"]) == "")
+
+
+## A value for a declaration of [param type], with edge cases every few rounds.
+func _native_sample(type: int, round: int) -> Variant:
+	var edge := round % 9 == 0
+	match type:
+		DotNetVar.Type.BOOL:
+			return _rng.randi() % 2 == 0
+		DotNetVar.Type.UINT:
+			return _rng.randi_range(0, 400)
+		DotNetVar.Type.INT:
+			return _rng.randi_range(-700, 700)
+		DotNetVar.Type.VARINT:
+			return (1 << 40) - _rng.randi() if edge else _rng.randi_range(-100000, 100000)
+		DotNetVar.Type.FLOAT:
+			return _rng.randf_range(-1.0e5, 1.0e5)
+		DotNetVar.Type.FLOAT_RANGE:
+			return _rng.randf_range(-12.0, 12.0)
+		DotNetVar.Type.VECTOR3_POSITION:
+			return Vector3(_rng.randf_range(-3000, 3000), _rng.randf_range(-50, 50), _rng.randf_range(-3000, 3000))
+		DotNetVar.Type.VECTOR3_VELOCITY:
+			return Vector3(_rng.randf_range(-150, 150), _rng.randf_range(-150, 150), _rng.randf_range(-150, 150))
+		DotNetVar.Type.VECTOR3_RANGE:
+			return Vector3(_rng.randf_range(-6, 6), _rng.randf_range(-6, 6), _rng.randf_range(-6, 6))
+		DotNetVar.Type.DIRECTION:
+			return Vector3.ZERO if edge else Vector3(_rng.randf_range(-2, 2), _rng.randf_range(-2, 2), _rng.randf_range(-2, 2))
+		DotNetVar.Type.QUATERNION:
+			var q := Quaternion(_rng.randf_range(-1, 1), _rng.randf_range(-1, 1), _rng.randf_range(-1, 1), _rng.randf_range(-1, 1))
+			return q * 3.0 if edge else q.normalized()
+		DotNetVar.Type.ANGLE:
+			return _rng.randf_range(-1000.0, 1000.0)
+		DotNetVar.Type.STRING:
+			return "ü€".repeat(300) + "x" if edge else "name-%d" % _rng.randi()
+		DotNetVar.Type.BYTES:
+			var b := PackedByteArray()
+			for _i in _rng.randi_range(0, 20):
+				b.append(_rng.randi() % 256)
+			return b
+	return null
+
+
 ## A peer's first entity registered inside a tick, with workers on: the observer is found by
 ## the snapshot but was not in the list that was frozen, so interest must be asked about a
 ## frozen one. Fails (unfrozen asks) if the job takes the observer as it finds it.
@@ -4814,13 +4953,14 @@ func _test_first_entity_mid_tick() -> void:
 
 
 ## One run of [method _test_snapshot_threads]'s game; everything it sent and kept, as bytes.
-func _threads_scenario(label: String, workers: int, skew: bool, variant: String = "") -> Dictionary:
+func _threads_scenario(label: String, workers: int, skew: bool, variant: String = "", native: bool = false) -> Dictionary:
 	const PEERS := 10
 	const ENTITIES := 40
 	const TICKS := 40
 
 	var host := _parts_manager(label, true, 320)
 	host.config.snapshot_workers = workers
+	host.config.native = native
 	# 1500 B per window of ten ticks (the window is scripted below): well under what the
 	# entities in view want, so the accumulator decides who waits.
 	host.config.per_client_budget = 1500
@@ -4834,7 +4974,7 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 		distance.far_distance = 6.0
 		distance.far_tiers = 2
 		host.config.peer_send_budget = 4
-	var rich := variant == "cache" or variant == "grid"
+	var rich := variant == "cache" or variant == "grid" or variant == "coded"
 	if rich:
 		# A cached answer is kept for good and expired by hand below (a wall-clock interval
 		# would expire at a different tick in each run); a leaver lingers for good.
@@ -4857,7 +4997,9 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 			payloads.append([peer_id, payload])
 			peers_fed[peer_id] = true
 	host.start()
-	host.spawner.register_factory(&"counted", _build_rich if rich else _build_counted)
+	var factory := (func(c: Dictionary) -> Node: return _build_rich(c, true)) if variant == "coded" \
+		else (_build_rich if rich else _build_counted)
+	host.spawner.register_factory(&"counted", factory)
 
 	var modern := host.messages.schema_payload()
 	host.messages.features = 0
@@ -4879,6 +5021,7 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 		behaviours.append(spawned.behaviours[0] as Counted)
 
 	var states: Array = []
+	var normal_states: Array = []
 	var starved := 0
 	var split := 0
 	for tick in range(1, TICKS + 1):
@@ -4901,6 +5044,13 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 				r2.title = "unit-%d" % ((tick + i) % 6)
 				r2.blob = PackedByteArray([i % 256, tick % 256, (i * tick) % 256]).slice(0, 1 + (tick + i) % 3)
 				r2.rated = tick * 7 + i
+			if c is Coded:
+				var c2 := c as Coded
+				c2.code = ["a", "bc", "def"].slice(0, (tick + i) % 4)
+				c2.turn = float(tick * 37 + i * 11) - 400.0
+				c2.facing = Quaternion(Vector3(0.3, 1.0, float(i % 3) - 1.0).normalized(), float(tick) * 0.21 + float(i))
+				c2.aim = Vector3(cos(float(tick) * 0.1 + i), 0.2, sin(float(tick) * 0.1)) * 3.0
+				c2.label = (tick / 4 + i) % 5
 
 		# The budget's window is a wall-clock second, which one run can cross at a different
 		# tick from another; hold it open and roll it every ten ticks instead.
@@ -4928,10 +5078,12 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 				var _acked := host.receive_ack(2 + i, tick)
 
 		var state := []
+		var normal := []
 		for i in PEERS:
 			var b := host.budget.for_peer(2 + i)
 			starved += b.starved_this_tick
 			state.append([b.accumulators, b.starved_ticks, b.bytes_this_second])
+			normal.append([_sorted_dict(b.accumulators), _sorted_dict(b.starved_ticks), b.bytes_this_second])
 		for c in behaviours:
 			for i in PEERS:
 				var view_state := c.peer_view_snapshot(2 + i)
@@ -4941,12 +5093,15 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 					for key in view_state["last_sent_ms"]:
 						view_state["last_sent_ms"][key] = true
 				state.append(view_state)
+				normal.append(_normal_view(view_state))
 		states.append(var_to_bytes(state))
+		normal_states.append(var_to_bytes(normal))
 
 	var out := {
 		"payloads": payloads, "states": states, "peers_fed": peers_fed.size(),
 		"starved": starved, "split": split, "pooled": host._snapshot_pooled, "note": host._snapshot_threads_note,
-		"snapshots": TICKS, "cache_hits": 0,
+		"snapshots": TICKS, "cache_hits": 0, "normal_states": normal_states,
+		"native_note": host._native_note,
 	}
 	if rich:
 		# Hits that happened: a cache entry older than the first tick's can only be a hit.
@@ -4959,6 +5114,35 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 	remove_child(host)
 	host.free()
 	return out
+
+
+## [param d] with its keys in sorted order, so two dictionaries built in another order compare.
+func _sorted_dict(d: Dictionary) -> Dictionary:
+	var keys := d.keys()
+	keys.sort()
+	var out := {}
+	for k: Variant in keys:
+		out[k] = d[k]
+	return out
+
+
+## A [method DotNetBehaviour.peer_view_snapshot] in the fields the native core keeps, keys sorted:
+## the GDScript-only memo fields dropped, and a view holding nothing else read as none.
+func _normal_view(view: Dictionary) -> Dictionary:
+	if view.is_empty():
+		return {}
+	var pending: Array = []
+	for entry: Array in view["pending"]:
+		pending.append([entry[0], _sorted_dict(entry[1])])
+	var out := {
+		"acked": _sorted_dict(view["acked"]), "believed": _sorted_dict(view["believed"]),
+		"pending": pending, "last_sent_ms": _sorted_dict(view["last_sent_ms"]),
+		"last_ack": view["last_ack"], "relost": _sorted_dict(view["relost"]), "strict": view["strict"],
+	}
+	var empty := pending.is_empty() and int(view["last_ack"]) == 0 and not bool(view["strict"])
+	for k in ["acked", "believed", "last_sent_ms", "relost"]:
+		empty = empty and (out[k] as Dictionary).is_empty()
+	return {} if empty else out
 
 
 ## "" when [param a] and [param b] hold the same bytes in the same order, else the first index

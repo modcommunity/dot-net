@@ -1093,6 +1093,8 @@ func _trim_view(view: PeerView, oldest_tick: int) -> void:
 ## connected rather than to everyone currently playing.
 func forget_peer(peer_id: int) -> void:
 	_views.erase(peer_id)
+	if _native_core != null:
+		_native_core.forget_view(self, peer_id)
 
 
 func _view_for(peer_id: int) -> PeerView:
@@ -1121,6 +1123,8 @@ func _rebuild_believed(view: PeerView) -> void:
 
 ## What is known about one peer. For diagnostics and tests.
 func peer_view_state(peer_id: int) -> Dictionary:
+	if _native_core != null:
+		return _native_core.view_state(self, peer_id)
 	var view: PeerView = _views.get(peer_id)
 
 	if view == null:
@@ -1318,6 +1322,8 @@ func extrapolated_value(property: StringName, velocity_property: StringName, tic
 ## With no argument it forgets every peer and the receive-side record too, which is
 ## what this method meant before the send side became per-peer.
 func reset_baseline(peer_id: int = -1) -> void:
+	if _native_core != null:
+		_native_core.forget_view(self, peer_id)
 	if peer_id < 0:
 		_baseline.clear()
 		_read_now.clear()
@@ -1442,6 +1448,8 @@ func view_for(peer_id: int) -> PeerView:
 ## to [member _views]), the inline path only those it collects into, and nothing tells the
 ## two apart but this.
 func peer_view_snapshot(peer_id: int) -> Dictionary:
+	if _native_core != null:
+		return _native_core.view_snapshot(self, peer_id)
 	var view: PeerView = _views.get(peer_id)
 	return view.snapshot() if view != null and not view.is_fresh() else {}
 
@@ -1689,3 +1697,58 @@ func _encoded_for_cached(declarations: Array[DotNetVar], pad: int, cache: Encode
 		cache.fast_declarations = declarations
 		cache.fast_encoded = encoded
 	return [encoded, aligned]
+
+
+## The manager's native snapshot core ([DotNetNative]) once it holds this behaviour's send
+## records, so that the record methods above answer from it. Set by the core.
+var _native_core: Object = null
+var _native_props: Array[StringName] = []
+
+
+## This behaviour's declarations for the native core: [code][properties, declarations,
+## net_vars.size()][/code], one PackedFloat64Array per declaration in [method DotNetVar.write]'s terms.
+func _native_spec() -> Array:
+	_native_props = []
+	var slot_of := {}
+	var decls: Array = []
+	for declaration in net_vars:
+		if not slot_of.has(declaration.property):
+			slot_of[declaration.property] = _native_props.size()
+			_native_props.append(declaration.property)
+		decls.append(PackedFloat64Array([
+			declaration.type, declaration.audience, declaration.max_rate, declaration.epsilon,
+			1.0 if declaration.on_spawn_only else 0.0, declaration.bit_width,
+			declaration.min_value, declaration.max_value, declaration._extent(),
+			declaration._position_bits(), declaration._max_speed(), declaration._velocity_bits(),
+			declaration._rotation_bits(), slot_of[declaration.property],
+		]))
+	return [_native_props, decls, net_vars.size()]
+
+
+## Every property read once for a native snapshot, then the two bandwidth estimates and the
+## declaration count the spec was made for.
+func _native_values() -> Array:
+	var out: Array = []
+	for property in _native_props:
+		out.append(_net_read_property(property))
+	var owner := identity.owner_peer_id
+	out.append(estimated_bits(owner))
+	out.append(estimated_bits(owner + 1))
+	out.append(net_vars.size())
+	return out
+
+
+## [param value] as declaration [param index] writes it, begun at each of the first
+## [param pads] bits of a byte: [code][bytes, bits, ...][/code]. For a custom codec, or a value
+## only GDScript converts; called on the main thread when the snapshot opens.
+func _native_encode(index: int, value: Variant, pads: int) -> Array:
+	var declaration := net_vars[index]
+	var out: Array = []
+	for pad in pads:
+		var writer := DotNetWriter.new(64)
+		if pad > 0:
+			writer.write_bits(0, pad)
+		declaration.write(writer, value)
+		out.append(writer.to_bytes())
+		out.append(writer.bit_length() - pad)
+	return out

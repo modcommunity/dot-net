@@ -7,7 +7,7 @@ extends Node
 ## [codeblock]
 ## godot --headless --path . res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213
 ##     [--ticks=60] [--warm=20] [--relevance=off] [--radius=60] [--workers=N] [--cap=192]
-##     [--far-every=N --far=M] [--far-coherent] [--far-tiers=T] [--send-budget=K] [--players-always] [--hash]
+##     [--far-every=N --far=M] [--far-coherent] [--far-tiers=T] [--send-budget=K] [--players-always] [--hash] [--native]
 ## [/codeblock]
 ##
 ## [code]--hash[/code] prints one digest of every payload sent, in order: two builds of dot-net
@@ -81,6 +81,7 @@ var _players_always := false
 var _far_coherent := false
 var _far_tiers := 1
 var _split := false
+var _native := false
 var _laps := {}
 
 
@@ -105,6 +106,7 @@ func _ready() -> void:
 			"--far-coherent": _far_coherent = true
 			"--far-tiers": _far_tiers = value.to_int()
 			"--split": _split = true
+			"--native": _native = true
 	_run.call_deferred()
 
 
@@ -123,6 +125,7 @@ func _run() -> void:
 	config.max_entities_per_snapshot = _cap
 	config.snapshot_workers = _workers
 	config.peer_send_budget = _send_budget
+	config.native = _native
 	host.config = config
 	add_child(host)
 	var _s := host.setup()
@@ -171,7 +174,7 @@ func _run() -> void:
 	for tick in range(1, _warm + _ticks + 1):
 		_move(players, npcs, tick)
 		var at := Time.get_ticks_usec()
-		if _split and _workers == 0:
+		if _split and _workers == 0 and not _native:
 			_split_tick(host, tick, tick > _warm)
 		else:
 			host.server_tick(tick)
@@ -188,7 +191,7 @@ func _run() -> void:
 	for t in times:
 		total += t
 	var row := {
-		"peers": _peers, "npcs": _npcs, "relevance": _relevance, "workers": _workers,
+		"peers": _peers, "npcs": _npcs, "relevance": _relevance, "workers": _workers, "native": host._native_note if _native else "off",
 		"far_every": _far_every, "far_tiers": _far_tiers, "send_budget": _send_budget, "mean_ms": snappedf(total / times.size(), 0.01),
 		"p50_ms": snappedf(times[times.size() / 2], 0.01),
 		"min_ms": snappedf(times[0], 0.01),

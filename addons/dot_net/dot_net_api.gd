@@ -22,5 +22,7 @@ extends RefCounted
 #     DotNetIdentity.freeze_position.
 # 12: DotNetInterest.scores_for(observer, entities, context), the optional scores argument of
 #     prioritise / ranked, and index_snapshot(all): each entity scored and looked up once a snapshot.
-const LEVEL := 12
+# 13: DotNetConfig.native / native_path (env DOT_NET_NATIVE, --net-native): server snapshots
+#     built by the optional native library, DotNetNative; the same bytes, off by default.
+const LEVEL := 13
 const OLDEST := 1

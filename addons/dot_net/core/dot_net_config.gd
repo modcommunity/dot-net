@@ -72,6 +72,17 @@ extends DotConfig
 ## See game-dev docs/server-threading.md for the measurement and the design.
 @export_range(-1, 64) var snapshot_workers: int = 0
 
+## Build server snapshots in dot-net's optional native library ([DotNetNative]): the same bytes,
+## several times cheaper. Off by default; when the library cannot be loaded (none built for this
+## platform, a browser, a client) the GDScript path runs and the reason is logged once.
+## Environment [code]DOT_NET_NATIVE[/code], command line [code]--net-native[/code]. See docs/native.md.
+@export var native: bool = false
+
+## Where the native library's [code].cfg[/code] is; empty is the addon's own
+## ([code]addons/dot_net/native/dot_net_native.cfg[/code]), then [code]dot_net_native/[/code] next
+## to the executable. Environment [code]DOT_NET_NATIVE_PATH[/code].
+@export var native_path: String = ""
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.
