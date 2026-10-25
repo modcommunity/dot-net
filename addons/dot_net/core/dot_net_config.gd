@@ -83,6 +83,12 @@ extends DotConfig
 ## to the executable. Environment [code]DOT_NET_NATIVE_PATH[/code].
 @export var native_path: String = ""
 
+## With [member native], also run [DotNetInterestDistance]'s relevance, thinning, scores, entity cap
+## and the budget's ordering in the library, on its build threads: the same selection and bytes.
+## Ignored for any other strategy (a subclass, the grid, tag lists) and without [member native].
+## Environment [code]DOT_NET_NATIVE_INTEREST[/code], command line [code]--net-native-interest[/code].
+@export var native_interest: bool = false
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.

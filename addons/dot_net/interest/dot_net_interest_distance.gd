@@ -134,6 +134,22 @@ func scores_for(observer: DotNetIdentity, entities: Array, context: Dictionary) 
 	return out
 
 
+## Only this class itself with plain squared distances and no always-on tags: the cases the native
+## core ports line for line.
+func native_interest_ok() -> bool:
+	return _exact() and use_squared and always_tags.is_empty()
+
+
+func native_config(config: DotNetConfig) -> Dictionary:
+	return {
+		"on": true, "radius": radius, "radius_by_tag": radius_by_tag,
+		"interval": evaluation_interval_sec, "far_every": far_every, "far_distance": far_distance,
+		"far_by_tag": far_distance_by_tag, "far_coherent": far_coherent, "far_tiers": far_tiers,
+		"ticks_per_snapshot": config.ticks_per_snapshot(), "cap": config.entity_cap(),
+		"send_budget": config.peer_send_budget, "invalidation": invalidation_serial,
+	}
+
+
 func _exact() -> bool:
 	return (get_script() as Script).get_global_name() == &"DotNetInterestDistance"
 

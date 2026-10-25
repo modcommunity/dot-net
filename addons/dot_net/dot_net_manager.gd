@@ -1025,13 +1025,39 @@ func _send_snapshots_native(
 	context: Dictionary, workers: int
 ) -> int:
 	var oldest_pending: int = tick - config.ack_window_snapshots * config.ticks_per_snapshot()
+	# Before begin_snapshot, which reads each identity's interest fields once.
+	var core_interest := config.native_interest and send_fn.is_valid() and interest.native_interest_ok()
+	var interest_cfg := interest.native_config(config) if core_interest else {}
+	if core_interest:
+		interest_cfg["starvation_ticks"] = budget.starvation_ticks
+		interest_cfg["starvation_weight"] = budget.starvation_weight
+	core.set_interest(interest_cfg)
 	core.begin_snapshot(identities, PackedInt64Array([
 		tick, int(context["now_ms"]), config.mtu, oldest_pending, workers,
 		DotNetIdentity.Authority.SHARED,
 	]))
 	var jobs: Array[SnapshotJob] = []
 	var interest_started := Time.get_ticks_usec()
-	if workers > 0 and send_fn.is_valid():
+	if core_interest:
+		# The library works out each peer's candidates itself, in its build threads.
+		for peer_id in _peers:
+			if phase >= 0 and posmod(peer_id, period) != phase:
+				continue
+			budget.begin_tick(peer_id)
+			var job := SnapshotJob.new()
+			job.peer_id = peer_id
+			job.observer = _observer_for(peer_id)
+			if _input_buffers.has(peer_id):
+				job.lead = (_input_buffers[peer_id] as DotNetInput.Buffer).take_lead_sample()
+			job.send_lead = job.lead.x != DotNetInput.Buffer.LEAD_NONE \
+				and messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
+			job.compact = messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
+			job.acked_tick = int(_acks.get(peer_id, 0))
+			job.strict = bool(_ack_wired.get(peer_id, false))
+			job.remaining_bytes = budget.remaining(peer_id)
+			job.peer_budget = budget.for_peer(peer_id)
+			jobs.append(job)
+	elif workers > 0 and send_fn.is_valid():
 		for peer_id in _peers:
 			if phase >= 0 and posmod(peer_id, period) != phase:
 				continue
@@ -1082,10 +1108,16 @@ func _send_snapshots_native(
 	var submit_started := Time.get_ticks_usec()
 	_snapshot_interest_usec_total += submit_started - interest_started
 	for job in jobs:
-		core.submit_peer(job.ordered, PackedInt64Array([
+		var info := PackedInt64Array([
 			job.peer_id, job.acked_tick, 1 if job.strict else 0, 1 if job.compact else 0,
 			job.remaining_bytes, 1 if job.send_lead else 0, job.lead.x, job.lead.y,
-		]), job.peer_budget.accumulators, job.peer_budget.starved_ticks)
+		])
+		if core_interest:
+			core.submit_peer_interest(job.observer, info,
+				job.peer_budget.accumulators, job.peer_budget.starved_ticks)
+		else:
+			core.submit_peer(job.ordered, info,
+				job.peer_budget.accumulators, job.peer_budget.starved_ticks)
 	var started := Time.get_ticks_usec()
 	_snapshot_submit_usec_total += started - submit_started
 	var results: Array = core.finish_snapshot()
@@ -1098,7 +1130,9 @@ func _send_snapshots_native(
 		var r: Array = results[i]
 		var peer_id := job.peer_id
 		var peer_budget := job.peer_budget
-		if not job.answer.is_empty():
+		if core_interest:
+			interest.note_cap(peer_id, int(r[11]), config.entity_cap(), context)
+		elif not job.answer.is_empty():
 			interest.commit_relevance(peer_id, job.answer)
 			interest.note_cap(peer_id, job.cap_count, config.entity_cap(), context)
 		peer_budget.starved_this_tick += int(r[3])

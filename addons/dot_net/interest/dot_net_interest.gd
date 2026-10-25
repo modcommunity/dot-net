@@ -68,6 +68,20 @@ const CHANNEL := "net.interest"
 ## so 0.1 sends one 100 m away about a tenth as often as one at your feet.
 @export_range(0.0, 1.0, 0.001) var distance_falloff: float = 0.01
 
+## Counts [method invalidate] calls, so the native core drops the caches it holds for this strategy.
+var invalidation_serial: int = 0
+
+## Whether the native core can run this strategy's interest ([member DotNetConfig.native_interest]).
+## False unless a built-in strategy says so for itself.
+func native_interest_ok() -> bool:
+	return false
+
+
+## What the native core needs of this strategy: see [method DotNetInterestDistance.native_config].
+func native_config(_config: DotNetConfig) -> Dictionary:
+	return {}
+
+
 ## observer peer_id -> {at_ms, ids: Dictionary}
 var _cache: Dictionary = {}
 
@@ -626,6 +640,7 @@ func forget_peer(peer_id: int) -> void:
 func invalidate() -> void:
 	_cache.clear()
 	_lingering.clear()
+	invalidation_serial += 1
 
 
 func describe() -> Dictionary:

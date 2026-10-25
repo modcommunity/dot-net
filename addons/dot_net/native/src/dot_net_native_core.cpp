@@ -8,6 +8,8 @@
 #include <godot_cpp/variant/vector2.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <chrono>
 
 using namespace godot;
@@ -413,7 +415,7 @@ DotNetNativeCore::~DotNetNativeCore() {
 }
 
 int64_t DotNetNativeCore::abi_version() {
-	return 1;
+	return 2;
 }
 
 void DotNetNativeCore::_set_workers(int workers) {
@@ -607,6 +609,39 @@ IdRec *DotNetNativeCore::_identity_for(const Variant &identity) {
 	rec->net_id = obj->get("net_id");
 	rec->owner = obj->get("owner_peer_id");
 	rec->shared = int64_t(obj->get("authority")) == _authority_shared;
+	if (_icfg.on) {
+		rec->priority = double(obj->get("priority"));
+		rec->always = bool(obj->get("always_relevant"));
+		rec->linger_sec = double(obj->get("interest_linger_sec"));
+		rec->pos = Vector3(obj->call("world_position"));
+		PackedStringArray tags = obj->get("interest_tags");
+		rec->radius = _icfg.radius;
+		rec->score_limit = std::max(1.0, _icfg.radius);
+		rec->far_dist = _icfg.far_distance;
+		bool found_radius = false;
+		bool found_far = false;
+		for (int64_t t = 0; t < tags.size() && !(found_radius && found_far); t++) {
+			if (!found_radius) {
+				for (auto &kv : _icfg.radius_by_tag) {
+					if (kv.first == tags[t]) {
+						rec->radius = kv.second;
+						rec->score_limit = std::max(1.0, kv.second);
+						found_radius = true;
+						break;
+					}
+				}
+			}
+			if (!found_far) {
+				for (auto &kv : _icfg.far_by_tag) {
+					if (kv.first == tags[t]) {
+						rec->far_dist = kv.second;
+						found_far = true;
+						break;
+					}
+				}
+			}
+		}
+	}
 	Array behaviours = obj->get("behaviours");
 	rec->behaviours.clear();
 	for (int64_t i = 0; i < behaviours.size(); i++) {
@@ -677,8 +712,14 @@ void DotNetNativeCore::begin_snapshot(const Array &identities, const PackedInt64
 	_oldest_pending = params.size() > 3 ? params[3] : 0;
 	int workers = params.size() > 4 ? int(params[4]) : 0;
 	_authority_shared = params.size() > 5 ? params[5] : 1;
+	_all.clear();
+	_by_net.clear();
 	for (int64_t i = 0; i < identities.size(); i++) {
-		_identity_for(identities[i]);
+		IdRec *rec = _identity_for(identities[i]);
+		if (_icfg.on && rec != nullptr) {
+			_all.push_back(rec);
+			_by_net[rec->net_id] = rec;
+		}
 	}
 	_sweep();
 	_set_workers(std::max(0, std::min(workers, 64)));
@@ -690,20 +731,39 @@ void DotNetNativeCore::begin_snapshot(const Array &identities, const PackedInt64
 	_last_read_usec = usec_now() - started;
 }
 
-void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks) {
-	ERR_FAIL_COND_MSG(!_open, "DotNetNativeCore.submit_peer outside begin_snapshot/finish_snapshot.");
-	ERR_FAIL_COND(info.size() < 8);
-	auto job = std::make_unique<Job>();
-	int64_t peer_id = info[0];
+Peer *DotNetNativeCore::_peer_for(int64_t peer_id) {
 	auto it = _peers.find(peer_id);
 	if (it == _peers.end()) {
 		auto made = std::make_unique<Peer>();
 		made->id = peer_id;
-		job->peer = made.get();
+		Peer *p = made.get();
 		_peers[peer_id] = std::move(made);
-	} else {
-		job->peer = it->second.get();
+		return p;
 	}
+	return it->second.get();
+}
+
+void DotNetNativeCore::_queue(std::unique_ptr<Job> job) {
+	if (_workers == 0) {
+		_run_job(job.get());
+		std::lock_guard<std::mutex> lock(_mutex);
+		_jobs.push_back(std::move(job));
+		_next_job = _jobs.size();
+		_done_jobs = _jobs.size();
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+		_jobs.push_back(std::move(job));
+	}
+	_work_cv.notify_one();
+}
+
+void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks) {
+	ERR_FAIL_COND_MSG(!_open, "DotNetNativeCore.submit_peer outside begin_snapshot/finish_snapshot.");
+	ERR_FAIL_COND(info.size() < 8);
+	auto job = std::make_unique<Job>();
+	job->peer = _peer_for(info[0]);
 	job->acked_tick = info[1];
 	job->strict = info[2] != 0;
 	job->compact = info[3] != 0;
@@ -724,19 +784,263 @@ void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array
 			_unknown_relevant++;
 		}
 	}
-	if (_workers == 0) {
-		_run_job(job.get());
-		std::lock_guard<std::mutex> lock(_mutex);
-		_jobs.push_back(std::move(job));
-		_next_job = _jobs.size();
-		_done_jobs = _jobs.size();
-		return;
+	_queue(std::move(job));
+}
+
+void DotNetNativeCore::submit_peer_interest(const Variant &observer, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks) {
+	ERR_FAIL_COND_MSG(!_open, "DotNetNativeCore.submit_peer_interest outside begin_snapshot/finish_snapshot.");
+	ERR_FAIL_COND_MSG(!_icfg.on, "DotNetNativeCore.submit_peer_interest without set_interest.");
+	ERR_FAIL_COND(info.size() < 8);
+	auto job = std::make_unique<Job>();
+	job->peer = _peer_for(info[0]);
+	job->acked_tick = info[1];
+	job->strict = info[2] != 0;
+	job->compact = info[3] != 0;
+	job->remaining = info[4];
+	job->send_lead = info[5] != 0;
+	job->lead_x = info[6];
+	job->lead_y = info[7];
+	job->accumulators = accumulators;
+	job->starved_ticks = starved_ticks;
+	job->interest = true;
+	Object *obs = observer;
+	if (obs != nullptr) {
+		// The observer's position was frozen by the manager before this snapshot; read here, on the main thread.
+		job->has_observer = true;
+		job->obs_pos = Vector3(obs->call("world_position"));
+		job->obs_owner = obs->get("owner_peer_id");
 	}
+	_queue(std::move(job));
+}
+
+void DotNetNativeCore::set_interest(const Dictionary &cfg) {
+	ERR_FAIL_COND_MSG(_open, "DotNetNativeCore.set_interest inside a snapshot.");
+	InterestCfg c;
+	c.on = bool(cfg.get("on", false));
+	if (c.on) {
+		c.radius = double(cfg.get("radius", 200.0));
+		auto pairs = [](const Dictionary &d, std::vector<std::pair<String, double>> &out) {
+			Array keys = d.keys();
+			for (int64_t i = 0; i < keys.size(); i++) {
+				Variant k = keys[i];
+				if (k.get_type() == Variant::STRING || k.get_type() == Variant::STRING_NAME) {
+					out.push_back({String(k), double(d[k])});
+				}
+			}
+		};
+		pairs(Dictionary(cfg.get("radius_by_tag", Dictionary())), c.radius_by_tag);
+		pairs(Dictionary(cfg.get("far_by_tag", Dictionary())), c.far_by_tag);
+		c.interval_sec = double(cfg.get("interval", 0.25));
+		c.far_every = int64_t(cfg.get("far_every", 1));
+		c.far_distance = double(cfg.get("far_distance", 0.0));
+		c.far_coherent = bool(cfg.get("far_coherent", false));
+		c.far_tiers = int64_t(cfg.get("far_tiers", 1));
+		c.ticks_per_snapshot = std::max<int64_t>(1, int64_t(cfg.get("ticks_per_snapshot", 1)));
+		c.cap = int64_t(cfg.get("cap", 0));
+		c.send_budget = int64_t(cfg.get("send_budget", 0));
+		c.starvation_ticks = int64_t(cfg.get("starvation_ticks", 10));
+		c.starvation_weight = double(cfg.get("starvation_weight", 1.0));
+		c.invalidation = int64_t(cfg.get("invalidation", 0));
+		if (c.invalidation != _icfg.invalidation) {
+			for (auto &p : _peers) {
+				p.second->interest = PeerInterest();
+			}
+		}
+	} else {
+		c.invalidation = _icfg.invalidation;
+	}
+	_icfg = c;
+}
+
+void DotNetNativeCore::expire_interest() {
+	ERR_FAIL_COND_MSG(_open, "DotNetNativeCore.expire_interest inside a snapshot.");
+	for (auto &p : _peers) {
+		p.second->interest.at_ms = 0;
+	}
+}
+
+// DotNetInterestDistance.relevance, thin_into, scores_for, ranked and DotNetBudget.accumulate_record for one
+// peer, rule for rule; the arithmetic is done in the types GDScript does it in (float for Vector3, double else).
+void DotNetNativeCore::_interest_job(Job *job) {
+	const InterestCfg &c = _icfg;
+	PeerInterest &pi = job->peer->interest;
+	const int64_t now = _now_ms;
+	std::vector<IdRec *> relevant;
+	relevant.reserve(_all.size());
+
+	bool cached = false;
+	if (c.interval_sec > 0.0 && pi.has) {
+		cached = double(now - pi.at_ms) / 1000.0 < c.interval_sec;
+	}
+	if (cached) {
+		for (IdRec *r : _all) {
+			if (pi.ids.count(r->net_id) || r->always || (job->has_observer && r->owner == job->obs_owner)) {
+				relevant.push_back(r);
+			}
+		}
+	} else {
+		for (IdRec *r : _all) {
+			if (!job->has_observer || r->always || r->owner == job->obs_owner) {
+				relevant.push_back(r);
+			} else if (double(job->obs_pos.distance_squared_to(r->pos)) <= r->radius * r->radius) {
+				relevant.push_back(r);
+			}
+		}
+		std::unordered_set<int64_t> ids;
+		std::vector<int64_t> order;
+		ids.reserve(relevant.size() * 2);
+		order.reserve(relevant.size());
+		for (IdRec *r : relevant) {
+			if (ids.insert(r->net_id).second) {
+				order.push_back(r->net_id);
+			}
+		}
+		std::vector<std::pair<int64_t, int64_t>> linger = pi.linger;
+		std::unordered_set<int64_t> in_linger;
+		for (auto &kv : linger) {
+			in_linger.insert(kv.first);
+		}
+		for (int64_t net_id : pi.order) {
+			if (!ids.count(net_id) && !in_linger.count(net_id)) {
+				linger.push_back({net_id, now});
+				in_linger.insert(net_id);
+			}
+		}
+		std::vector<std::pair<int64_t, int64_t>> still;
+		for (auto &kv : linger) {
+			if (ids.count(kv.first)) {
+				continue;
+			}
+			auto f = _by_net.find(kv.first);
+			if (f == _by_net.end()) {
+				continue;
+			}
+			double elapsed = double(now - kv.second) / 1000.0;
+			if (elapsed < f->second->linger_sec) {
+				still.push_back(kv);
+				ids.insert(kv.first);
+				order.push_back(kv.first);
+				relevant.push_back(f->second);
+			}
+		}
+		pi.has = true;
+		pi.at_ms = now;
+		pi.order = std::move(order);
+		pi.ids = std::move(ids);
+		pi.linger = std::move(still);
+	}
+
+	if (job->has_observer && c.thins()) {
+		int64_t index = _tick / c.ticks_per_snapshot;
+		if (!c.far_coherent) {
+			index += job->peer->id;
+		}
+		std::vector<IdRec *> kept;
+		kept.reserve(relevant.size());
+		for (IdRec *r : relevant) {
+			int64_t turn = index + r->net_id;
+			if (r->owner == job->obs_owner || (turn % c.far_every == 0 && c.far_tiers == 1)) {
+				kept.push_back(r);
+				continue;
+			}
+			double far = r->far_dist;
+			double limit = far * far;
+			double d2 = double(job->obs_pos.distance_squared_to(r->pos));
+			if (far <= 0.0 || d2 <= limit) {
+				kept.push_back(r);
+				continue;
+			}
+			int64_t every = c.far_every;
+			for (int64_t band = 1; band < c.far_tiers; band++) {
+				limit *= 4.0;
+				if (d2 <= limit) {
+					break;
+				}
+				every <<= 1;
+			}
+			if (turn % every == 0) {
+				kept.push_back(r);
+			}
+		}
+		relevant = std::move(kept);
+	}
+
+	std::vector<double> scores(relevant.size());
+	for (size_t i = 0; i < relevant.size(); i++) {
+		IdRec *r = relevant[i];
+		if (!job->has_observer) {
+			scores[i] = r->priority;
+		} else {
+			double distance = double(job->obs_pos.distance_to(r->pos));
+			double t = distance / r->score_limit;
+			t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+			scores[i] = r->priority * (1.0 - t);
+		}
+	}
+
+	job->cap_count = int64_t(relevant.size());
+	if (c.cap > 0 && int64_t(relevant.size()) > c.cap) {
+		std::vector<std::pair<float, float>> keys(relevant.size());
+		for (size_t i = 0; i < relevant.size(); i++) {
+			keys[i] = {relevant[i]->always ? -1e9f : float(-scores[i]), float(i)};
+		}
+		std::sort(keys.begin(), keys.end(), [](const std::pair<float, float> &a, const std::pair<float, float> &b) {
+			return a.first == b.first ? a.second < b.second : a.first < b.first;
+		});
+		std::vector<IdRec *> top(c.cap);
+		std::vector<double> top_scores(c.cap);
+		for (int64_t i = 0; i < c.cap; i++) {
+			size_t src = size_t(keys[i].second);
+			top[i] = relevant[src];
+			top_scores[i] = scores[src];
+		}
+		relevant = std::move(top);
+		scores = std::move(top_scores);
+	}
+
+	const size_t count = relevant.size();
+	std::vector<int64_t> keys(count);
 	{
-		std::lock_guard<std::mutex> lock(_mutex);
-		_jobs.push_back(std::move(job));
+		int index_bits = 1;
+		while ((int64_t(1) << index_bits) < int64_t(count)) {
+			index_bits++;
+		}
+		const int64_t low = (int64_t(1) << index_bits) - 1;
+		for (size_t i = 0; i < count; i++) {
+			IdRec *r = relevant[i];
+			Variant id = r->net_id;
+			int64_t waited = int64_t(job->starved_ticks.get(id, int64_t(0))) + 1;
+			job->starved_ticks[id] = waited;
+			double total = double(job->accumulators.get(id, 0.0)) + std::max(0.0, scores[i]);
+			if (waited > c.starvation_ticks) {
+				double over = double(waited - c.starvation_ticks);
+				total += over * over * c.starvation_weight;
+			}
+			job->accumulators[id] = total;
+			double value = std::max(0.0, total);
+			int64_t bits;
+			std::memcpy(&bits, &value, sizeof(bits));
+			keys[i] = ((int64_t(0x7FFFFFFFFFFFFFFFLL) - bits) & ~low) | int64_t(i);
+		}
+		std::sort(keys.begin(), keys.end());
+		std::vector<IdRec *> ordered(count);
+		for (size_t i = 0; i < count; i++) {
+			ordered[i] = relevant[size_t(keys[i] & low)];
+		}
+		relevant = std::move(ordered);
 	}
-	_work_cv.notify_one();
+
+	if (c.send_budget > 0 && int64_t(relevant.size()) > c.send_budget) {
+		std::vector<IdRec *> kept;
+		for (size_t i = 0; i < relevant.size(); i++) {
+			IdRec *r = relevant[i];
+			if (int64_t(i) < c.send_budget || (job->has_observer && job->obs_owner > 0 && r->owner == job->obs_owner)) {
+				kept.push_back(r);
+			}
+		}
+		relevant = std::move(kept);
+	}
+	job->relevant = std::move(relevant);
 }
 
 Array DotNetNativeCore::finish_snapshot() {
@@ -780,6 +1084,7 @@ Array DotNetNativeCore::finish_snapshot() {
 		r.push_back(job->leads_sent);
 		r.push_back(job->oversize_id);
 		r.push_back(job->oversize_bytes);
+		r.push_back(job->cap_count);
 		out.push_back(r);
 	}
 	_jobs.clear();
@@ -962,6 +1267,9 @@ void DotNetNativeCore::_begin_part(BitWriter &w) const {
 // DotNetManager._build_peer, which is _send_to_peer on a worker.
 void DotNetNativeCore::_run_job(Job *job) {
 	int64_t started = usec_now();
+	if (job->interest) {
+		_interest_job(job);
+	}
 	const int64_t peer_id = job->peer->id;
 	int64_t limit_bits = _mtu * 8 - TRAILER_BITS;
 	if (job->send_lead) {
@@ -1254,6 +1562,7 @@ Dictionary DotNetNativeCore::describe() {
 	out["wait_usec"] = _last_wait_usec;
 	out["gdscript_encodes"] = _custom_reads;
 	out["unknown_relevant"] = _unknown_relevant;
+	out["interest"] = _icfg.on;
 	return out;
 }
 
@@ -1261,6 +1570,9 @@ void DotNetNativeCore::_bind_methods() {
 	ClassDB::bind_static_method("DotNetNativeCore", D_METHOD("abi_version"), &DotNetNativeCore::abi_version);
 	ClassDB::bind_method(D_METHOD("begin_snapshot", "identities", "params"), &DotNetNativeCore::begin_snapshot);
 	ClassDB::bind_method(D_METHOD("submit_peer", "relevant", "info", "accumulators", "starved_ticks"), &DotNetNativeCore::submit_peer);
+	ClassDB::bind_method(D_METHOD("set_interest", "cfg"), &DotNetNativeCore::set_interest);
+	ClassDB::bind_method(D_METHOD("expire_interest"), &DotNetNativeCore::expire_interest);
+	ClassDB::bind_method(D_METHOD("submit_peer_interest", "observer", "info", "accumulators", "starved_ticks"), &DotNetNativeCore::submit_peer_interest);
 	ClassDB::bind_method(D_METHOD("finish_snapshot"), &DotNetNativeCore::finish_snapshot);
 	ClassDB::bind_method(D_METHOD("forget_peer", "peer_id"), &DotNetNativeCore::forget_peer);
 	ClassDB::bind_method(D_METHOD("forget_view", "behaviour", "peer_id"), &DotNetNativeCore::forget_view);

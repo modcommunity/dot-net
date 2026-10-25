@@ -7,7 +7,7 @@ extends Node
 ## [codeblock]
 ## godot --headless --path . res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213
 ##     [--ticks=60] [--warm=20] [--relevance=off] [--radius=60] [--workers=N] [--cap=192]
-##     [--far-every=N --far=M] [--far-coherent] [--far-tiers=T] [--send-budget=K] [--players-always] [--hash] [--native]
+##     [--far-every=N --far=M] [--far-coherent] [--far-tiers=T] [--send-budget=K] [--players-always] [--hash] [--native] [--native-interest]
 ## [/codeblock]
 ##
 ## [code]--hash[/code] prints one digest of every payload sent, in order: two builds of dot-net
@@ -82,6 +82,7 @@ var _far_coherent := false
 var _far_tiers := 1
 var _split := false
 var _native := false
+var _native_interest := false
 var _laps := {}
 
 
@@ -107,6 +108,7 @@ func _ready() -> void:
 			"--far-tiers": _far_tiers = value.to_int()
 			"--split": _split = true
 			"--native": _native = true
+			"--native-interest": _native = true; _native_interest = true
 	_run.call_deferred()
 
 
@@ -126,6 +128,7 @@ func _run() -> void:
 	config.snapshot_workers = _workers
 	config.peer_send_budget = _send_budget
 	config.native = _native
+	config.native_interest = _native_interest
 	host.config = config
 	add_child(host)
 	var _s := host.setup()

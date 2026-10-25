@@ -23,6 +23,12 @@ cd addons/dot_net/native
 
 `build.sh` clones the pinned godot-cpp into `~/.cache/dot-net-native` (`DOT_NET_NATIVE_CACHE`), installs scons there in a venv if it is not on the path, and writes `bin/libdot_net_native.<platform>.<target>.<arch>`. Windows (MSVC or MinGW) and macOS (`universal`) are build-it-yourself: the `.cfg` already names their files, and nothing in the source is platform-specific beyond `std::thread`. A web export has nothing to load and never asks.
 
+## Interest in the library too
+
+`DotNetConfig.native_interest = true` (`DOT_NET_NATIVE_INTEREST=1`, `--net-native-interest`), with `native` on, moves the rest of the per-peer pass into the library's build threads: `DotNetInterestDistance`'s relevance (the evaluation-interval cache, lingering, owner and always-relevant pins), thinning, scores, the entity cap and the budget's accumulator order, and `peer_send_budget`. GDScript keeps only the strategy's settings (`native_config`), the accumulator and starvation dictionaries (written in place by the library) and the entity-cap log lines (`note_cap`). It applies only when the strategy is exactly `DotNetInterestDistance` with squared distances and no `always_tags`; any subclass, the grid or `DotNetInterestAll` keeps the GDScript interest and the library only builds. `DotNetInterest.invalidate()` bumps `invalidation_serial`, which the next snapshot passes down. The cache and lingering records live in the library while it is on, so `describe()`'s `cached_observers` reads 0.
+
+Same selection and bytes: netcode_demo's `[native]` section runs the scripted ten-peer game with it on, inline and on three workers, for the base, coded, thinned and cached variants, and compares every payload (which is exactly the entities chosen, in order) and every budget record with GDScript; `snapshot_bench -- --hash --native-interest` prints the same digest as without.
+
 ## What it keeps the same
 
 Every rule of `DotNetBehaviour._collect_dirty`, `write_state`, `_sync_view` / `_trim_view` and `DotNetManager._send_to_peer` is ported line for line: audiences, `max_rate`, epsilon, `once()`, owed-until-confirmed, lost sends going dirty again, the ack window, the budget, parts at the MTU, the unchanged tail, the input lead. Floats are compared and quantised as GDScript does them (doubles; vectors as single-precision `Vector3`, built without fused multiply-add). A value the library cannot convert the way `DotNetVar.write` would (a custom codec, an unusual type in a declaration) is encoded by GDScript when the snapshot opens, at each bit of a byte it could start at if it may align, and copied in. The records of what each peer holds live in the library while it is on; `peer_view_state`, `peer_view_snapshot`, `forget_peer` and `reset_baseline` answer from it.
@@ -43,3 +49,5 @@ A whole zombie-survival server tick (`tools/server_probe.tscn -- --n=N --rate=64
 | 128 | 181.0 / 235.3 | 120.4 / 176.1 | 49.1 / 103.4 | 33.8 / 87.7 |
 
 The snapshot send drops about fourfold; the rest of that tick (bots, brains, players) is the game's and is now the larger part.
+
+Interest in the library (`--native-interest`), same bench (100 peers, 213 NPCs, mean of 60 snapshots, same digest in every row): GDScript 125.1 ms, native 27.7, native with interest 12.1, native with interest and 4 workers 6.4 (native with 4 workers and GDScript interest: 22.2).

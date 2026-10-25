@@ -29,5 +29,7 @@ extends RefCounted
 # 15: DotNetInterpolator.bracket_at(render_tick) and value_between(...): the two snapshot ticks a
 #     view tick was drawn between, so a server can rewind between the same two; and
 #     DotNetVar.wire_value(value), a value as the receiver reads it.
-const LEVEL := 15
+# 16: DotNetConfig.native_interest, DotNetInterest.native_interest_ok / native_config / invalidation_serial:
+#     the distance strategy's per-peer interest, scores, cap and accumulator order in the native core.
+const LEVEL := 16
 const OLDEST := 1

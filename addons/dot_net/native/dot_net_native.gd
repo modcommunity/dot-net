@@ -7,7 +7,7 @@ extends RefCounted
 const CHANNEL := "net.native"
 
 ## The library's [code]abi_version()[/code] this GDScript was written against.
-const ABI := 1
+const ABI := 2
 const CORE_CLASS := &"DotNetNativeCore"
 const ADDON_CFG := "res://addons/dot_net/native/dot_net_native.cfg"
 const EXE_DIR_CFG := "dot_net_native/dot_net_native.cfg"

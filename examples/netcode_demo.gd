@@ -475,7 +475,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 514
+const CHECKS := 522
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -4878,6 +4878,22 @@ func _test_native() -> void:
 					and _first_difference(serial["payloads"], other["payloads"]) == ""
 					and _first_difference(serial["normal_states"], other["normal_states"]) == "")
 
+	# Interest in the library too (DotNetConfig.native_interest): the same entities chosen, ranked and
+	# thinned for every peer (a payload carries exactly the chosen entities, in order), the same budgets.
+	for variant: String in ["", "coded", "thin", "cache"]:
+		var serial: Dictionary = _threads_scenario("NativeInterest" + variant + "Off", 0, false, variant)
+		var name := variant if variant != "" else "base"
+		for run: Array in [["inline", 0], ["three workers", 3]]:
+			var other: Dictionary = _threads_scenario(
+				"NativeInterest%s%d" % [variant, run[1]], run[1], false, variant, true, true)
+			_check("native interest %s, %s: the same entities and payloads %s and budgets %s as GDScript" % [
+					name, run[0], _first_difference(serial["payloads"], other["payloads"]),
+					_first_difference(serial["normal_states"], other["normal_states"])],
+				(serial["payloads"] as Array).size() > 100
+					and bool(other["interest_native"]) == loaded
+					and _first_difference(serial["payloads"], other["payloads"]) == ""
+					and _first_difference(serial["normal_states"], other["normal_states"]) == "")
+
 	for workers: int in [0, 3]:
 		var forgot: Dictionary = _threads_scenario("NativeToggleOff%d" % workers, workers, false, "toggle")
 		var toggled: Dictionary = _threads_scenario("NativeToggleOn%d" % workers, workers, false, "toggle", true)
@@ -5000,7 +5016,10 @@ func _test_first_entity_mid_tick() -> void:
 
 
 ## One run of [method _test_snapshot_threads]'s game; everything it sent and kept, as bytes.
-func _threads_scenario(label: String, workers: int, skew: bool, variant: String = "", native: bool = false) -> Dictionary:
+func _threads_scenario(
+	label: String, workers: int, skew: bool, variant: String = "", native: bool = false,
+	native_interest: bool = false
+) -> Dictionary:
 	const PEERS := 10
 	const ENTITIES := 40
 	const TICKS := 40
@@ -5008,6 +5027,7 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 	var host := _parts_manager(label, true, 320)
 	host.config.snapshot_workers = workers
 	host.config.native = native and variant != "toggle"
+	host.config.native_interest = native_interest
 	# 1500 B per window of ten ticks (the window is scripted below): well under what the
 	# entities in view want, so the accumulator decides who waits.
 	host.config.per_client_budget = 1500
@@ -5109,6 +5129,8 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 		if rich and tick % 8 == 0:
 			for cached: Dictionary in host.interest._cache.values():
 				cached["at_ms"] = 0
+			if host._native != null:
+				host._native.call(&"expire_interest")
 		# Native on at 10 and off at 24 must resend as a run that forgot every view then.
 		if variant == "toggle" and (tick == 10 or tick == 24):
 			if native:
@@ -5156,6 +5178,7 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 		"starved": starved, "split": split, "pooled": host._snapshot_pooled, "note": host._snapshot_threads_note,
 		"snapshots": TICKS, "cache_hits": 0, "normal_states": normal_states,
 		"native_note": host._native_note,
+		"interest_native": host._native != null and bool(host._native.call(&"describe").get("interest", false)),
 	}
 	if rich:
 		# Hits that happened: a cache entry older than the first tick's can only be a hit.

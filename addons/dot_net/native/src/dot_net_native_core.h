@@ -8,12 +8,16 @@
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
+#include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/vector3.hpp>
+
 #include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "net_writer.h"
@@ -92,6 +96,42 @@ struct IdRec {
 	bool shared = false;
 	uint64_t seen = 0;
 	std::vector<BehRec *> behaviours;
+	// Read only when native interest is on (DotNetNativeCore::set_interest).
+	double priority = 1.0;
+	bool always = false;
+	double linger_sec = 2.0;
+	godot::Vector3 pos;
+	double radius = 0.0;
+	double score_limit = 1.0;
+	double far_dist = 0.0;
+};
+
+// DotNetInterest's per-peer cache and lingering set, in the order the GDScript dictionaries keep them.
+struct PeerInterest {
+	bool has = false;
+	int64_t at_ms = 0;
+	std::vector<int64_t> order;
+	std::unordered_set<int64_t> ids;
+	std::vector<std::pair<int64_t, int64_t>> linger;
+};
+
+struct InterestCfg {
+	bool on = false;
+	double radius = 200.0;
+	std::vector<std::pair<godot::String, double>> radius_by_tag;
+	double interval_sec = 0.25;
+	int64_t far_every = 1;
+	double far_distance = 0.0;
+	std::vector<std::pair<godot::String, double>> far_by_tag;
+	bool far_coherent = false;
+	int64_t far_tiers = 1;
+	int64_t ticks_per_snapshot = 1;
+	int64_t cap = 0;
+	int64_t send_budget = 0;
+	int64_t starvation_ticks = 10;
+	double starvation_weight = 1.0;
+	int64_t invalidation = 0;
+	bool thins() const { return far_every > 1 && (far_distance > 0.0 || !far_by_tag.empty()); }
 };
 
 struct Entry {
@@ -127,6 +167,7 @@ struct View {
 
 struct Peer {
 	int64_t id = 0;
+	PeerInterest interest;
 	std::vector<std::unique_ptr<View>> views;
 	View *view(int index) {
 		if (index >= int(views.size())) {
@@ -151,6 +192,12 @@ struct Job {
 	int64_t lead_y = 0;
 	godot::Dictionary accumulators;
 	godot::Dictionary starved_ticks;
+	// Native interest: the build ranks its own candidates (see DotNetNativeCore::_interest_job).
+	bool interest = false;
+	bool has_observer = false;
+	godot::Vector3 obs_pos;
+	int64_t obs_owner = -1;
+	int64_t cap_count = 0;
 	// Out.
 	std::vector<std::vector<uint8_t>> payloads;
 	std::vector<int32_t> counts;
@@ -200,6 +247,11 @@ class DotNetNativeCore : public RefCounted {
 	bool _quit = false;
 	int _workers = 0;
 
+	dotnet::InterestCfg _icfg;
+	std::vector<dotnet::IdRec *> _all;
+	std::unordered_map<int64_t, dotnet::IdRec *> _by_net;
+	int64_t _interest_usec = 0;
+
 	int64_t _last_build_usec = 0;
 	int64_t _last_wait_usec = 0;
 	int64_t _last_read_usec = 0;
@@ -217,6 +269,9 @@ class DotNetNativeCore : public RefCounted {
 	void _set_workers(int workers);
 	void _worker_loop();
 	void _run_job(dotnet::Job *job);
+	void _interest_job(dotnet::Job *job);
+	dotnet::Peer *_peer_for(int64_t peer_id);
+	void _queue(std::unique_ptr<dotnet::Job> job);
 	bool _take_and_run();
 
 	uint64_t _collect(dotnet::View &view, const dotnet::BehRec &rec, int64_t peer_id, bool until_acked) const;
@@ -242,9 +297,17 @@ public:
 	/// Queues one peer's build. [param info]: peer_id, acked_tick, strict, compact, remaining bytes,
 	/// send_lead, lead.x, lead.y. The budget dictionaries are the peer's own and are written by the build.
 	void submit_peer(const Array &relevant, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks);
+	/// Native interest (off unless [param cfg] has on = true): DotNetInterestDistance's relevance, thinning,
+	/// scores, entity cap and the budget's accumulator order, run by the build itself. Call before begin_snapshot.
+	void set_interest(const Dictionary &cfg);
+	/// Marks every peer's cached relevance as old (what a test does to DotNetInterest._cache's at_ms).
+	void expire_interest();
+	/// submit_peer for a peer whose candidates the library works out: [param observer] is its entity or null,
+	/// [param info] as submit_peer's.
+	void submit_peer_interest(const Variant &observer, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks);
 	/// Waits for every queued build and returns one result per peer, in submission order:
 	/// [peer_id, payloads, entity counts, starved, spent, split, unchanged_listed, unchanged_saved,
-	/// leads_sent, oversize net id or -1, oversize bytes].
+	/// leads_sent, oversize net id or -1, oversize bytes, entities relevant before the cap].
 	Array finish_snapshot();
 
 	void forget_peer(int64_t peer_id);
