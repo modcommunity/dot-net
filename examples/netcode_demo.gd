@@ -475,7 +475,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 497
+const CHECKS := 501
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1740,6 +1740,15 @@ func _test_interpolation() -> void:
 	interpolator.push(1, 105, {"position": Vector3(5, 0, 0)})
 	var reordered := interpolator.sample(1, 104)
 	_check("out-of-order sample used", reordered.has("position"))
+
+	# value_at: the drawn value at an absolute render tick, counting nothing, never extrapolating.
+	var counted := interpolator.sample_count()
+	var at: Variant = interpolator.value_at(1, &"position", 102.5)
+	var again: Variant = interpolator.value_at(1, &"position", 102.5)
+	_check("value_at blends at a render tick (x=%s)" % [at], at is Vector3 and absf((at as Vector3).x - 2.5) < 0.001 and at == again)
+	_check("value_at holds the newest past the end", interpolator.value_at(1, &"position", 130.0) == Vector3(10, 0, 0))
+	_check("value_at counts no samples", interpolator.sample_count() == counted)
+	_check("value_at of an unknown entity is null", interpolator.value_at(99, &"position", 100.0) == null)
 
 	# Discrete values must not be blended into states that never existed.
 	interpolator.push(2, 100, {"weapon": 1})

@@ -381,6 +381,37 @@ func sample(net_id: int, server_tick: float) -> Dictionary:
 	return (track.samples[track.samples.size() - 1]["values"] as Dictionary).duplicate()
 
 
+## [param property] of an entity as it was drawn at [param render_tick] (already behind by the
+## delay): the bracketing samples blended, the nearest end outside them, null when unknown.
+## Counts nothing and never extrapolates, so a replay asks it and gets the first answer again.
+## What a predicting client collides with when the server rewinds to the same view tick
+## (docs/prediction.md#bumping-a-remote).
+func value_at(net_id: int, property: StringName, render_tick: float) -> Variant:
+	var track: Track = _tracks.get(net_id)
+	if track == null or track.is_empty():
+		return null
+	var samples := track.samples
+	var last := samples.size() - 1
+	if render_tick >= float(samples[last]["tick"]):
+		return (samples[last]["values"] as Dictionary).get(property)
+	if render_tick <= float(samples[0]["tick"]):
+		return (samples[0]["values"] as Dictionary).get(property)
+	for i in range(last):
+		var newer_tick := float(samples[i + 1]["tick"])
+		if render_tick > newer_tick:
+			continue
+		var older_tick := float(samples[i]["tick"])
+		var a: Variant = (samples[i]["values"] as Dictionary).get(property)
+		var b: Variant = (samples[i + 1]["values"] as Dictionary).get(property)
+		if a == null or b == null:
+			return b if b != null else a
+		var alpha := 0.0 if newer_tick <= older_tick else (render_tick - older_tick) / (newer_tick - older_tick)
+		if (a is Vector3 and b is Vector3) or (a is Vector2 and b is Vector2) or (a is float and b is float):
+			return lerp(a, b, alpha)
+		return a if alpha < 0.5 else b
+	return (samples[last]["values"] as Dictionary).get(property)
+
+
 ## Continues past the newest sample, briefly.
 ##
 ## Bounded by [member DotNetConfig.max_extrapolation_sec]. Past that the entity holds

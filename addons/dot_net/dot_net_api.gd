@@ -24,5 +24,7 @@ extends RefCounted
 #     prioritise / ranked, and index_snapshot(all): each entity scored and looked up once a snapshot.
 # 13: DotNetConfig.native / native_path (env DOT_NET_NATIVE, --net-native): server snapshots
 #     built by the optional native library, DotNetNative; the same bytes, off by default.
-const LEVEL := 13
+# 14: DotNetInterpolator.value_at(net_id, property, render_tick): a remote as drawn at a past render
+#     tick, counting nothing; what lag-compensated solid-player collision predicts against.
+const LEVEL := 14
 const OLDEST := 1
