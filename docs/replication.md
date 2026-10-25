@@ -5,6 +5,7 @@
 ```
 all entities
   → interest.relevant_for()     what this client may know about
+  → interest.thin_into()        far entities only every far_every-th snapshot (off by default)
   → interest.prioritise()       cap at max_entities_per_snapshot
   → budget.accumulate()         order by accumulated priority
   → write until the byte budget runs out
@@ -45,6 +46,10 @@ Two cases keep a property in every snapshot until the peer confirms its current 
 The window is not small: a quarter of a second of an entity that exists only by prediction, and on a host that ticks faster than the wall clock (every headless test, every fast-forwarded replay) the age never reaches the interval and the entity is never sent. It is hard to see because the owner's position looks right (it is predicting it); only what cannot be predicted (mass, health, a team change) goes silently missing. The pin returns a new dictionary: an entry written into the cache would survive the expiry meant to re-evaluate it.
 
 Interest management is also the anti-cheat that works: data never sent cannot be drawn on a wallhack. The built-in "all" strategy is correct for co-op and wrong for competitive.
+
+## Thinning far entities
+
+`DotNetInterest.far_every` (1, off) and `far_distance` (or `far_distance_by_tag`) send an entity farther than that from the observer in one snapshot of `far_every`, staggered by net id and peer so each snapshot carries an even share. The observer's own entities are never thinned, always-relevant ones are (a teammate across the map is still updated, less often). It cuts both the build and the budget's work, on the inline and the pooled path alike (netcode_demo's `thin` scenario proves them byte for byte the same). A skipped entity is the same as one the budget dropped: it stays dirty against its acked baseline and goes out on its turn, so keep `far_every` near `DotNetConfig.interpolation_buffer` or the far mirrors hold between samples. A game exposes the two as server settings (game-zombie-zone: `zz_net_far_every`, `zz_net_far_distance`); both are read per snapshot, so they change live.
 
 ## What a snapshot costs
 

@@ -852,6 +852,10 @@ func _send_snapshots(
 			var relevant := interest.relevant_for(
 				observer, identities, peer_id, context
 			)
+			if interest.thins():
+				var kept: Array[DotNetIdentity] = []
+				interest.thin_into(kept, observer, relevant, peer_id, context)
+				relevant = kept
 
 			var scores := {}
 			for identity in relevant:
@@ -1036,6 +1040,10 @@ func _interest_chunk(
 		var job := jobs[j]
 		var answer := interest.relevance(job.observer, identities, job.peer_id, context)
 		var relevant: Array = answer[0]
+		if interest.thins():
+			var kept: Array = []
+			interest.thin_into(kept, job.observer, relevant, job.peer_id, context)
+			relevant = kept
 
 		var scores := {}
 		for identity: DotNetIdentity in relevant:

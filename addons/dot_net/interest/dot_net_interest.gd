@@ -42,6 +42,17 @@ const CHANNEL := "net.interest"
 ## twentieth as much.
 @export_range(0.0, 5.0, 0.05) var evaluation_interval_sec: float = 0.25
 
+## Entities past [member far_distance] are sent in one snapshot of this many, staggered by net id
+## (1 is off). The observer's own are never thinned; keep it near
+## [member DotNetConfig.interpolation_buffer] or far mirrors run out of samples.
+@export_range(1, 16, 1) var far_every: int = 1
+
+## Metres beyond which an entity counts as far for [member far_every]. 0 is never far.
+@export var far_distance: float = 0.0
+
+## Per-tag [member far_distance], as [code]tag -> metres[/code]; the first matching tag wins.
+@export var far_distance_by_tag: Dictionary = {}
+
 ## observer peer_id -> {at_ms, ids: Dictionary}
 var _cache: Dictionary = {}
 
@@ -110,6 +121,38 @@ func _score(
 
 
 # --- Public API ------------------------------------------------------------
+
+## Whether [method thin_into] drops anything at all, so a caller can skip it.
+func thins() -> bool:
+	return far_every > 1 and (far_distance > 0.0 or not far_distance_by_tag.is_empty())
+
+
+## [param relevant] without the far entities whose turn this snapshot is not (see
+## [member far_every]), appended to [param out]. Reads frozen positions and fields only, so a
+## worker may run it; [param out] is untyped there (see [method relevance]).
+func thin_into(out: Array, observer: DotNetIdentity, relevant: Array, peer_id: int, context: Dictionary) -> void:
+	if observer == null or not thins():
+		out.append_array(relevant)
+		return
+	var config: DotNetConfig = context.get("config")
+	var index := int(context.get("tick", 0)) / (config.ticks_per_snapshot() if config != null else 1)
+	var here := observer.world_position()
+	for identity: DotNetIdentity in relevant:
+		if identity.owner_peer_id == observer.owner_peer_id \
+				or (index + identity.net_id + peer_id) % far_every == 0:
+			out.append(identity)
+			continue
+		var far := _far_distance_for(identity)
+		if far <= 0.0 or here.distance_squared_to(identity.world_position()) <= far * far:
+			out.append(identity)
+
+
+func _far_distance_for(entity: DotNetIdentity) -> float:
+	for tag in entity.interest_tags:
+		if far_distance_by_tag.has(tag):
+			return float(far_distance_by_tag[tag])
+	return far_distance
+
 
 ## Whether [method relevance], [method ranked] and [method _score] may run on a worker
 ## thread, for several peers at once ([member DotNetConfig.snapshot_workers]). False unless a
@@ -406,21 +449,17 @@ func _rank_into(
 	limit: int,
 	context: Dictionary
 ) -> void:
-	var scored: Array = []
-	for identity: DotNetIdentity in entities:
-		scored.append({
-			"identity": identity,
-			# always_relevant entities are pinned above everything else, so the cap
-			# never drops the objective marker in favour of scenery.
-			"score": 1e9 if identity.always_relevant else _score(observer, identity, context),
-		})
-
-	scored.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a["score"]) > float(b["score"])
-	)
+	# (-score, index) pairs sorted natively: a sort_custom over dictionaries was 0.7 ms a peer
+	# at 250 relevant. Always-relevant entities are pinned above everything else.
+	var keys: Array[Vector2] = []
+	keys.resize(entities.size())
+	for i in entities.size():
+		var identity: DotNetIdentity = entities[i]
+		keys[i] = Vector2(-1e9 if identity.always_relevant else -_score(observer, identity, context), i)
+	keys.sort()
 
 	for i in range(limit):
-		out.append(scored[i]["identity"])
+		out.append(entities[int(keys[i].y)])
 
 
 ## Reports the edges of "the cap is cutting what this peer should see".
@@ -515,6 +554,8 @@ func describe() -> Dictionary:
 	return {
 		"strategy": strategy_name,
 		"interval": evaluation_interval_sec,
+		"far_every": far_every,
+		"far_distance": far_distance,
 		"cached_observers": _cache.size(),
 		"capped_observers": _cap_state.values().filter(
 			func(state: Dictionary) -> bool: return state["capped"]

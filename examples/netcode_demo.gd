@@ -418,7 +418,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 465
+const CHECKS := 470
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1367,6 +1367,22 @@ func _test_interest() -> void:
 	_check("far entity excluded", not ids.has(3))
 	_check("always_relevant included regardless of distance", ids.has(4))
 	_check("observer's own entity included", ids.has(1))
+
+	var thin := DotNetInterestDistance.new()
+	thin.radius = 100000.0
+	thin.evaluation_interval_sec = 0.0
+	_check("thinning is off by default", not thin.thins())
+	thin.far_every = 4
+	thin.far_distance = 50.0
+	var seen := {}
+	for snap in 4:
+		var kept: Array = []
+		var ctx := {"tick": snap * config.ticks_per_snapshot(), "config": config}
+		thin.thin_into(kept, observer, thin.relevant_for(observer, all, 1, ctx), 1, ctx)
+		for identity: DotNetIdentity in kept:
+			seen[identity.net_id] = int(seen.get(identity.net_id, 0)) + 1
+	_check("thinning: own and near every snapshot, a far one once in far_every (%s)" % seen,
+		int(seen.get(1, 0)) == 4 and int(seen.get(2, 0)) == 4 and int(seen.get(3, 0)) == 1 and int(seen.get(4, 0)) == 1)
 
 	# The grid must agree with the brute-force answer — that is the whole
 	# correctness requirement for a spatial index.
@@ -4458,7 +4474,7 @@ func _test_snapshot_threads() -> void:
 	# The paths the first scenario leaves out (evaluation interval 0, no linger, no stagger,
 	# nothing rate-limited, no strings): serial against pooled again for each.
 	var extra := {}
-	for variant: String in ["cache", "grid"]:
+	for variant: String in ["cache", "grid", "thin"]:
 		DotParallel.verify = false
 		var serial: Dictionary = _threads_scenario("Extra" + variant + "Off", 0, false, variant)
 		var pooled: Dictionary = _threads_scenario("Extra" + variant + "On", 3, false, variant)
@@ -4501,9 +4517,17 @@ func _test_snapshot_threads() -> void:
 		not DotParallel.available()
 			or _first_difference(off["payloads"], broken["payloads"]) != "")
 
+	_check("thin: far entities thinned change what is sent %s" % _first_difference(off["payloads"], (extra["thin"] as Array)[0]["payloads"]),
+		_first_difference(off["payloads"], (extra["thin"] as Array)[0]["payloads"]) != "")
 	for variant: String in extra:
 		var runs: Array = extra[variant]
 		var serial: Dictionary = runs[0]
+		if variant == "thin":
+			for k in [1, 2]:
+				_check("thin: pooled runs send the same payloads and state as the inline path",
+					_first_difference(serial["payloads"], runs[k]["payloads"]) == ""
+						and _first_difference(serial["states"], runs[k]["states"]) == "")
+			continue
 		_check("%s: the scenario sent snapshots under a held cache, linger and stagger (%d payloads, %d cached peers)"
 				% [variant, (serial["payloads"] as Array).size(), serial["cache_hits"]],
 			(serial["payloads"] as Array).size() > 100 and int(serial["cache_hits"]) > 0)
@@ -4651,7 +4675,10 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 	distance.evaluation_interval_sec = 0.0
 	host.interest = distance
 	host._test_skew_pooled = skew
-	var rich := variant != ""
+	if variant == "thin":
+		distance.far_every = 3
+		distance.far_distance = 6.0
+	var rich := variant == "cache" or variant == "grid"
 	if rich:
 		# A cached answer is kept for good and expired by hand below (a wall-clock interval
 		# would expire at a different tick in each run); a leaver lingers for good.
