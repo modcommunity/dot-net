@@ -776,7 +776,22 @@ func write_state(
 		view.acked.merge(recorded, true)
 		return
 
-	view.pending.append({"tick": tick, "values": recorded})
+	view.pending.append(_pending_entry(encoded, recorded, tick))
+
+
+## The pending entry for [param encoded] in snapshot [param tick], one shared by every peer the set
+## went to (nothing writes to an entry): a dictionary per entity per peer per snapshot otherwise.
+## Kept beside [method _shifted]'s slot, on the entry, which lives for one snapshot.
+static func _pending_entry(encoded: Array, recorded: Dictionary, tick: int) -> Dictionary:
+	if encoded.size() < 6:
+		if encoded.size() < 5:
+			encoded.append([null, null, null, null, null, null, null, null])
+		encoded.append({"tick": tick, "values": recorded})
+	var entry: Dictionary = encoded[5]
+	if int(entry["tick"]) != tick:
+		entry = {"tick": tick, "values": recorded}
+		encoded[5] = entry
+	return entry
 
 
 ## [param encoded]'s bits (an [method _encode] result begun at bit 0) moved [param pad] bits
@@ -1617,7 +1632,7 @@ func write_for_view(
 		view.acked.merge(recorded, true)
 		return
 
-	view.pending.append({"tick": tick, "values": recorded})
+	view.pending.append(_pending_entry(encoded, recorded, tick))
 
 
 ## [method state_bits] with [param cache].

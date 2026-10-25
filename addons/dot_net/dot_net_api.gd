@@ -20,5 +20,7 @@ extends RefCounted
 #     DotNetBudget.accumulate_record(); DotNetBehaviour.EncodeCache, collect_for_view,
 #     write_for_view, state_bits_cached, view_for, peer_view_snapshot;
 #     DotNetIdentity.freeze_position.
-const LEVEL := 11
+# 12: DotNetInterest.scores_for(observer, entities, context), the optional scores argument of
+#     prioritise / ranked, and index_snapshot(all): each entity scored and looked up once a snapshot.
+const LEVEL := 12
 const OLDEST := 1

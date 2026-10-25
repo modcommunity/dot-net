@@ -225,7 +225,7 @@ func relevant_for(
 		if ids.has(net_id):
 			continue
 
-		var identity := _find(all, net_id)
+		var identity := _find_in(all, net_id)
 		if identity == null:
 			continue
 
@@ -309,7 +309,7 @@ func relevance(
 		if ids.has(net_id):
 			continue
 
-		var identity := _find(all, net_id)
+		var identity := _find_in(all, net_id)
 		if identity == null:
 			continue
 
@@ -409,12 +409,15 @@ func _evaluate_into(
 ## The backstop when interest management alone is not enough — a hundred players in
 ## one room. Something has to be dropped, and dropping the least relevant is better
 ## than dropping whatever happened to be last.
+## [param scores] is [method scores_for]'s answer when the caller has it, so nothing is
+## scored twice.
 func prioritise(
 	observer: DotNetIdentity,
 	entities: Array[DotNetIdentity],
 	limit: int,
 	context: Dictionary,
-	peer_id: int = 0
+	peer_id: int = 0,
+	scores: Dictionary = {}
 ) -> Array[DotNetIdentity]:
 	_note_cap(peer_id, entities.size(), limit, context)
 
@@ -422,7 +425,7 @@ func prioritise(
 		return entities
 
 	var out: Array[DotNetIdentity] = []
-	_rank_into(out, observer, entities, limit, context)
+	_rank_into(out, observer, entities, limit, context, scores)
 	return out
 
 
@@ -432,13 +435,24 @@ func ranked(
 	observer: DotNetIdentity,
 	entities: Array,
 	limit: int,
-	context: Dictionary
+	context: Dictionary,
+	scores: Dictionary = {}
 ) -> Array:
 	if limit <= 0 or entities.size() <= limit:
 		return entities
 
 	var out: Array = []
-	_rank_into(out, observer, entities, limit, context)
+	_rank_into(out, observer, entities, limit, context, scores)
+	return out
+
+
+## Every entity's [method _score] for [param observer], by net id: what the entity cap and the
+## budget both rank by, worked out once per peer. Reads what [method _score] reads, so a worker
+## may run it when [method is_thread_safe] says so.
+func scores_for(observer: DotNetIdentity, entities: Array, context: Dictionary) -> Dictionary:
+	var out := {}
+	for identity: DotNetIdentity in entities:
+		out[identity.net_id] = _score(observer, identity, context)
 	return out
 
 
@@ -447,15 +461,18 @@ func _rank_into(
 	observer: DotNetIdentity,
 	entities: Array,
 	limit: int,
-	context: Dictionary
+	context: Dictionary,
+	scores: Dictionary = {}
 ) -> void:
 	# (-score, index) pairs sorted natively: a sort_custom over dictionaries was 0.7 ms a peer
 	# at 250 relevant. Always-relevant entities are pinned above everything else.
 	var keys: Array[Vector2] = []
 	keys.resize(entities.size())
+	var given := not scores.is_empty()
 	for i in entities.size():
 		var identity: DotNetIdentity = entities[i]
-		keys[i] = Vector2(-1e9 if identity.always_relevant else -_score(observer, identity, context), i)
+		var score: float = float(scores[identity.net_id]) if given else _score(observer, identity, context)
+		keys[i] = Vector2(-1e9 if identity.always_relevant else -score, i)
 	keys.sort()
 
 	for i in range(limit):
@@ -520,6 +537,26 @@ static func _find(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 		if identity.net_id == net_id:
 			return identity
 	return null
+
+
+## Indexes [param all] by net id for the snapshot about to be asked about it, so a lingering
+## entity is found by lookup, not by a walk of every identity per peer. Main thread, once per
+## snapshot; [code]index_snapshot([])[/code] after it.
+func index_snapshot(all: Array[DotNetIdentity]) -> void:
+	_indexed = all
+	_by_id = {}
+	for identity in all:
+		_by_id[identity.net_id] = identity
+
+
+func _find_in(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
+	if is_same(all, _indexed):
+		return _by_id.get(net_id)
+	return _find(all, net_id)
+
+
+var _indexed: Array[DotNetIdentity] = []
+var _by_id: Dictionary = {}
 
 
 func _resolve(ids: Dictionary, all: Array[DotNetIdentity]) -> Array[DotNetIdentity]:

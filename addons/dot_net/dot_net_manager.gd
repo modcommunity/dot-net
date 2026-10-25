@@ -814,12 +814,13 @@ func _send_snapshots(
 	var pooled := workers > 0 and send_fn.is_valid() and not _peers.is_empty()
 
 	# Before [method DotNetInterest._prepare], which reads positions too (a grid indexes
-	# them): from here to the thaw every interest question is about one instant.
-	if pooled:
-		for identity in identities:
-			identity.freeze_position()
+	# them): from here to the thaw every interest question is about one instant. Inline too:
+	# a transform read per entity per peer was a third of a 100-player snapshot's interest.
+	for identity in identities:
+		identity.freeze_position()
 
 	interest._prepare(identities, context)
+	interest.index_snapshot(identities)
 
 	_last_snapshot_tick = tick
 
@@ -857,16 +858,14 @@ func _send_snapshots(
 				interest.thin_into(kept, observer, relevant, peer_id, context)
 				relevant = kept
 
-			var scores := {}
-			for identity in relevant:
-				scores[identity.net_id] = interest._score(observer, identity, context)
+			var scores := interest.scores_for(observer, relevant, context)
 
 			# Both caps at once — see [method DotNetConfig.entity_cap]. max_tracked_entities
 			# was documented from the first version and enforced by nothing; it is applied
 			# HERE rather than by a score sort of our own, because prioritise is what pins
 			# always_relevant and a plain sort would cut the observer's own entity.
 			relevant = interest.prioritise(
-				observer, relevant, config.entity_cap(), context, peer_id
+				observer, relevant, config.entity_cap(), context, peer_id, scores
 			)
 			relevant = budget.accumulate(peer_id, relevant, scores)
 
@@ -877,9 +876,10 @@ func _send_snapshots(
 		for behaviour in identity.behaviours:
 			behaviour.end_snapshot_reads()
 
+	interest.index_snapshot([])
+	for identity in identities:
+		identity.thaw_position()
 	if pooled:
-		for identity in identities:
-			identity.thaw_position()
 		for identity in _late_frozen:
 			if is_instance_valid(identity):
 				identity.thaw_position()
@@ -1045,12 +1045,10 @@ func _interest_chunk(
 			interest.thin_into(kept, job.observer, relevant, job.peer_id, context)
 			relevant = kept
 
-		var scores := {}
-		for identity: DotNetIdentity in relevant:
-			scores[identity.net_id] = interest._score(job.observer, identity, context)
+		var scores := interest.scores_for(job.observer, relevant, context)
 
 		job.cap_count = relevant.size()
-		relevant = interest.ranked(job.observer, relevant, cap, context)
+		relevant = interest.ranked(job.observer, relevant, cap, context, scores)
 		if _test_skew_pooled:
 			job.acked_tick = 0
 		job.ordered = budget.accumulate_record(job.peer_budget, relevant, scores)
@@ -1142,11 +1140,6 @@ func _send_to_peer(
 	var oldest_pending: int = tick - config.ack_window_snapshots * config.ticks_per_snapshot()
 
 	for identity in relevant:
-		var estimated := 0
-		for behaviour in identity.behaviours:
-			estimated += behaviour.estimated_bits(peer_id)
-		estimated = (estimated + 7) >> 3
-
 		# The entity this peer predicts. Its client reads a property's absence as "the
 		# server's is unchanged" and rewinds to what it last received, so for this entity
 		# alone a property stays owed until the peer has confirmed it — see
@@ -1175,6 +1168,12 @@ func _send_to_peer(
 				unchanged_header_bits += DotNetRegistry.ID_BITS + 6 + 6 * identity.behaviours.size()
 				budget.note_sent(peer_id, identity.net_id, 0)
 				continue
+
+		# A full update's guess, for the budget and the part cut: only for an entity being written.
+		var estimated := 0
+		for behaviour in identity.behaviours:
+			estimated += behaviour.estimated_bits(peer_id)
+		estimated = (estimated + 7) >> 3
 
 		# After the dirty check, not before: an entity with nothing to say is not one the
 		# budget needs to hold back. Resolving acks first for one that is then held back is
@@ -1402,11 +1401,6 @@ func _build_peer(
 	var entity_caches: Array = []
 
 	for identity: DotNetIdentity in relevant:
-		var estimated := 0
-		for behaviour in identity.behaviours:
-			estimated += behaviour.estimated_bits(peer_id)
-		estimated = (estimated + 7) >> 3
-
 		# The entity this peer predicts. Its client reads a property's absence as "the
 		# server's is unchanged" and rewinds to what it last received, so for this entity
 		# alone a property stays owed until the peer has confirmed it — see
@@ -1447,6 +1441,12 @@ func _build_peer(
 				peer_budget.accumulators[identity.net_id] = 0.0
 				peer_budget.starved_ticks[identity.net_id] = 0
 				continue
+
+		# A full update's guess, for the budget and the part cut: only for an entity being written.
+		var estimated := 0
+		for behaviour in identity.behaviours:
+			estimated += behaviour.estimated_bits(peer_id)
+		estimated = (estimated + 7) >> 3
 
 		# After the dirty check, not before: an entity with nothing to say is not one the
 		# budget needs to hold back. Resolving acks first for one that is then held back is

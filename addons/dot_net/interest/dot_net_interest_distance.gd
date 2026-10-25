@@ -84,6 +84,49 @@ func _score(
 	return entity.priority * (1.0 - clampf(distance / limit, 0.0, 1.0))
 
 
+## The base loop with [method _is_relevant] inlined for this class's plain case (no tags, squared
+## distances): one observer position per peer and no call per entity, which was most of a
+## 100-player snapshot's interest time. A subclass, or any tag in play, takes the base loop.
+func _evaluate_into(
+	out: Array,
+	observer: DotNetIdentity,
+	all: Array[DotNetIdentity],
+	context: Dictionary
+) -> void:
+	if observer == null or not use_squared or not always_tags.is_empty() or not _exact():
+		super._evaluate_into(out, observer, all, context)
+		return
+	var here := observer.world_position()
+	var owner := observer.owner_peer_id
+	var limit_squared := radius * radius
+	for identity in all:
+		if identity.always_relevant or identity.owner_peer_id == owner:
+			out.append(identity)
+		elif identity.interest_tags.is_empty():
+			if here.distance_squared_to(identity.world_position()) <= limit_squared:
+				out.append(identity)
+		elif _is_relevant(observer, identity, context):
+			out.append(identity)
+
+
+## [method DotNetInterest.scores_for] with [method _score] inlined, as above.
+func scores_for(observer: DotNetIdentity, entities: Array, context: Dictionary) -> Dictionary:
+	if observer == null or not _exact():
+		return super.scores_for(observer, entities, context)
+	var out := {}
+	var here := observer.world_position()
+	var plain := maxf(1.0, radius)
+	for identity: DotNetIdentity in entities:
+		var limit := plain if identity.interest_tags.is_empty() else maxf(1.0, _radius_for(identity))
+		var distance := here.distance_to(identity.world_position())
+		out[identity.net_id] = identity.priority * (1.0 - clampf(distance / limit, 0.0, 1.0))
+	return out
+
+
+func _exact() -> bool:
+	return (get_script() as Script).get_global_name() == &"DotNetInterestDistance"
+
+
 func describe() -> Dictionary:
 	var d := super.describe()
 	d["radius"] = radius
