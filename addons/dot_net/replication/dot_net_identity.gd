@@ -226,6 +226,10 @@ func _on_unregistered() -> void:
 
 	for behaviour in behaviours:
 		behaviour._net_removed()
+		# Its records go with the registration: registered again, it is adopted afresh.
+		if behaviour._native_core != null:
+			behaviour._native_core.forget_view(behaviour, -1)
+			behaviour._native_core = null
 
 	_registered = false
 

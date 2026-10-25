@@ -382,11 +382,13 @@ func sample(net_id: int, server_tick: float) -> Dictionary:
 
 
 ## [param property] of an entity as it was drawn at [param render_tick] (already behind by the
-## delay): the bracketing samples blended, the nearest end outside them, null when unknown.
-## Counts nothing and never extrapolates, so a replay asks it and gets the first answer again.
-## What a predicting client collides with when the server rewinds to the same view tick
+## delay): the bracketing samples blended, the newest past the end, null when unknown or older
+## than the buffer. With [param cut] > 0 a jump longer than it between two samples after
+## [param render_tick] is a teleport, and nothing before it is known either (null). Counts
+## nothing and never extrapolates, so a replay gets the first answer again. What a predicting
+## client collides with when the server rewinds to the same view tick
 ## (docs/prediction.md#bumping-a-remote).
-func value_at(net_id: int, property: StringName, render_tick: float) -> Variant:
+func value_at(net_id: int, property: StringName, render_tick: float, cut: float = 0.0) -> Variant:
 	var track: Track = _tracks.get(net_id)
 	if track == null or track.is_empty():
 		return null
@@ -394,12 +396,14 @@ func value_at(net_id: int, property: StringName, render_tick: float) -> Variant:
 	var last := samples.size() - 1
 	if render_tick >= float(samples[last]["tick"]):
 		return (samples[last]["values"] as Dictionary).get(property)
-	if render_tick <= float(samples[0]["tick"]):
-		return (samples[0]["values"] as Dictionary).get(property)
+	if render_tick < float(samples[0]["tick"]):
+		return null
 	for i in range(last):
 		var newer_tick := float(samples[i + 1]["tick"])
 		if render_tick > newer_tick:
 			continue
+		if cut > 0.0 and _jumps_after(samples, i, property, cut):
+			return null
 		var older_tick := float(samples[i]["tick"])
 		var a: Variant = (samples[i]["values"] as Dictionary).get(property)
 		var b: Variant = (samples[i + 1]["values"] as Dictionary).get(property)
@@ -410,6 +414,21 @@ func value_at(net_id: int, property: StringName, render_tick: float) -> Variant:
 			return lerp(a, b, alpha)
 		return a if alpha < 0.5 else b
 	return (samples[last]["values"] as Dictionary).get(property)
+
+
+## Whether [param property] moves further than [param cut] between any two neighbouring
+## samples from index [param from] on: a teleport [method value_at] does not reach across.
+static func _jumps_after(samples: Array, from: int, property: StringName, cut: float) -> bool:
+	var before: Variant = null
+	for j in range(from, samples.size()):
+		var now: Variant = (samples[j]["values"] as Dictionary).get(property)
+		if now == null:
+			continue
+		if before != null and ((now is Vector3 and before is Vector3) or (now is Vector2 and before is Vector2)):
+			if (now - before).length() > cut:
+				return true
+		before = now
+	return false
 
 
 ## Continues past the newest sample, briefly.

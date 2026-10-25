@@ -205,9 +205,11 @@ class DotNetNativeCore : public RefCounted {
 	int64_t _last_read_usec = 0;
 	int64_t _snapshots = 0;
 	int64_t _custom_reads = 0;
+	int64_t _unknown_relevant = 0;
 
 	dotnet::BehRec *_behaviour_for(Object *behaviour, uint64_t id);
 	dotnet::IdRec *_identity_for(const Variant &identity);
+	dotnet::IdRec *_known_identity(const Variant &identity) const;
 	void _adopt(dotnet::BehRec *rec, Object *behaviour);
 	void _read(dotnet::BehRec *rec, Object *behaviour);
 	void _drop_behaviour(dotnet::BehRec *rec);

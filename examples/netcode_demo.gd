@@ -475,7 +475,7 @@ var _failed := 0
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
-const CHECKS := 501
+const CHECKS := 508
 
 ## Suspending sections entered, and suspending sections that ran to the end.
 ##
@@ -1749,6 +1749,14 @@ func _test_interpolation() -> void:
 	_check("value_at holds the newest past the end", interpolator.value_at(1, &"position", 130.0) == Vector3(10, 0, 0))
 	_check("value_at counts no samples", interpolator.sample_count() == counted)
 	_check("value_at of an unknown entity is null", interpolator.value_at(99, &"position", 100.0) == null)
+	_check("value_at before the oldest sample is null, as a server's rewind past its history", interpolator.value_at(1, &"position", 99.0) == null)
+	interpolator.push(4, 100, {"position": Vector3.ZERO})
+	interpolator.push(4, 102, {"position": Vector3(0.5, 0, 0)})
+	interpolator.push(4, 104, {"position": Vector3(40, 0, 0)})
+	interpolator.push(4, 106, {"position": Vector3(40.5, 0, 0)})
+	_check("value_at with a cut is null before a teleport", interpolator.value_at(4, &"position", 101.0, 10.0) == null)
+	_check("and blends after it", interpolator.value_at(4, &"position", 105.0, 10.0) == Vector3(40.25, 0, 0))
+	_check("and without one blends across it", interpolator.value_at(4, &"position", 101.0) == Vector3(0.25, 0, 0))
 
 	# Discrete values must not be blended into states that never existed.
 	interpolator.push(2, 100, {"weapon": 1})
@@ -4858,6 +4866,24 @@ func _test_native() -> void:
 					and _first_difference(serial["payloads"], other["payloads"]) == ""
 					and _first_difference(serial["normal_states"], other["normal_states"]) == "")
 
+	for workers: int in [0, 3]:
+		var forgot: Dictionary = _threads_scenario("NativeToggleOff%d" % workers, workers, false, "toggle")
+		var toggled: Dictionary = _threads_scenario("NativeToggleOn%d" % workers, workers, false, "toggle", true)
+		_check("native on and off mid-game, %d workers: everything resent at each switch %s" % [
+				workers, _first_difference(forgot["payloads"], toggled["payloads"])],
+			not loaded or (_first_difference(forgot["payloads"], toggled["payloads"]) == ""
+				and _first_difference(forgot["normal_states"], toggled["normal_states"]) == ""))
+
+	var cfg := OS.get_user_data_dir().path_join("dot_net_native_probe.cfg")
+	var probe := ConfigFile.new()
+	probe.set_value("libraries", "never.x86_64", "bin/a.so")
+	probe.set_value("libraries", "%s.x86_64" % OS.get_name().to_lower(), "bin/missing.so")
+	probe.save(cfg)
+	var found := DotNetNative._library_for_platform(cfg)
+	_check("native: a .cfg's library for this platform is found before loading it (%s)" % found,
+		not OS.has_feature("x86_64") or found == cfg.get_base_dir().path_join("bin/missing.so"))
+	DirAccess.remove_absolute(cfg)
+
 
 ## A value for a declaration of [param type], with edge cases every few rounds.
 func _native_sample(type: int, round: int) -> Variant:
@@ -4969,7 +4995,7 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 
 	var host := _parts_manager(label, true, 320)
 	host.config.snapshot_workers = workers
-	host.config.native = native
+	host.config.native = native and variant != "toggle"
 	# 1500 B per window of ten ticks (the window is scripted below): well under what the
 	# entities in view want, so the accumulator decides who waits.
 	host.config.per_client_budget = 1500
@@ -5071,6 +5097,13 @@ func _threads_scenario(label: String, workers: int, skew: bool, variant: String 
 		if rich and tick % 8 == 0:
 			for cached: Dictionary in host.interest._cache.values():
 				cached["at_ms"] = 0
+		# Native on at 10 and off at 24 must resend as a run that forgot every view then.
+		if variant == "toggle" and (tick == 10 or tick == 24):
+			if native:
+				host.config.native = tick == 10
+			else:
+				for c in behaviours:
+					c._views.clear()
 		var before := payloads.size()
 		host.server_tick(tick)
 		var per_peer := {}

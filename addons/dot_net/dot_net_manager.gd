@@ -984,9 +984,7 @@ func _snapshot_workers() -> int:
 func _native_for_snapshot() -> Object:
 	if config == null or not config.native:
 		if _native != null:
-			for identity in registry.all():
-				for behaviour in identity.behaviours:
-					behaviour._native_core = null
+			_reset_send_views()
 			_native = null
 			_native_tried = false
 			_native_note = "off"
@@ -995,6 +993,7 @@ func _native_for_snapshot() -> Object:
 		_native_tried = true
 		var res := DotNetNative.make_core(config)
 		if res.ok:
+			_reset_send_views()
 			_native = res.value
 			_native_note = "on (%s)" % DotNetNative.describe()["from"]
 			DotLog.info(CHANNEL, "snapshots are built natively", DotNetNative.describe())
@@ -1003,6 +1002,15 @@ func _native_for_snapshot() -> Object:
 			DotLog.warn(CHANNEL, "native snapshots asked for but unavailable; GDScript in use",
 				{"reason": res.error.message})
 	return _native
+
+
+## Every behaviour's send records dropped, GDScript's and the native core's hold on them: each
+## path keeps its own acks, so after a switch the other's are stale and everything is resent.
+func _reset_send_views() -> void:
+	for identity in registry.all():
+		for behaviour in identity.behaviours:
+			behaviour._native_core = null
+			behaviour._views.clear()
 
 
 ## [method _send_snapshots]'s peers built by [param core]: interest and the budget's ranking

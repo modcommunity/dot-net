@@ -621,6 +621,18 @@ IdRec *DotNetNativeCore::_identity_for(const Variant &identity) {
 	return rec;
 }
 
+IdRec *DotNetNativeCore::_known_identity(const Variant &identity) const {
+	Object *obj = identity;
+	if (obj == nullptr) {
+		return nullptr;
+	}
+	auto it = _identities.find(obj->get_instance_id());
+	if (it == _identities.end() || it->second->seen != _serial) {
+		return nullptr;
+	}
+	return it->second.get();
+}
+
 void DotNetNativeCore::_drop_behaviour(BehRec *rec) {
 	for (auto &it : _peers) {
 		Peer *peer = it.second.get();
@@ -702,10 +714,14 @@ void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array
 	job->accumulators = accumulators;
 	job->starved_ticks = starved_ticks;
 	job->relevant.reserve(relevant.size());
+	// Only identities read in begin_snapshot: reading one here would adopt behaviours and reset
+	// views while workers build earlier peers.
 	for (int64_t i = 0; i < relevant.size(); i++) {
-		IdRec *rec = _identity_for(relevant[i]);
+		IdRec *rec = _known_identity(relevant[i]);
 		if (rec != nullptr) {
 			job->relevant.push_back(rec);
+		} else {
+			_unknown_relevant++;
 		}
 	}
 	if (_workers == 0) {
@@ -1237,6 +1253,7 @@ Dictionary DotNetNativeCore::describe() {
 	out["build_usec"] = _last_build_usec;
 	out["wait_usec"] = _last_wait_usec;
 	out["gdscript_encodes"] = _custom_reads;
+	out["unknown_relevant"] = _unknown_relevant;
 	return out;
 }
 

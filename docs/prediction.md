@@ -84,6 +84,8 @@ When players are solid but never push each other (a sweep stops the mover; nobod
 
 Measured in game-arena's network rig with `mp_solidplayers` 1, three clients bumping on one link: against the interpolated render position (the old way) 12-36% of replays corrected on a 13 ms link, up to 0.52 m; against the last heard or extrapolated position 1-43%, up to 0.71 m, because the server's mover meets the remote somewhere neither estimate is; at the view tick 0-2%, 4 cm worst. The rig's numbers per profile are in game-arena's `docs/netcode.md`.
 
+Both ends must reach the same answer at the edges too. The view lag a server collides with is clamped (a client could claim any lag and walk through players), and the client clamps the same way, with the limit sent to it; the clamp keeps the view tick inside the client's interpolation buffer. `value_at` returns null before its oldest sample, as the server's rewind does past its history, and with `cut` it returns null before a jump longer than `cut` (a teleport or respawn, where the server starts its history again): null means the present on both ends.
+
 What it costs: a mover is stopped by where the remote was a view lag ago, so two players can end a tick overlapping where neither client drew it; the family's pass-out rule (a sweep ignores a hull it starts inside) lets them walk apart. A shooter-style engine that predicts against interpolated players accepts the bump corrections instead; with a hard hull and our 0.5 m clean-link bound that was not acceptable. A physics game whose capsules push (`DotPlayerBodyRules.apply_hull` with `move_and_slide` against a rigid body) does not qualify, and the extrapolation above remains its tool.
 
 ## Input batches

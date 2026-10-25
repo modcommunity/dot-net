@@ -1734,7 +1734,8 @@ func _native_values() -> Array:
 	var owner := identity.owner_peer_id
 	out.append(estimated_bits(owner))
 	out.append(estimated_bits(owner + 1))
-	out.append(net_vars.size())
+	# -1 once a core let go of this behaviour (unregistered): the core adopts it again, views reset.
+	out.append(net_vars.size() if _native_core != null else -1)
 	return out
 
 

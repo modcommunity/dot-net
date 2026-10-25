@@ -42,17 +42,42 @@ static func load_library(path: String = "") -> DotResult:
 	else:
 		candidates.append(ProjectSettings.globalize_path(ADDON_CFG))
 		candidates.append(OS.get_executable_path().get_base_dir().path_join(EXE_DIR_CFG))
+	var skipped: PackedStringArray = []
 	for candidate in candidates:
 		var file := ProjectSettings.globalize_path(candidate)
 		if not FileAccess.file_exists(file):
+			skipped.append("%s: absent" % file)
+			continue
+		# Checked first: the engine prints an ERROR for a .cfg with no library for this platform.
+		var library := _library_for_platform(file)
+		if library.is_empty() or not FileAccess.file_exists(library):
+			skipped.append("%s: no library built for this platform" % file)
 			continue
 		var status := GDExtensionManager.load_extension(file)
 		if status == GDExtensionManager.LOAD_STATUS_OK or status == GDExtensionManager.LOAD_STATUS_ALREADY_LOADED:
 			if ClassDB.class_exists(CORE_CLASS):
 				_loaded_from = file
 				return _check_abi()
-		return _refuse("the native library at %s did not load (status %d; is it built for this platform?)" % [file, status])
-	return _refuse("no native library found (%s); build it with addons/dot_net/native/build.sh" % ", ".join(candidates))
+		skipped.append("%s: did not load (status %d)" % [file, status])
+	DotLog.debug(CHANNEL, "no native snapshot library loaded", {"tried": skipped})
+	return _refuse("no native library loaded (%s); build it with addons/dot_net/native/build.sh" % "; ".join(skipped))
+
+
+## The library [param cfg] names for this platform's feature tags, as an absolute path, or "".
+static func _library_for_platform(cfg: String) -> String:
+	var parsed := ConfigFile.new()
+	if parsed.load(cfg) != OK or not parsed.has_section("libraries"):
+		return ""
+	for key in parsed.get_section_keys("libraries"):
+		var fits := true
+		for tag in key.split("."):
+			if not OS.has_feature(tag):
+				fits = false
+				break
+		if fits:
+			var path := String(parsed.get_value("libraries", key, ""))
+			return ProjectSettings.globalize_path(path) if path.is_absolute_path() else cfg.get_base_dir().path_join(path)
+	return ""
 
 
 static func _check_abi() -> DotResult:
