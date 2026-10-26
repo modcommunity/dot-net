@@ -1,18 +1,8 @@
 extends Node
 
-## A server and two clients in one process, with a seeded link between them that loses,
-## duplicates, delays and reorders every snapshot (and every acknowledgement coming back).
-##
-## [codeblock]
-## godot --headless --path . res://examples/loss_demo.tscn
-## [/codeblock]
-##
-## Two link models: the datagram one (ENet's unreliable: loss, duplicates, jitter wider than
-## the gap between packets) and the stream one (a WebSocket: nothing lost, repeated or
-## reordered, only late). Real sockets are [code]relay_demo[/code]'s; this is what the
-## manager does with what arrives, many seeds over, with the invariants a game relies on:
-## state converges once the link heals, nothing older than what was applied is ever applied
-## again, and the counters say what happened.
+## A server and two clients with a seeded link that loses, duplicates, delays and reorders (datagram)
+## or only delays (stream). Over many seeds, state converges once it heals and nothing older applies.
+## Run: [code]godot --headless --path . res://examples/loss_demo.tscn[/code]
 
 const SEEDS := [11, 2026, 90210]
 const TICK_RATE := 60
@@ -159,8 +149,6 @@ class EngineErrors extends Logger:
 	func count() -> int:
 		return _seen
 
-
-# --- Rig ---------------------------------------------------------------------
 
 func _build_mover(_context: Dictionary) -> Node:
 	return _make_entity().get_parent()
@@ -339,8 +327,6 @@ func _report_mismatch(rig: Rig) -> void:
 				print("    entity %d client %d: server x=%.3f h=%d g=%s tag=%s | client %s"
 					% [i, index, s.position.x, s.health, s.grounded, s.tag, v])
 
-
-# --- Sections ----------------------------------------------------------------
 
 func _datagram_sections() -> void:
 	_sections_entered += 1

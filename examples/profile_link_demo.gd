@@ -1,10 +1,7 @@
 extends Node
 
-## Exercises [DotNetProfileLink]: a server and two clients, one process, payloads pumped by hand.
-##
-## [codeblock]
-## godot --headless --path . res://examples/profile_link_demo.tscn
-## [/codeblock]
+## Exercises [DotNetProfileLink]: a server and two clients, payloads pumped by hand.
+## Run: [code]godot --headless --path . res://examples/profile_link_demo.tscn[/code]
 
 const SECTIONS := 6
 const CHECKS := 39

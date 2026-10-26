@@ -389,13 +389,9 @@ func sample(net_id: int, server_tick: float) -> Dictionary:
 	return (track.samples[track.samples.size() - 1]["values"] as Dictionary).duplicate()
 
 
-## [param property] of an entity as it was drawn at [param render_tick] (already behind by the
-## delay): the bracketing samples blended, the newest past the end, null when unknown or older
-## than the buffer. With [param cut] > 0 a jump longer than it between two samples after
-## [param render_tick] is a teleport, and nothing before it is known either (null). Counts
-## nothing and never extrapolates, so a replay gets the first answer again. What a predicting
-## client collides with when the server rewinds to the same view tick
-## (docs/prediction.md#bumping-a-remote).
+## [param property] as drawn at [param render_tick]: the bracketing samples blended, the newest
+## past the end, null when unknown or older than the buffer. A jump over [param cut] after it
+## is a teleport. Counts nothing, never extrapolates (docs/prediction.md#bumping-a-remote).
 func value_at(net_id: int, property: StringName, render_tick: float, cut: float = 0.0) -> Variant:
 	var track: Track = _tracks.get(net_id)
 	if track == null or track.is_empty():
@@ -425,9 +421,8 @@ func value_at(net_id: int, property: StringName, render_tick: float, cut: float 
 
 
 ## The two snapshot ticks [method value_at] blends at [param render_tick] (x older, y newer;
-## equal past the newest), over every snapshot received; (-1, -1) before the oldest. A
-## command carries them so the server rewinds between the same two ticks the client drew
-## between, a lost snapshot included (docs/prediction.md#bumping-a-remote).
+## equal past the newest); (-1, -1) before the oldest. A command carries them so the server
+## rewinds between the same two (docs/prediction.md#bumping-a-remote).
 func bracket_at(render_tick: float) -> Vector2i:
 	if _timeline.is_empty() or render_tick < float(_timeline[0]):
 		return Vector2i(-1, -1)

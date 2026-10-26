@@ -1,17 +1,8 @@
 extends Node
 
-## Snapshot cost on a scripted server: N peers, each owning a predicted player, and a crowd of
-## server-owned NPCs, moving every tick, acked two snapshots late. No game, no physics: the
-## manager's snapshot half alone, in seconds rather than a game probe's minutes.
-##
-## [codeblock]
-## godot --headless --path . res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213
-##     [--ticks=60] [--warm=20] [--relevance=off] [--radius=60] [--workers=N] [--cap=192]
-##     [--far-every=N --far=M] [--far-coherent] [--far-tiers=T] [--send-budget=K] [--players-always] [--hash] [--native] [--native-interest]
-## [/codeblock]
-##
-## [code]--hash[/code] prints one digest of every payload sent, in order: two builds of dot-net
-## that print the same digest sent the same bytes. Prints one [code]BENCH {json}[/code] line.
+## Snapshot cost on a scripted server: N peers each owning a predicted player, plus NPCs, moving
+## every tick. Run: [code]res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213[/code]; [code]--hash[/code]
+## prints a digest of every payload sent, [code]BENCH {json}[/code] the result.
 
 class Player extends DotNetBehaviour:
 	var position := Vector3.ZERO
@@ -112,7 +103,8 @@ func _ready() -> void:
 	_run.call_deferred()
 
 
-func _run() -> void:
+## The server under test, set up from the command-line knobs.
+func _make_host() -> DotNetManager:
 	var host := DotNetManager.new()
 	host.name = "Bench"
 	host.is_server = true
@@ -143,6 +135,11 @@ func _run() -> void:
 	host.interest.far_distance = _far
 	host.interest.far_coherent = _far_coherent
 	host.interest.far_tiers = _far_tiers
+	return host
+
+
+func _run() -> void:
+	var host := _make_host()
 
 	var digest := HashingContext.new()
 	var _d := digest.start(HashingContext.HASH_MD5)

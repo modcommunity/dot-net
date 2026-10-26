@@ -1,4 +1,4 @@
-extends Node
+extends "selftest/netcode_tests.gd"
 
 ## Runs a server and a client in one process and checks the netcode works.
 ##
@@ -13,512 +13,12 @@ extends Node
 ##
 ## Exits non-zero on any failure, so it works as a smoke test in CI.
 
-# --- Test fixtures ---------------------------------------------------------
-
-## A movement component, of the kind a game would write.
-class Movement extends DotNetBehaviour:
-	var position: Vector3 = Vector3.ZERO
-	var velocity: Vector3 = Vector3.ZERO
-	var grounded: bool = true
-	var health: int = 100
-
-	## Input applied this tick, set by the manager or by prediction.
-	var current_input: DemoInput = null
-
-	## Whether a tick moves the entity's node too, as a game's does. The predictor measures
-	## a correction off the node ([method DotNetIdentity.world_position]); off by default
-	## so every section written before it sees the node it always saw.
-	var moves_body: bool = false
-
-	## Whether the simulation runs on state of its own, copied into the properties after
-	## each tick and back out of them in [method _net_state_applied], as every game's
-	## controller does. Off by default: the sections before it simulate on the properties.
-	var keeps_own_state: bool = false
-	## False plays a dead player: DotNetBehaviour._net_predicts.
-	var predicts: bool = true
-	var _sim_position: Vector3 = Vector3.ZERO
-	var _sim_velocity: Vector3 = Vector3.ZERO
-
-	func _net_predicts() -> bool:
-		return predicts
-
-	func _register_net_vars() -> void:
-		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION) \
-			.interpolated().with_priority(5.0)
-		replicate(&"velocity", DotNetVar.Type.VECTOR3_VELOCITY) \
-			.with_epsilon(0.02)
-		replicate(&"grounded", DotNetVar.Type.BOOL)
-		replicate(&"health", DotNetVar.Type.UINT).bits(8).interpolated()
-
-	func _net_apply_input(input: DotNetInput, _tick: int) -> void:
-		current_input = input as DemoInput
-
-	## Deterministic given the same input and starting state — the property the
-	## whole prediction model depends on.
-	func _net_simulate(_tick: int, delta: float) -> void:
-		if keeps_own_state:
-			if current_input != null:
-				_sim_velocity.x = current_input.move.x * 10.0
-				_sim_velocity.z = current_input.move.y * 10.0
-			_sim_position += _sim_velocity * delta
-			position = _sim_position
-			velocity = _sim_velocity
-			return
-		if current_input != null:
-			velocity.x = current_input.move.x * 10.0
-			velocity.z = current_input.move.y * 10.0
-
-		position += velocity * delta
-		if moves_body:
-			_move_body()
-
-	func _net_state_applied(_tick: int) -> void:
-		if keeps_own_state:
-			_sim_position = position
-			_sim_velocity = velocity
-
-	func _move_body() -> void:
-		var body := get_parent() as Node3D
-		if body != null and body.is_inside_tree():
-			body.global_position = position
-
-	func _net_record_history() -> Dictionary:
-		return {"grounded": grounded}
-
-
-## A behaviour that records what the interpolator told it.
-##
-## Exists because the interesting question about interpolation is not whether it computes
-## a smooth value — [method DotNetInterpolator.sample] is checked directly above — but
-## whether anything is ever told about it. A game copies replicated state into a node from
-## a hook, and if the only hook it has is the one a snapshot fires, every remote entity
-## moves at the snapshot rate while the interpolated value sits in a property nobody read.
-## Counts the engine's own errors while installed. The only way a suite can assert that
-## something produced NO `Condition "!is_inside_tree()"` line: those go to stderr, change no
-## exit code, and a green run that prints ten of them is the shape this family keeps
-## finding in its logs.
-class EngineErrors extends Logger:
-	var _lock := Mutex.new()
-	var _seen := PackedStringArray()
-
-	func _log_error(
-		_function: String, _file: String, _line: int, code: String, _rationale: String,
-		_editor_notify: bool, _error_type: int, _script_backtraces: Array[ScriptBacktrace]
-	) -> void:
-		_lock.lock()
-		_seen.append(code)
-		_lock.unlock()
-
-	func _log_message(_message: String, _error: bool) -> void:
-		pass
-
-	func count() -> int:
-		_lock.lock()
-		var n := _seen.size()
-		_lock.unlock()
-		return n
-
-
-class Interpolated extends DotNetBehaviour:
-	var position: Vector3 = Vector3.ZERO
-	var health: int = 100
-
-	## Where the interpolated value was copied to. What a game's node position would be.
-	var rendered: Vector3 = Vector3.ZERO
-	var notifications: int = 0
-	var last_tick: int = -1
-
-	func _register_net_vars() -> void:
-		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
-		replicate(&"health", DotNetVar.Type.UINT).bits(8)
-
-	func _net_interpolated(tick: int) -> void:
-		notifications += 1
-		last_tick = tick
-		rendered = position
-
-
-## A [Movement] that counts its own ticks and, once, unregisters another entity and takes it
-## out of the tree from inside its `_net_simulate`: a round re-laying its map mid-tick (#30).
-class Unregisters extends Movement:
-	var host: DotNetManager = null
-	var victim: DotNetIdentity = null
-	var simulated: int = 0
-
-	func _net_simulate(tick: int, delta: float) -> void:
-		simulated += 1
-		super._net_simulate(tick, delta)
-		if victim != null and host != null:
-			var _gone := host.registry.unregister(victim.net_id)
-			var body := victim.get_parent()
-			if body != null and body.get_parent() != null:
-				body.get_parent().remove_child(body)
-			victim = null
-
-
-## A [Movement] that records every snapshot that told it anything, as a game's per-snapshot
-## bookkeeping does (`last_state_tick`, a relevance check, a redraw).
-class Counted extends Movement:
-	var applied: int = 0
-	var last_applied: int = -1
-
-	func _net_state_applied(tick: int) -> void:
-		applied += 1
-		last_applied = tick
-
-
-## A [Counted] with the property kinds the pooled build has to encode the same as the inline
-## one: a string and a byte array (byte-aligned, so their bits depend on where they start),
-## and a property limited to a rate far too slow to send twice in a run.
-class Rich extends Counted:
-	var title: String = ""
-	var blob: PackedByteArray = PackedByteArray()
-	var rated: int = 0
-
-	func _register_net_vars() -> void:
-		super._register_net_vars()
-		replicate(&"title", DotNetVar.Type.STRING)
-		replicate(&"blob", DotNetVar.Type.BYTES)
-		replicate(&"rated", DotNetVar.Type.UINT).bits(16).at_most(0.01)
-
-
-## A [Rich] with what only GDScript encodes for the native core (a custom codec that aligns, an
-## int sent as a string) and the rotations it encodes itself, for [method _test_native].
-class Coded extends Rich:
-	var code: Array = []
-	var turn: float = 0.0
-	var facing: Quaternion = Quaternion.IDENTITY
-	var aim: Vector3 = Vector3.FORWARD
-	var label: int = 0
-
-	func _register_net_vars() -> void:
-		super._register_net_vars()
-		replicate_custom(&"code", _write_code, _read_code)
-		replicate(&"turn", DotNetVar.Type.ANGLE).bits(10)
-		replicate(&"facing", DotNetVar.Type.QUATERNION)
-		replicate(&"aim", DotNetVar.Type.DIRECTION).bits(11).with_epsilon(0.01)
-		replicate(&"label", DotNetVar.Type.STRING)
-
-	func _write_code(w: DotNetWriter, value: Variant) -> void:
-		var parts: Array = value
-		w.write_uint(parts.size(), 3)
-		for part: String in parts:
-			w.write_string(part)
-
-	func _read_code(r: DotNetReader) -> Variant:
-		var out: Array = []
-		for _i in r.read_uint(3):
-			out.append(r.read_string())
-		return out
-
-
-## A [Movement] that, on one tick and from inside its `_net_simulate`, spawns the first entity
-## a peer owns: that peer's observer is registered after the tick's identity list was read.
-class SpawnsFirst extends Movement:
-	var host: DotNetManager = null
-	var peer: int = 0
-	var at_tick: int = 3
-	var spawned: bool = false
-
-	func _net_simulate(tick: int, delta: float) -> void:
-		super._net_simulate(tick, delta)
-		if not spawned and tick == at_tick and host != null:
-			spawned = true
-			var _made := host.spawner.spawn(&"counted", peer, Transform3D.IDENTITY, tick)
-
-
-## A distance strategy subclassed without saying it is thread-safe.
-class PlainDistance extends DotNetInterestDistance:
-	pass
-
-
-## Distance interest that records whether it was ever asked about an observer whose position
-## was not frozen, from any thread: the worker's read the freeze exists to prevent.
-class FrozenProbe extends DotNetInterestDistance:
-	var unfrozen_asks: int = 0
-	var asks_with_observer: int = 0
-
-	func _is_relevant(observer: DotNetIdentity, entity: DotNetIdentity, context: Dictionary) -> bool:
-		if observer != null:
-			asks_with_observer += 1
-			if not observer.is_position_frozen():
-				unfrozen_asks += 1
-		return super._is_relevant(observer, entity, context)
-
-	func is_thread_safe() -> bool:
-		return true
-
-
-## A bot the server walks back and forth along x at a constant speed, reversing at once at
-## each end: a pure function of the tick ([method at]), so the server's truth at any tick is
-## known without asking the server. On a receiving client it records what it last heard.
-class Pacer extends DotNetBehaviour:
-	const NEAR_X := 1.5
-	const FAR_X := 5.5
-
-	var position: Vector3 = Vector3(FAR_X, 0.0, 0.0)
-	var velocity: Vector3 = Vector3.ZERO
-	var speed: float = 4.0
-
-	## The snapshot tick the client last heard this bot at, and where. -1 until then.
-	var heard_tick: int = -1
-	var heard_position: Vector3 = Vector3.ZERO
-
-	func _register_net_vars() -> void:
-		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
-		replicate(&"velocity", DotNetVar.Type.VECTOR3_VELOCITY)
-
-	## Where the server has it after simulating [param tick]: from the far end toward the
-	## player, back, and again.
-	func at(tick: int, delta: float) -> Array:
-		var span := FAR_X - NEAR_X
-		var travelled := fposmod(float(tick) * delta * speed, 2.0 * span)
-		if travelled < span:
-			return [Vector3(FAR_X - travelled, 0.0, 0.0), Vector3(-speed, 0.0, 0.0)]
-		return [Vector3(NEAR_X + travelled - span, 0.0, 0.0), Vector3(speed, 0.0, 0.0)]
-
-	func _net_simulate(tick: int, delta: float) -> void:
-		var now := at(tick, delta)
-		position = now[0]
-		velocity = now[1]
-
-	func _net_state_applied(tick: int) -> void:
-		var said := received_values()
-		heard_tick = tick
-		heard_position = said.get(&"position", heard_position)
-
-
-## A predicted player that walks +x into a [Pacer] and is pushed back out of it along x:
-## the smallest simulation in which a client predicts a bump against something it does not
-## predict. [member obstacle_at] answers where the bot is
-## for a tick, `Vector3.INF` for "collide with nothing"; the server's answer is the truth,
-## the client's is whatever estimate is under test.
-class Bumper extends DotNetBehaviour:
-	## Two capsule radii, 0.35 m each, as dot-player-controller's standing hull.
-	const APART := 0.7
-	const WALK := 3.0
-
-	var position: Vector3 = Vector3.ZERO
-	var velocity: Vector3 = Vector3.ZERO
-	var current_input: DemoInput = null
-	var obstacle_at: Callable = Callable()
-
-	func _register_net_vars() -> void:
-		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
-		replicate(&"velocity", DotNetVar.Type.VECTOR3_VELOCITY)
-
-	func _net_apply_input(input: DotNetInput, _tick: int) -> void:
-		current_input = input as DemoInput
-
-	func _net_simulate(tick: int, delta: float) -> void:
-		if current_input != null:
-			velocity = Vector3(current_input.move.x, 0.0, current_input.move.y) * WALK
-		position += velocity * delta
-		if not obstacle_at.is_valid():
-			return
-		var bot: Vector3 = obstacle_at.call(tick)
-		if not bot.is_finite():
-			return
-		# Along x only, as in a corridor one hull wide: the quantised position carries a few
-		# millimetres of z, and a disc push would turn them into a sideways slide.
-		if absf(position.x - bot.x) < APART:
-			position.x = bot.x + signf(position.x - bot.x + 0.0001) * APART
-
-
-## Relevant unless excluded, by net id. What "it walked out of view" is to a test.
-class ExcludeInterest extends DotNetInterest:
-	var excluded := {}
-
-	func _init() -> void:
-		strategy_name = "all-but"
-		evaluation_interval_sec = 0.0
-
-	func _is_relevant(
-		_observer: DotNetIdentity,
-		entity: DotNetIdentity,
-		_context: Dictionary
-	) -> bool:
-		return not excluded.has(entity.net_id)
-
-
-## A player's controls.
-class DemoInput extends DotNetInput:
-	var move: Vector2 = Vector2.ZERO
-	var fire: bool = false
-
-	func _write(w: DotNetWriter) -> void:
-		w.write_float_range(move.x, -1.0, 1.0, 10)
-		w.write_float_range(move.y, -1.0, 1.0, 10)
-		w.write_bool(fire)
-
-	func _read(r: DotNetReader) -> void:
-		move.x = r.read_float_range(-1.0, 1.0, 10)
-		move.y = r.read_float_range(-1.0, 1.0, 10)
-		fire = r.read_bool()
-
-	func _sanitise() -> void:
-		# A client can send any representable vector; only the server decides what a
-		# legal one is.
-		move = move.limit_length(1.0)
-
-	func _neutralise() -> void:
-		move = Vector2.ZERO
-		fire = false
-
-
-## A command-shaped member, as DotFpsCommand is in the games.
-class DemoCommand extends RefCounted:
-	var move := Vector2.ONE
-	var yaw := 1.5
-	var buttons := 7
-
-	func neutralise() -> void:
-		move = Vector2.ZERO
-		buttons = 0
-
-
-## An input with no _neutralise of its own: only members.
-class MemberInput extends DotNetInput:
-	var cmd := DemoCommand.new()
-	var plain := 3
-
-	func _write(_w: DotNetWriter) -> void:
-		pass
-
-	func _read(_r: DotNetReader) -> void:
-		pass
-
-
-## A game's own message type.
-class ChatMessage extends DotNetMessage:
-	var text: String = ""
-
-	func _type_name() -> StringName:
-		return &"demo.chat"
-
-	func _write(w: DotNetWriter) -> void:
-		w.write_string(text, 128)
-
-	func _read(r: DotNetReader) -> void:
-		text = r.read_string(128)
-
-	func _validate() -> DotResult:
-		if text.strip_edges() == "":
-			return DotResult.fail(DotError.CODE_INVALID, "Empty chat message.")
-		return DotResult.success(true)
-
-
-## A server-to-client-only message, to prove direction is enforced.
-class ServerNotice extends DotNetMessage:
-	var notice: String = ""
-
-	func _type_name() -> StringName:
-		return &"demo.notice"
-
-	func _write(w: DotNetWriter) -> void:
-		w.write_string(notice, 128)
-
-	func _read(r: DotNetReader) -> void:
-		notice = r.read_string(128)
-
-
-## [code]demo.chat[/code] one build later: a field appended, read behind has_more().
-class ChatMessageV2 extends DotNetMessage:
-	var text: String = ""
-	var colour: int = 7
-
-	func _type_name() -> StringName:
-		return &"demo.chat"
-
-	func _write(w: DotNetWriter) -> void:
-		w.write_string(text, 128)
-		w.write_uint(colour, 8)
-
-	func _read(r: DotNetReader) -> void:
-		text = r.read_string(128)
-		if r.has_more():
-			colour = r.read_uint(8)
-
-
-## A type one end has and the other does not, which a peer can do without.
-class ExtraMessage extends DotNetMessage:
-	var value: int = 0
-
-	func _type_name() -> StringName:
-		return &"demo.extra"
-
-	func _write(w: DotNetWriter) -> void:
-		w.write_uint(value, 16)
-
-	func _read(r: DotNetReader) -> void:
-		value = r.read_uint(16)
-
-
-## A type one end has and REQUIRES, which a peer cannot do without.
-class VitalMessage extends DotNetMessage:
-	func _type_name() -> StringName:
-		return &"demo.vital"
-
-	func _write(_w: DotNetWriter) -> void:
-		pass
-
-	func _read(_r: DotNetReader) -> void:
-		pass
-
-
-# --- Harness ---------------------------------------------------------------
-
-var _passed := 0
-var _failed := 0
 
 ## Every check this suite makes, the last one included. The section counter below cannot
 ## see a check that never ran inside a section that had already announced itself — a
 ## runtime error aborts the rest of that function and the counter is satisfied — so the
 ## total is compared with this. Raise it with every check added.
 const CHECKS := 522
-
-## Suspending sections entered, and suspending sections that ran to the end.
-##
-## A section that suspends must be called with [code]await[/code]. Called without
-## it, the section runs only as far as its first suspension and everything after
-## that — including its assertions — is silently dropped, while [method _run]
-## carries straight on to [method SceneTree.quit]. Nothing reports it: the count
-## printed at the end is a count of checks that ran, so checks that never ran
-## cannot lower it, and the exit code stays 0.
-##
-## That is not hypothetical. [method _test_interpolation] was called without
-## [code]await[/code], so "adaptive buffer responds" never ran once in this demo's
-## life, and the locals of the suspended coroutine — two interpolators, their two
-## configs and three tracks — were the seven objects Godot reported leaked at
-## exit. Every previous audit read the count, saw 125, and believed it.
-##
-## Every suspending section increments both: the first on entry, the second on its
-## last line. [method _run] compares them, which turns a silent drop into a failed
-## check. A new suspending section must do the same.
-var _sections_entered := 0
-var _sections_completed := 0
-
-var server: DotNetManager
-var client: DotNetManager
-
-## Payloads in flight, so latency and loss can be simulated.
-var _in_flight: Array[Dictionary] = []
-var _drop_next: int = 0
-var _rng := RandomNumberGenerator.new()
-
-
-## Observers-only state, as a game's alive/health pair: set once, never changing again.
-class ObserverVars extends DotNetBehaviour:
-	var alive: bool = false
-	var hp: int = 0
-	var armour: int = 0
-	var wobble: int = 0
-
-	func _register_net_vars() -> void:
-		replicate(&"alive", DotNetVar.Type.BOOL).to_observers_only()
-		replicate(&"hp", DotNetVar.Type.UINT).bits(8).to_observers_only()
-		replicate(&"armour", DotNetVar.Type.UINT).bits(8)
-		replicate(&"wobble", DotNetVar.Type.UINT).bits(8)
 
 
 func _ready() -> void:
@@ -594,180 +94,6 @@ func _run() -> void:
 	if DotPlatform.is_headless():
 		await get_tree().process_frame
 		get_tree().quit(1 if _failed > 0 else 0)
-
-
-# --- Wire format -----------------------------------------------------------
-
-func _test_wire() -> void:
-	print("[wire]")
-
-	var w := DotNetWriter.new()
-	w.write_bool(true)
-	w.write_bool(false)
-	w.write_uint(12345, 16)
-	w.write_int(-4321, 16)
-	w.write_varint(300)
-	w.write_svarint(-77)
-	w.write_string("hello wire")
-	w.write_bytes(PackedByteArray([1, 2, 3, 250]))
-
-	var r := w.to_reader()
-	_check("bool true", r.read_bool() == true)
-	_check("bool false", r.read_bool() == false)
-	_check("uint16", r.read_uint(16) == 12345)
-	_check("int16 negative", r.read_int(16) == -4321)
-	_check("varint", r.read_varint() == 300)
-	_check("svarint negative", r.read_svarint() == -77)
-	_check("string", r.read_string() == "hello wire")
-	_check("bytes", r.read_bytes() == PackedByteArray([1, 2, 3, 250]))
-	_check("no overrun", r.ok())
-
-	# Bit packing must not waste bytes: 3 bits should occupy 1 byte, not 3.
-	var packed := DotNetWriter.new()
-	for _i in range(8):
-		packed.write_bits(1, 1)
-	_check("8 bits pack into 1 byte", packed.byte_length() == 1)
-
-	# Reading past the end must be safe and detectable, not a crash.
-	var short := DotNetReader.new(PackedByteArray([0x01]))
-	short.read_uint(32)
-	_check("overrun detected", not short.ok())
-	_check("overrun returns zero", short.read_uint(8) == 0)
-
-	# A hostile length prefix must not cause an allocation attempt.
-	var hostile := DotNetWriter.new()
-	hostile.write_varint(4_000_000_000)
-	var hostile_reader := hostile.to_reader()
-	var refused := hostile_reader.read_bytes(1024)
-	_check("oversized length refused", refused.is_empty() and not hostile_reader.ok())
-
-
-## A run of bits encoded once and laid into another writer, at every bit offset, with a
-## string in it. A string is written byte-aligned, so its padding depends on where in a byte
-## it starts: state encoded at one offset and laid in at another read back as garbage from
-## the string on (game-playground's NPC weapon id, the first time snapshots did this).
-func _test_bit_runs() -> void:
-	print("")
-	print("[bit runs]")
-	var all_read := true
-
-	for pad in range(8):
-		var scratch := DotNetWriter.new()
-		if pad > 0:
-			scratch.write_bits(0, pad)
-		scratch.write_uint(5, 6)
-		scratch.write_string("zee_smg")
-		scratch.write_uint(37, 7)
-
-		var into := DotNetWriter.new()
-		if pad > 0:
-			into.write_bits(0b1011011 & ((1 << pad) - 1), pad)
-		into.write_bit_run(scratch.to_bytes(), pad, scratch.bit_length())
-		into.write_uint(9, 4)
-
-		var reader := into.to_reader()
-		var head := reader.read_uint(pad) if pad > 0 else 0
-		var a := reader.read_uint(6)
-		var text := reader.read_string()
-		var b := reader.read_uint(7)
-		var tail := reader.read_uint(4)
-		all_read = all_read and head == (0b1011011 & ((1 << pad) - 1)) and a == 5 \
-			and text == "zee_smg" and b == 37 and tail == 9
-
-	_check("a run laid in at each of the eight bit offsets reads back, string and all", all_read)
-
-	# And the shifted run: one copy encoded at bit 0, with nothing aligned in it, laid in
-	# at every offset -- the path every moving player's state takes.
-	var shifted_read := true
-	var source := DotNetWriter.new()
-	source.write_uint(5, 6)
-	source.write_float_range(12.5, -100.0, 100.0, 16)
-	source.write_uint(37, 7)
-	for pad in range(8):
-		var into := DotNetWriter.new()
-		if pad > 0:
-			into.write_bits(0b1101101 & ((1 << pad) - 1), pad)
-		into.write_shifted_run(source.to_bytes(), source.bit_length())
-		into.write_uint(9, 4)
-		var reader := into.to_reader()
-		var head := reader.read_uint(pad) if pad > 0 else 0
-		var a := reader.read_uint(6)
-		var f := reader.read_float_range(-100.0, 100.0, 16)
-		var b := reader.read_uint(7)
-		var tail := reader.read_uint(4)
-		shifted_read = shifted_read and head == (0b1101101 & ((1 << pad) - 1)) and a == 5 \
-			and absf(f - 12.5) < 0.01 and b == 37 and tail == 9
-	_check("and a shifted run, encoded once at bit 0, reads back at each of them", shifted_read)
-
-
-func _test_quantisation() -> void:
-	print("")
-	print("[quantisation]")
-
-	var config := DotNetConfig.new()
-	var bits := config.position_bits()
-
-	var w := DotNetWriter.new()
-	var original := Vector3(123.456, -78.9, 1000.001)
-	w.write_vector3_range(original, -config.world_extent, config.world_extent, bits)
-
-	var back := w.to_reader().read_vector3_range(
-		-config.world_extent, config.world_extent, bits
-	)
-
-	# The error must be within one quantisation step, not merely "close".
-	var step := (config.world_extent * 2.0) / float((1 << bits) - 1)
-	_check(
-		"position within one step (%.4f m)" % step,
-		original.distance_to(back) < step * 2.0
-	)
-
-	# Out-of-range values clamp rather than wrap. Wrapping would teleport an entity
-	# across the world.
-	var far := DotNetWriter.new()
-	far.write_float_range(99999.0, -100.0, 100.0, 16)
-	_check(
-		"out of range clamps",
-		is_equal_approx(far.to_reader().read_float_range(-100.0, 100.0, 16), 100.0)
-	)
-
-	# Angles wrap, because they are cyclic.
-	var angle := DotNetWriter.new()
-	angle.write_angle(370.0, 12)
-	var read_angle := angle.to_reader().read_angle(12)
-	_check("angle wraps to 0-360", read_angle < 15.0)
-
-	# Quaternion smallest-three must survive a round trip accurately.
-	var worst := 0.0
-	for i in range(24):
-		var q := Quaternion(
-			Vector3(1, 2, 3).normalized(), float(i) * 0.25
-		).normalized()
-
-		var qw := DotNetWriter.new()
-		qw.write_quaternion(q, 12)
-		var qb := qw.to_reader().read_quaternion(12)
-
-		# q and -q are the same rotation, so compare the angle between them.
-		worst = maxf(worst, absf(q.angle_to(qb)))
-
-	_check("quaternion within 1 degree (%.3f)" % rad_to_deg(worst), rad_to_deg(worst) < 1.0)
-
-	# A quaternion costs far less than four floats — the whole point.
-	var qsize := DotNetWriter.new()
-	qsize.write_quaternion(Quaternion.IDENTITY, 9)
-	_check("quaternion under 5 bytes", qsize.byte_length() <= 5)
-
-	# Directions must come back unit-length.
-	var dir := DotNetWriter.new()
-	dir.write_direction(Vector3(1, 2, -3).normalized(), 12)
-	var read_dir := dir.to_reader().read_direction(12)
-	_check("direction stays normalised", absf(read_dir.length() - 1.0) < 0.01)
-
-	# A degenerate direction must not produce NaN on the far side.
-	var zero := DotNetWriter.new()
-	zero.write_direction(Vector3.ZERO, 12)
-	_check("zero direction is finite", zero.to_reader().read_direction(12).is_finite())
 
 
 # --- Messages --------------------------------------------------------------
@@ -1093,95 +419,6 @@ func _test_mismatched_schemas() -> void:
 	c.free()
 
 
-## The body of a schema payload, as `decode` would hand it to `adopt_peer_schema`.
-func _schema_body(payload: PackedByteArray) -> DotNetReader:
-	var r := DotNetReader.new(payload)
-	var id := r.read_uint(DotNetMessageRegistry.ID_BITS)
-	var bits := r.read_varint()
-	if id != DotNetMessageRegistry.SCHEMA_ID:
-		return DotNetReader.new(PackedByteArray())
-	return r.take_bits(bits)
-
-
-func _test_packets() -> void:
-	print("")
-	print("[packets]")
-
-	var registry := DotNetMessageRegistry.new()
-	registry.register(&"demo.chat", ChatMessage)
-	registry.seal()
-
-	var batch := DotNetPacket.Batch.new(42)
-	for i in range(5):
-		var m := ChatMessage.new()
-		m.text = "message %d" % i
-		batch.add(m, 16)
-
-	var encoded := DotNetPacket.encode_batch(batch, registry)
-	_check("batch encoded", encoded.ok)
-
-	var decoded := DotNetPacket.decode_batch(encoded.value, registry, 3, true)
-	_check("batch decoded", decoded.ok)
-
-	if decoded.ok:
-		var payload: Dictionary = decoded.value
-		_check("tick survived", int(payload["tick"]) == 42)
-		_check("all five messages", (payload["messages"] as Array).size() == 5)
-		_check(
-			"order preserved",
-			((payload["messages"] as Array)[3] as ChatMessage).text == "message 3"
-		)
-
-	# Batching beats sending separately, which is the reason it exists.
-	var separate := 0
-	for i in range(5):
-		var m := ChatMessage.new()
-		m.text = "message %d" % i
-		var single := DotNetWriter.new()
-		registry.encode(m, single)
-		separate += single.byte_length() + 28  # a conservative UDP+IP header
-	_check(
-		"batching saves overhead (%d vs %d bytes)"
-			% [(encoded.value as PackedByteArray).size() + 28, separate],
-		(encoded.value as PackedByteArray).size() + 28 < separate
-	)
-
-	# Fragmentation round trip.
-	var big := PackedByteArray()
-	big.resize(5000)
-	for i in range(big.size()):
-		big[i] = i % 251
-
-	var fragments := DotNetPacket.fragment(big, 7, 1200)
-	_check("fragmented", fragments.ok and (fragments.value as Array).size() > 1)
-
-	var reassembler := DotNetPacket.Reassembler.new()
-	var whole: PackedByteArray = PackedByteArray()
-
-	# Fed out of order, because that is how they arrive.
-	var pieces: Array = (fragments.value as Array).duplicate()
-	pieces.reverse()
-
-	for piece in pieces:
-		var fed := reassembler.feed(piece)
-		if fed.ok and fed.value != null:
-			whole = fed.value
-
-	_check("reassembled", whole == big)
-	_check("nothing left pending", reassembler.pending_count() == 0)
-
-	# A fragment claiming an out-of-range index must be refused.
-	var bad := DotNetWriter.new()
-	bad.write_uint(1, 16)
-	bad.write_uint(9, 8)
-	bad.write_uint(3, 8)
-	bad.write_bytes(PackedByteArray([1]))
-	_check(
-		"bad fragment index refused",
-		not reassembler.feed(bad.to_bytes()).ok
-	)
-
-
 # --- Clock -----------------------------------------------------------------
 
 func _test_clock() -> void:
@@ -1442,46 +679,7 @@ func _test_interest() -> void:
 	_check("always_relevant included regardless of distance", ids.has(4))
 	_check("observer's own entity included", ids.has(1))
 
-	var thin := DotNetInterestDistance.new()
-	thin.radius = 100000.0
-	thin.evaluation_interval_sec = 0.0
-	_check("thinning is off by default", not thin.thins())
-	thin.far_every = 4
-	thin.far_distance = 50.0
-	var seen := {}
-	for snap in 4:
-		var kept: Array = []
-		var ctx := {"tick": snap * config.ticks_per_snapshot(), "config": config}
-		thin.thin_into(kept, observer, thin.relevant_for(observer, all, 1, ctx), 1, ctx)
-		for identity: DotNetIdentity in kept:
-			seen[identity.net_id] = int(seen.get(identity.net_id, 0)) + 1
-	_check("thinning: own and near every snapshot, a far one once in far_every (%s)" % seen,
-		int(seen.get(1, 0)) == 4 and int(seen.get(2, 0)) == 4 and int(seen.get(3, 0)) == 1 and int(seen.get(4, 0)) == 1)
-
-	# Tiers: 3 is in the first band past 3000 m (every 4th), 4 in the second (every 8th).
-	thin.far_distance = 3000.0
-	thin.far_tiers = 3
-	for coherent: bool in [false, true]:
-		thin.far_coherent = coherent
-		seen = {}
-		var same := true
-		for snap in 8:
-			var ctx := {"tick": snap * config.ticks_per_snapshot(), "config": config}
-			var turns: Array[String] = []
-			for peer in [1, 2]:
-				var kept: Array = []
-				thin.thin_into(kept, observer, thin.relevant_for(observer, all, peer, ctx), peer, ctx)
-				var names := ""
-				for identity: DotNetIdentity in kept:
-					names += "%d," % identity.net_id
-					if peer == 1:
-						seen[identity.net_id] = int(seen.get(identity.net_id, 0)) + 1
-				turns.append(names)
-			same = same and turns[0] == turns[1]
-		_check("tiers: near every snapshot, band 1 one in 4, band 2 one in 8 (%s)" % seen,
-			int(seen.get(2, 0)) == 8 and int(seen.get(3, 0)) == 2 and int(seen.get(4, 0)) == 1)
-		_check("far_coherent %s: two peers %s the same far turns" % [coherent, "share" if coherent else "stagger"],
-			same == coherent)
+	_check_interest_thinning(config, observer, all)
 
 	# The grid must agree with the brute-force answer — that is the whole
 	# correctness requirement for a spatial index.
@@ -1516,18 +714,7 @@ func _test_interest() -> void:
 	_check("interest_cell_size reaches an assigned grid", sized_grid.cell_size == 48.0)
 	sized.queue_free()
 
-	# The two entity caps combine to the tighter one, and 0 means unlimited on
-	# either side rather than "cap at zero".
-	var caps := DotNetConfig.new()
-	caps.max_entities_per_snapshot = 256
-	caps.max_tracked_entities = 64
-	_check("the tighter of the two entity caps wins", caps.entity_cap() == 64)
-	caps.max_tracked_entities = 4096
-	_check("and the other way round", caps.entity_cap() == 256)
-	caps.max_entities_per_snapshot = 0
-	_check("an unlimited snapshot cap leaves the tracked cap", caps.entity_cap() == 4096)
-	caps.max_tracked_entities = 0
-	_check("and both unlimited is unlimited", caps.entity_cap() == 0)
+	_check_entity_caps()
 
 	# The reason the cap goes through prioritise: a cut that drops what the
 	# observer owns is the bug this family has already shipped once.
@@ -1621,89 +808,6 @@ func _test_interest() -> void:
 	for identity in tagged:
 		tagged_ids[identity.net_id] = true
 	_check("custom strategy filters by tag", tagged_ids.has(4) and not tagged_ids.has(2))
-
-
-## A strategy defined entirely outside dot-net.
-class TagInterest extends DotNetInterest:
-	func _init() -> void:
-		strategy_name = "objectives-only"
-		evaluation_interval_sec = 0.0
-
-	func _is_relevant(
-		_observer: DotNetIdentity,
-		entity: DotNetIdentity,
-		_context: Dictionary
-	) -> bool:
-		return entity.has_tag("objective")
-
-
-func _test_budget() -> void:
-	print("")
-	print("[bandwidth]")
-
-	var config := DotNetConfig.new()
-	config.per_client_budget = 1000
-	var budget := DotNetBudget.new(config)
-
-	_check("spending allowed initially", budget.can_spend(1, 500))
-	budget.note_packet(1, 900)
-	_check("spending refused past the budget", not budget.can_spend(1, 500))
-	_check("remaining reported", budget.remaining(1) == 100)
-
-	# The accumulator must stop a low-priority entity being starved forever.
-	var low := _make_entity(&"prop", 0)
-	add_child(low.get_parent())
-	low.net_id = 10
-	low.priority = 0.1
-
-	var high := _make_entity(&"player", 0)
-	add_child(high.get_parent())
-	high.net_id = 11
-	high.priority = 10.0
-
-	var candidates: Array[DotNetIdentity] = [low, high]
-	var scores := {10: 0.1, 11: 10.0}
-
-	var high_first := 0
-	var low_first := 0
-
-	for round_index in range(90):
-		var ordered := budget.accumulate(2, candidates, scores)
-		if ordered[0].net_id == 11:
-			high_first += 1
-			budget.note_sent(2, 11, 10)
-		else:
-			low_first += 1
-			budget.note_sent(2, 10, 10)
-
-	_check("high priority sent more often", high_first > low_first)
-	_check("low priority is not starved (%d of 90)" % low_first, low_first > 0)
-
-	# The order accumulate returns (an integer sort of the accumulators' bits) against a
-	# plain descending sort of the same numbers, with ties, zeros and a wide range.
-	var many: Array[DotNetIdentity] = []
-	var accumulators := {}
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 77
-	for i in 40:
-		var entity := DotNetIdentity.new()
-		entity.net_id = 100 + i
-		many.append(entity)
-		accumulators[entity.net_id] = [0.0, 1.0, 1.0, 0.25, 3.5e6, 1e-9][i % 6] * float(1 + i % 7) \
-			if i % 5 != 0 else rng.randf_range(0.0, 50.0)
-	var by_bits := DotNetBudget._by_accumulator(many, accumulators)
-	var descending := true
-	for i in range(1, by_bits.size()):
-		if float(accumulators[by_bits[i - 1].net_id]) < float(accumulators[by_bits[i].net_id]):
-			descending = false
-	var same_members := by_bits.size() == many.size()
-	for entity in many:
-		if not by_bits.has(entity):
-			same_members = false
-	_check("accumulate orders by accumulator, highest first, losing nobody",
-		descending and same_members)
-	for entity in many:
-		entity.free()
 
 
 func _test_interpolation() -> void:
@@ -1849,6 +953,21 @@ func _test_interpolation() -> void:
 		watcher.notifications == before_predicted
 	)
 
+	_check_render_timeline()
+
+	# Adaptive buffering must grow under jitter.
+	var adaptive := DotNetInterpolator.new(DotNetConfig.new())
+	var initial := adaptive.delay_ticks()
+	for i in range(40):
+		adaptive.note_arrival()
+		# Irregular arrivals.
+		await get_tree().process_frame
+	_check("adaptive buffer responds", adaptive.delay_ticks() >= initial * 0.5)
+	_sections_completed += 1
+
+
+## The render timeline moves between packets, and a late packet does not pull it back.
+func _check_render_timeline() -> void:
 	# --- the render timeline has to move between packets ----------------------
 	#
 	# `server_tick()` is what `render_tick()` — and therefore every interpolated position
@@ -1905,55 +1024,7 @@ func _test_interpolation() -> void:
 		clock.server_tick() == 1009
 	)
 
-	# The same over a jittery link: 64 ticks, a snapshot every second tick, each taking
-	# 1..4 ticks to arrive, so they arrive late, early and out of order.
-	var jit := DotNetClock.new(64, false)
-	jit.adaptive_margin = false
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 64
-	var server_now := 2000
-	var in_flight: Array = []
-	var back_steps := 0
-	var worst_back := 0
-	var worst_off := 0
-	var previous := -1
-	for frame in range(640):
-		server_now += 1
-		if server_now % 2 == 0:
-			in_flight.append([frame + rng.randi_range(1, 4), server_now])
-		jit.advance(1.0 / 64.0)
-		var due: Array = []
-		for packet in in_flight:
-			if int(packet[0]) <= frame:
-				due.append(packet)
-		for packet in due:
-			in_flight.erase(packet)
-			jit.sync_from_server(int(packet[1]), 47.0)
-		if previous >= 0 and jit.received_tick() < previous:
-			back_steps += 1
-			worst_back = maxi(worst_back, previous - jit.received_tick())
-		if frame > 64:
-			worst_off = maxi(worst_off, absi(jit.received_tick() - (server_now - 1)))
-		previous = jit.received_tick()
-	_check(
-		"over a jittery link the receive timeline almost never goes back, and one tick at most (%d times, %d ticks)"
-			% [back_steps, worst_back],
-		back_steps <= 3 and worst_back <= 1
-	)
-	_check(
-		"and stays within a tick or two of the quickest arrival (%d)" % worst_off,
-		worst_off <= 2
-	)
-
-	# Adaptive buffering must grow under jitter.
-	var adaptive := DotNetInterpolator.new(DotNetConfig.new())
-	var initial := adaptive.delay_ticks()
-	for i in range(40):
-		adaptive.note_arrival()
-		# Irregular arrivals.
-		await get_tree().process_frame
-	_check("adaptive buffer responds", adaptive.delay_ticks() >= initial * 0.5)
-	_sections_completed += 1
+	_check_render_timeline_jitter()
 
 
 ## The interpolation buffer is a count of SNAPSHOTS and a render time is a TICK.
@@ -2240,132 +1311,17 @@ func _test_lag_compensation() -> void:
 	_check("with_rewind returns the body's value", str(result) == "tested")
 	_check("with_rewind restored", not history.is_rewound())
 
-	# A replicated node taken out of the tree between ticks — a round re-laying its map
-	# does this, before the identity is unregistered. Recording it read its global basis
-	# and printed an engine error per entity per tick; recording it at all would put a
-	# sample at the origin for a rewind to drag a hitbox through.
-	var gone := _make_entity(&"player", 4)
-	gone.net_id = 21
-	var errors := EngineErrors.new()
-	OS.add_logger(errors)
-	history.record([target, gone], 40)
-	var guarded := history.rewind([target, gone], 38, 40, 0)
-	history.restore()
-	OS.remove_logger(errors)
-	_check("an entity out of the tree is not recorded", history.position_at(21, 40.0) == null)
-	_check("and one in the tree still is", history.position_at(20, 40.0) != null)
-	_check("a rewind skips it and still moves the rest", guarded.ok
-		and int((guarded.value as Dictionary)["rewound"]) == 1)
-	_check("with no engine error from either (%d)" % errors.count(), errors.count() == 0)
-	gone.get_parent().free()
+	_check_history_skips_orphans(history, target)
 
 	# The view tick must account for both latency and interpolation delay.
 	var view := history.client_view_tick(1000, 100.0, 2.0)
 	_check("client view tick is in the past (%d)" % view, view < 1000 and view > 990)
 
 
-# --- Integration -----------------------------------------------------------
-
-## Runs a server and a client against each other over a lossy loopback.
-## Client-side prediction replay, against a server simulating the same inputs.
-##
-## [DotNetPredictor] had no section of its own, and the integration run below does
-## not substitute for one: it feeds a [i]constant[/i] input for all sixty ticks, and
-## a replay that ignores the input history lands on the right answer whenever the
-## input never changes. The zig-zag here is the entire point.
-## A silent peer's last input is repeated for DotNetConfig.starved_input_hold_sec and then
-## neutralised, and a client with no snapshot for prediction_hold_sec predicts on a held input.
-func _test_starved_input() -> void:
-	print("[starved input]")
-	var mi := MemberInput.new()
-	mi._neutralise()
-	_check("the default _neutralise neutralises members and keeps the rest",
-		mi.cmd.move == Vector2.ZERO and mi.cmd.buttons == 0 and mi.cmd.yaw == 1.5 and mi.plain == 3)
-	var moved := []
-	for hold in [0.25, 0.0]:
-		var s := DotNetManager.new()
-		s.is_server = true
-		s.auto_tick = false
-		s.config_file = ""
-		s.service_scope = StringName("starve_%d" % moved.size())
-		s.config = DotNetConfig.new()
-		s.config.starved_input_hold_sec = hold
-		add_child(s)
-		s.setup()
-		s.start()
-		s.add_peer(5)
-		var body := _in_tree(_make_entity(&"player", 5))
-		body.is_authoritative = true
-		var _reg := s.registry.register(body, 0, 0, s.config)
-		for tick in range(1, 6):
-			var input := DemoInput.new()
-			input.tick = tick
-			input.delta = 1.0 / 60.0
-			input.move = Vector2(1.0, 0.0)
-			var _pushed := s.input_buffer_for(5).push(input)
-		for tick in range(1, 61):
-			s.server_tick(tick)
-		var movement := body.behaviours[0] as Movement
-		moved.append([movement.position.x, movement.velocity.length()])
-		_out_of_tree(body)
-		remove_child(s)
-		s.free()
-	# 5 ticks of input, 15 repeated, then still: 20 of 60 ticks of walking.
-	_check("a silent peer is stopped after the hold (%.2f m, %.2f m/s)" % moved[0],
-		absf(float(moved[0][0]) - 10.0 * 20.0 / 60.0) < 0.05 and float(moved[0][1]) == 0.0)
-	_check("and with no hold repeats its last input for ever (%.2f m)" % float(moved[1][0]),
-		absf(float(moved[1][0]) - 10.0) < 0.05)
-
-	var c := DotNetManager.new()
-	c.is_server = false
-	c.local_peer_id = 5
-	c.auto_tick = false
-	c.config_file = ""
-	c.service_scope = &"starve_client"
-	c.config = DotNetConfig.new()
-	add_child(c)
-	c.setup()
-	c.clock.sync_from_server(100, 0.0)
-	c._snapshot_heard_tick = 100
-	var held := []
-	for tick in [110, 100 + ceili(c.config.prediction_hold_sec * 60.0) + 1]:
-		var input := DemoInput.new()
-		input.tick = tick
-		input.delta = 1.0 / 60.0
-		input.move = Vector2(1.0, 0.0)
-		c.predict_tick(tick, input)
-		held.append(input.move.x)
-	_check("a client holds its input only after prediction_hold_sec without a snapshot (%s)" % str(held),
-		held[0] == 1.0 and absf(held[1]) < 0.01 and int(c.describe()["held_ticks"]) == 1)
-	remove_child(c)
-	c.free()
-
-
 func _test_prediction() -> void:
 	print("[prediction]")
 
-	# A client that learns its peer id after setup — from a handshake, as the lobby's does.
-	# The registry kept the id it was built with, so its own entity registered as somebody
-	# else's and was never predicted, on a real socket only: every loopback in the family
-	# set the id before setup.
-	var late := DotNetManager.new()
-	late.name = "LatePeer"
-	late.is_server = false
-	late.service_scope = &"late_peer"
-	late.local_peer_id = 0
-	late.auto_tick = false
-	late.config_file = ""
-	late.config = DotNetConfig.new()
-	add_child(late)
-	var _up := late.setup()
-	late.local_peer_id = 7
-	var mine := _make_entity(&"player", 7)
-	var _registered := late.registry.register(mine, 30, 0, late.config)
-	_check("a peer id set after setup reaches the registry", late.registry.local_peer_id() == 7)
-	_check("so the entity it owns is predicted", mine.is_predicted())
-	mine.get_parent().free()
-	remove_child(late)
-	late.free()
+	_check_late_peer_id()
 
 	var config := DotNetConfig.new()
 	config.enable_prediction = true
@@ -2546,72 +1502,6 @@ func _test_prediction() -> void:
 		_out_of_tree(entity)
 
 
-# --- Correction offsets ---------------------------------------------------
-
-## What a renderer adds to a predicted entity so a correction is eased: every one, and
-## added to what is still easing. Nothing in the family read [method
-## DotNetPredictor.visual_offset] until game-g2gfast's `headless_feel` measured a 30 cm
-## correction jumping the eye in one frame.
-func _test_correction_offsets() -> void:
-	print("[correction offsets]")
-	var config := DotNetConfig.new()
-	config.enable_prediction = true
-	var dt := 1.0 / 60.0
-
-	var inputs: Array[DemoInput] = []
-	for tick in range(1, 21):
-		var input := DemoInput.new()
-		input.tick = tick
-		input.delta = dt
-		input.move = Vector2(1.0, 0.0)
-		inputs.append(input)
-
-	var server_entity := _in_tree(_make_entity(&"player", 2))
-	server_entity.is_authoritative = true
-	var server_movement := server_entity.behaviours[0] as Movement
-	var at_10 := {}
-	for input in inputs:
-		server_movement._net_apply_input(input, input.tick)
-		server_movement._net_simulate(input.tick, dt)
-		if input.tick == 10:
-			at_10 = server_movement.snapshot_values().duplicate()
-
-	var client_entity := _in_tree(_make_entity(&"player", 2))
-	client_entity.is_owner = true
-	client_entity.is_authoritative = false
-	var client_movement := client_entity.behaviours[0] as Movement
-	client_movement.moves_body = true
-	var buffer := DotNetInput.Buffer.new(config.input_history_ticks)
-	for input in inputs:
-		buffer.push(input)
-		client_movement._net_apply_input(input, input.tick)
-		client_movement._net_simulate(input.tick, dt)
-
-	var predictor := DotNetPredictor.new(config)
-
-	# Four millimetres: under the reporting epsilon, and the size a replay from a quantised
-	# state moves a player by on every snapshot.
-	client_movement.position += Vector3(0.004, 0.0, 0.0)
-	client_movement._move_body()
-	var _small := predictor.reconcile(client_entity, 10, at_10, buffer, 20, dt)
-	var small := predictor.visual_offset(client_entity.net_id)
-	_check("a correction under the epsilon is not counted (%d)" % int(predictor.describe()["corrections"]),
-		int(predictor.describe()["corrections"]) == 0)
-	_check("and is still eased (offset %.1f mm)" % (small.length() * 1000.0),
-		absf(small.length() - 0.004) < 0.001)
-
-	# A second correction while the first is easing: added to it, not put in its place.
-	client_movement.position += Vector3(0.3, 0.0, 0.0)
-	client_movement._move_body()
-	var _big := predictor.reconcile(client_entity, 10, at_10, buffer, 20, dt)
-	var both := predictor.visual_offset(client_entity.net_id)
-	_check("a second correction adds to what is still easing (%.1f mm, 304 expected)" % (both.length() * 1000.0),
-		absf(both.length() - 0.304) < 0.003)
-
-	for entity in [server_entity, client_entity]:
-		_out_of_tree(entity)
-
-
 # --- The buffer growing ----------------------------------------------------
 
 ## A link that turns jittery: the interpolation buffer has to grow, and it must not move
@@ -2693,24 +1583,7 @@ func _test_drawing_through_slips() -> void:
 	_check("a drifting clock draws evenly: no frame's step a tenth of a tick off (%.3f; the engine's fraction alone %.2f)" % [
 		worst, naive_worst], worst < 0.1 and naive_worst > 0.5)
 
-	# 1b. Two slips the same way close together. The first is still being taken up when the
-	# second lands, so the slip briefly passes 1; clamped there, the remainder was lost and
-	# that frame moved half a tick less than its time (g2gfast's `headless_feel` caught it).
-	var twice := DotNetClock.new(64, false)
-	var timeline: Array[float] = []
-	for i in range(40):
-		if i == 10 or i == 15:
-			# A physics frame that runs no tick: a tick's worth less in the accumulator.
-			twice.set("_accumulator", float(twice.get("_accumulator")) - twice.tick_duration())
-		var _steps := twice.advance(physics)
-		timeline.append(float(twice.tick) - 1.0 + twice.render_alpha(0.0, physics))
-	var least := INF
-	var most := -INF
-	for i in range(1, timeline.size()):
-		least = minf(least, timeline[i] - timeline[i - 1])
-		most = maxf(most, timeline[i] - timeline[i - 1])
-	_check("two slips the same way five frames apart: every frame moves 0.5-1.5 of its time (%.2f-%.2f)" % [
-		least, most], least > 0.5 and most < 1.5)
+	_check_two_slips(physics)
 
 	# 2. The receive timeline re-anchors: three ticks forward at once, then one back.
 	var receiving := DotNetClock.new(64, false)
@@ -2750,66 +1623,26 @@ func _test_drawing_through_slips() -> void:
 		eased * 1000.0, snapped * 1000.0], eased < snapped / 3.0 and snapped > 0.03)
 
 
-## The largest change between one frame's step and the next in [param timeline].
-static func _worst_step_change(timeline: Array[float]) -> float:
-	var worst := 0.0
-	for i in range(2, timeline.size()):
-		worst = maxf(worst, absf((timeline[i] - timeline[i - 1]) - (timeline[i - 1] - timeline[i - 2])))
-	return worst
-
-
-## A runner on a 4 m circle at 9 m/s, its snapshots stalled for ten ticks and then all
-## arriving at once, drawn through `apply` at 144 Hz: the largest change between one frame's
-## step and the next. [param frames] drives `advance`, which is what turns the easing on.
-func _resume_steps(config: DotNetConfig, frames: bool) -> float:
-	var watcher := Interpolated.new()
-	watcher.name = "Net"
-	var host := Node3D.new()
-	host.name = "Resumed"
-	add_child(host)
-	host.add_child(watcher)
-	var identity := DotNetIdentity.new()
-	identity.name = "Identity"
-	identity.owner_peer_id = 5
-	host.add_child(identity)
-	var registry := DotNetRegistry.new(false, 1)
-	registry.register(identity, 91, 0, config)
-
-	var interpolator := DotNetInterpolator.new(config)
-	var omega := 9.0 / 4.0 / 64.0
-	var at := func(tick: int) -> Vector3:
-		return Vector3(cos(float(tick) * omega), 0.0, sin(float(tick) * omega)) * 4.0
-	var pushed := -2
-	var positions: Array[Vector3] = []
-	for i in range(144 * 3):
-		var now := float(i) * 64.0 / 144.0
-		var stalled := now >= 120.0 and now < 130.0
-		while not stalled and pushed + 2 <= int(now):
-			pushed += 2
-			interpolator.push(91, pushed, {"position": at.call(pushed)})
-		if frames:
-			interpolator.advance(1.0 / 144.0)
-		interpolator.apply(identity, now)
-		positions.append(watcher.rendered)
-
-	host.queue_free()
-	var worst := 0.0
-	for i in range(144, positions.size()):
-		worst = maxf(worst, ((positions[i] - positions[i - 1]) - (positions[i - 1] - positions[i - 2])).length())
-	return worst
-
-
-## The buffer a link that is always on time settles to, in ticks.
-func _settled_delay(config: DotNetConfig) -> float:
-	var interpolator := DotNetInterpolator.new(config)
-	var period := config.ticks_per_snapshot()
-	# Ten seconds: the buffer gives time back at 1% an arrival, by design.
-	for now in range(0, 128 * 10):
-		if now % period == 0:
-			interpolator.note_lateness(now, now)
-		interpolator.advance(1.0 / 128.0)
-	# The shrink is slow by design; ask where it is heading.
-	return float(interpolator.describe()["target_snapshots"]) * float(period)
+## Two slips the same way close together.
+func _check_two_slips(physics: float) -> void:
+	# 1b. Two slips the same way close together. The first is still being taken up when the
+	# second lands, so the slip briefly passes 1; clamped there, the remainder was lost and
+	# that frame moved half a tick less than its time (g2gfast's `headless_feel` caught it).
+	var twice := DotNetClock.new(64, false)
+	var timeline: Array[float] = []
+	for i in range(40):
+		if i == 10 or i == 15:
+			# A physics frame that runs no tick: a tick's worth less in the accumulator.
+			twice.set("_accumulator", float(twice.get("_accumulator")) - twice.tick_duration())
+		var _steps := twice.advance(physics)
+		timeline.append(float(twice.tick) - 1.0 + twice.render_alpha(0.0, physics))
+	var least := INF
+	var most := -INF
+	for i in range(1, timeline.size()):
+		least = minf(least, timeline[i] - timeline[i - 1])
+		most = maxf(most, timeline[i] - timeline[i - 1])
+	_check("two slips the same way five frames apart: every frame moves 0.5-1.5 of its time (%.2f-%.2f)" % [
+		least, most], least > 0.5 and most < 1.5)
 
 
 # --- Acked baselines -------------------------------------------------------
@@ -2935,32 +1768,6 @@ func _test_acked_baselines() -> void:
 
 	for entity in [first, limited, lonely, untracked]:
 		_out_of_tree(entity)
-
-
-
-# --- Shared dirty sets -----------------------------------------------------
-
-## A behaviour with nothing that keeps its dirty sets apart (no epsilon, no rate limit), and
-## one of everything else that decides them: an owner-only, an observers-only and a
-## spawn-only property, and a string, whose encoding depends on the bit it starts at.
-class Sharing extends DotNetBehaviour:
-	var position: Vector3 = Vector3.ZERO
-	var health: int = 100
-	var tag: String = ""
-	var secret: bool = false
-	var seen: int = 0
-	var kind: int = 1
-
-	func _register_net_vars() -> void:
-		replicate(&"position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
-		replicate(&"health", DotNetVar.Type.UINT).bits(8)
-		replicate(&"tag", DotNetVar.Type.STRING)
-		replicate(&"secret", DotNetVar.Type.BOOL).to_owner_only()
-		replicate(&"seen", DotNetVar.Type.UINT).bits(4).to_observers_only()
-		replicate(&"kind", DotNetVar.Type.UINT).bits(4).once()
-
-
-var _share_rng := RandomNumberGenerator.new()
 
 
 ## [member DotNetConfig.share_dirty_sets] against the per-peer rule it short-cuts, run side by
@@ -3169,27 +1976,7 @@ func _test_standing_still() -> void:
 		int(held["tail_bytes"]) <= 12
 	)
 
-	# Moving, then stopped by the server — and the snapshot carrying the stop is lost. The
-	# next one has nothing new to say against what the server BELIEVES the client has, so
-	# without re-sending until confirmed the client rewinds to where it was before the lost
-	# one: a stale position read as the server's word, on every snapshot until the loss is
-	# discovered a round trip later.
-	var stopped := _standing_still_run(false, true, STILL_STOP_AT)
-	var lossy_bound := float(STILL_LEAD + 2 * STILL_INTERVAL) * per_tick + 0.01
-	_check(
-		"lossy: stopped by the server, and pulled back (worst %.2f m, bound %.2f)"
-			% [float(stopped["worst"]), lossy_bound],
-		float(stopped["worst"]) <= lossy_bound
-	)
-	_check(
-		"lossy: the snapshot carrying the stop was the one lost",
-		bool(stopped["stop_lost"])
-	)
-	_check(
-		"lossy: and no rewind was to a stale position (%d of %d)"
-			% [int(stopped["stale"]), int(stopped["snapshots"])],
-		int(stopped["stale"]) == 0
-	)
+	_check_standing_still_lossy(per_tick)
 
 	# The control. The same harness with the server taking every input must agree, or the
 	# harness is what disagrees and the checks above measure nothing.
@@ -3222,9 +2009,29 @@ func _test_standing_still() -> void:
 	)
 
 
-const STILL_LEAD := 3
-const STILL_INTERVAL := 3
-const STILL_STOP_AT := 60
+## A stop whose snapshot is lost is not rewound to a stale position.
+func _check_standing_still_lossy(per_tick: float) -> void:
+	# Moving, then stopped by the server — and the snapshot carrying the stop is lost. The
+	# next one has nothing new to say against what the server BELIEVES the client has, so
+	# without re-sending until confirmed the client rewinds to where it was before the lost
+	# one: a stale position read as the server's word, on every snapshot until the loss is
+	# discovered a round trip later.
+	var stopped := _standing_still_run(false, true, STILL_STOP_AT)
+	var lossy_bound := float(STILL_LEAD + 2 * STILL_INTERVAL) * per_tick + 0.01
+	_check(
+		"lossy: stopped by the server, and pulled back (worst %.2f m, bound %.2f)"
+			% [float(stopped["worst"]), lossy_bound],
+		float(stopped["worst"]) <= lossy_bound
+	)
+	_check(
+		"lossy: the snapshot carrying the stop was the one lost",
+		bool(stopped["stop_lost"])
+	)
+	_check(
+		"lossy: and no rewind was to a stale position (%d of %d)"
+			% [int(stopped["stale"]), int(stopped["snapshots"])],
+		int(stopped["stale"]) == 0
+	)
 
 
 ## One run of [method _test_standing_still]. [param server_moves] decides whether the
@@ -3395,32 +2202,6 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 	host.free()
 	guest.free()
 	return out
-
-
-## [b]Bumping a remote under loss.[/b] A client predicts its own player against the others at
-## an estimate of where they are; the server pushes it out of where they really are. The gap
-## between the two is the prediction error a bump costs, and this section measures it for each
-## way of making the estimate (docs/prediction.md#bumping-a-remote).
-##
-## A [Bumper] walks at 3 m/s into a [Pacer] that comes at it, pushes it back, turns at once
-## and walks away, at [constant BUMP_SPEEDS]. Snapshots are lost at random, the same draws for
-## every estimate. The gap is taken at each tick as first predicted, which is where the
-## player is drawn before any correction.
-##
-## The estimates: `heard`, where the bot was last heard (what every game does); `ignore`, no
-## bot in the prediction at all; `line`, the interpolator's line through the last two
-## positions sampled at the input tick; `extrapolated`, [method DotNetBehaviour.extrapolated_value]
-## with [member DotNetConfig.remote_extrapolation_sec] at [constant BUMP_EXTRAPOLATE_SEC]; and
-## `default`, the same call with the setting left at its default.
-const BUMP_LEAD := 6
-const BUMP_TICKS := 1200
-const BUMP_SPEEDS: Array[float] = [4.0, 8.0]
-const BUMP_LOSSES: Array[float] = [0.0, 0.05, 0.15]
-## The lead plus one snapshot interval, 9 ticks at 60 Hz.
-const BUMP_EXTRAPOLATE_SEC := 0.15
-const BUMP_ESTIMATES: Array[StringName] = [
-	&"oracle", &"heard", &"ignore", &"line", &"extrapolated", &"default"
-]
 
 
 func _test_remote_bumps() -> void:
@@ -3647,45 +2428,6 @@ func _bump_run(speed: float, loss: float, estimate: StringName) -> Dictionary:
 	return {"worst": worst, "mean": total / maxf(1.0, float(counted)), "contact": pushed[0]}
 
 
-## A bump-test entity: a [Pacer] the server owns, or a [Bumper] its owner predicts.
-func _build_bump(_context: Dictionary, prefab: StringName, speed: float) -> Node:
-	var body := Node3D.new()
-	body.name = "Entity"
-	var identity := DotNetIdentity.new()
-	identity.name = "NetIdentity"
-	identity.prefab_id = prefab
-	identity.authority = (
-		DotNetIdentity.Authority.SERVER if prefab == &"pacer"
-		else DotNetIdentity.Authority.SHARED
-	)
-	body.add_child(identity)
-	var behaviour: DotNetBehaviour
-	if prefab == &"pacer":
-		var pacer := Pacer.new()
-		pacer.speed = speed
-		behaviour = pacer
-	else:
-		behaviour = Bumper.new()
-	behaviour.name = "Behaviour"
-	body.add_child(behaviour)
-	identity.entity = body
-	identity.behaviours = [behaviour]
-	behaviour.identity = identity
-	behaviour._bind(DotNetConfig.new())
-	return body
-
-
-## [member DotNetConfig.reconcile_once_per_frame]: snapshots that arrive together are
-## reconciled once, against the newest, and land exactly where reconciling each would.
-##
-## Two clients read the same payloads from one server in bursts of [constant BURST] (what a
-## WebSocket hands over after a long frame): A reconciles every snapshot as it is read, B
-## defers and flushes once a burst. B must replay once a burst, not once a snapshot, touch
-## nothing until it flushes, and end every burst where A is -- the coalescing is only worth
-## having if it is the same answer.
-const BURST := 4
-
-
 func _test_reconcile_once_per_frame() -> void:
 	print("")
 	print("[reconciled once a frame]")
@@ -3821,21 +2563,16 @@ func _test_reconcile_once_per_frame() -> void:
 ## properties into it from `_net_state_applied`, as every game does. Reading a deferred
 ## snapshot runs that hook with the server's older state, and the manager then puts only
 ## the properties back; a skip that left it there had the next tick simulate from a round
-## trip ago (game-arena's headless_feel, 2026-10-16: 300 mm, 31 corrections at 40 ms).
+## trip ago.
 func _test_skip_matching_replays(own_state: bool) -> void:
 	print("")
 	print("[replays skipped when the prediction matched%s]" % (", own simulation state" if own_state else ""))
 	const TICKS := 96
 	const LEAD := 6
 
-	var host := DotNetManager.new()
+	var host := _bare_manager(true, 1)
 	host.name = "SkipServer"
-	host.is_server = true
 	host.service_scope = &"skip_server"
-	host.local_peer_id = 1
-	host.auto_tick = false
-	host.config_file = ""
-	host.config = DotNetConfig.new()
 	host.config.tick_rate = 60
 	host.config.snapshot_rate = 60
 	add_child(host)
@@ -4070,20 +2807,6 @@ func _test_staggered_snapshots() -> void:
 	_check("unstaggered, every peer is sent on the same tick (%d of 8)" % off_busiest, off_busiest == 8)
 
 	_sections_completed += 1
-
-
-## Snapshots that arrive OUT OF ORDER and TWICE, through two real managers with
-## acknowledgements wired end to end.
-##
-## [b]Nothing here had ever seen either.[/b] Over WebSocket "unreliable" is reliable and in
-## order, so every client so far received every snapshot once, in sequence; a native client
-## on ENet (dot-server's dual stack, 2026-10-07) gets real UDP. A late snapshot is ignored
-## by tick, as superseded -- which loses whatever only it carried, unless the server re-sends
-## it once the client acknowledges a newer one. That recovery is checked behaviour by
-## behaviour in [acked baselines]; this is the whole path: the encoder, the wire, the
-## receiver's tick rule, the client's acknowledgement and the server's resend.
-var _reorder_rng := RandomNumberGenerator.new()
-var _reorder_held_change := false
 
 func _test_reordered_and_repeated() -> void:
 	_sections_entered += 1
@@ -4634,36 +3357,6 @@ func _test_unchanged_entities() -> void:
 		(m as DotNetManager).free()
 
 
-func _build_counted(_context: Dictionary) -> Node:
-	var identity := _make_entity(&"counted", 0)
-	var body := identity.get_parent()
-	var old := identity.behaviours[0]
-	body.remove_child(old)
-	old.free()
-	var counted := Counted.new()
-	counted.name = "Movement"
-	body.add_child(counted)
-	identity.behaviours = [counted]
-	counted.identity = identity
-	counted._bind(DotNetConfig.new())
-	return body
-
-
-func _build_rich(context: Dictionary, coded: bool = false) -> Node:
-	var body := _build_counted(context)
-	var identity := body.get_node("NetIdentity") as DotNetIdentity
-	var old := identity.behaviours[0]
-	body.remove_child(old)
-	old.free()
-	var rich: Rich = Coded.new() if coded else Rich.new()
-	rich.name = "Movement"
-	body.add_child(rich)
-	identity.behaviours = [rich]
-	rich.identity = identity
-	rich._bind(DotNetConfig.new())
-	return body
-
-
 func _test_snapshot_threads() -> void:
 	print("")
 	print("[snapshot threads]")
@@ -4731,6 +3424,14 @@ func _test_snapshot_threads() -> void:
 		not DotParallel.available()
 			or _first_difference(off["payloads"], broken["payloads"]) != "")
 
+	_check_thread_variants(off, extra)
+
+	_test_first_entity_mid_tick()
+	_test_view_count()
+
+
+## The extra scenarios of [method _test_snapshot_threads] against the base run [param off].
+func _check_thread_variants(off: Dictionary, extra: Dictionary) -> void:
 	_check("thin: far entities thinned change what is sent %s" % _first_difference(off["payloads"], (extra["thin"] as Array)[0]["payloads"]),
 		_first_difference(off["payloads"], (extra["thin"] as Array)[0]["payloads"]) != "")
 	for variant: String in extra:
@@ -4753,9 +3454,6 @@ func _test_snapshot_threads() -> void:
 				_first_difference(serial["payloads"], other["payloads"]) == ""
 					and _first_difference(serial["states"], other["states"]) == ""
 					and (not DotParallel.available() or int(other["pooled"]) > 0))
-
-	_test_first_entity_mid_tick()
-	_test_view_count()
 
 
 ## Send views exist only for what a peer is sent: the pooled path used to make one for every
@@ -4819,48 +3517,7 @@ func _test_native() -> void:
 	var loaded := DotNetNative.load_library().ok
 	print("  native library: %s" % ("loaded" if loaded else DotNetNative.describe()["reason"]))
 
-	var declarations: Array[DotNetVar] = [
-		DotNetVar.make(&"a", DotNetVar.Type.BOOL),
-		DotNetVar.make(&"b", DotNetVar.Type.UINT).bits(7),
-		DotNetVar.make(&"c", DotNetVar.Type.INT).bits(9),
-		DotNetVar.make(&"d", DotNetVar.Type.VARINT),
-		DotNetVar.make(&"e", DotNetVar.Type.FLOAT),
-		DotNetVar.make(&"f", DotNetVar.Type.FLOAT_RANGE).range_of(-10.0, 10.0).bits(12),
-		DotNetVar.make(&"g", DotNetVar.Type.VECTOR3_POSITION),
-		DotNetVar.make(&"h", DotNetVar.Type.VECTOR3_VELOCITY),
-		DotNetVar.make(&"i", DotNetVar.Type.VECTOR3_RANGE).range_of(-5.0, 5.0).bits(10),
-		DotNetVar.make(&"j", DotNetVar.Type.DIRECTION).bits(11),
-		DotNetVar.make(&"k", DotNetVar.Type.QUATERNION),
-		DotNetVar.make(&"l", DotNetVar.Type.ANGLE).bits(9),
-		DotNetVar.make(&"m", DotNetVar.Type.STRING),
-		DotNetVar.make(&"n", DotNetVar.Type.BYTES),
-	]
-	var holder := DotNetBehaviour.new()
-	for declaration in declarations:
-		declaration.bind_config(DotNetConfig.new())
-	holder.net_vars = declarations
-	var specs: Array = holder._native_spec()[1]
-	holder.free()
-	var core: Object = ClassDB.instantiate(DotNetNative.CORE_CLASS) if loaded else null
-	var compared := 0
-	var mismatched: Array = []
-	for round in 120:
-		for index in declarations.size():
-			var value: Variant = _native_sample(declarations[index].type, round)
-			for pad in 8:
-				var w := DotNetWriter.new(64)
-				if pad > 0:
-					w.write_bits(0, pad)
-				declarations[index].write(w, value)
-				if core == null:
-					continue
-				var got: Array = core.encode_value(specs[index], value, pad)
-				compared += 1
-				if got.size() != 2 or got[0] != w.to_bytes() or int(got[1]) != w.bit_length() - pad:
-					if mismatched.size() < 3:
-						mismatched.append("%s %s pad %d" % [DotNetVar.Type.keys()[declarations[index].type], value, pad])
-	_check("native: every encoder writes DotNetVar.write's bits at every pad (%d compared; %s)" % [compared, mismatched],
-		not loaded or (compared == 120 * 14 * 8 and mismatched.is_empty()))
+	_native_encoders_match(loaded)
 
 	for variant: String in ["", "coded", "thin", "grid"]:
 		var serial: Dictionary = _threads_scenario("Native" + variant + "Off", 0, false, variant)
@@ -4911,6 +3568,52 @@ func _test_native() -> void:
 	_check("native: a .cfg's library for this platform is found before loading it (%s)" % found,
 		not OS.has_feature("x86_64") or found == cfg.get_base_dir().path_join("bin/missing.so"))
 	DirAccess.remove_absolute(cfg)
+
+
+## Every native encoder writes what [method DotNetVar.write] writes, at every bit pad.
+func _native_encoders_match(loaded: bool) -> void:
+	var declarations: Array[DotNetVar] = [
+		DotNetVar.make(&"a", DotNetVar.Type.BOOL),
+		DotNetVar.make(&"b", DotNetVar.Type.UINT).bits(7),
+		DotNetVar.make(&"c", DotNetVar.Type.INT).bits(9),
+		DotNetVar.make(&"d", DotNetVar.Type.VARINT),
+		DotNetVar.make(&"e", DotNetVar.Type.FLOAT),
+		DotNetVar.make(&"f", DotNetVar.Type.FLOAT_RANGE).range_of(-10.0, 10.0).bits(12),
+		DotNetVar.make(&"g", DotNetVar.Type.VECTOR3_POSITION),
+		DotNetVar.make(&"h", DotNetVar.Type.VECTOR3_VELOCITY),
+		DotNetVar.make(&"i", DotNetVar.Type.VECTOR3_RANGE).range_of(-5.0, 5.0).bits(10),
+		DotNetVar.make(&"j", DotNetVar.Type.DIRECTION).bits(11),
+		DotNetVar.make(&"k", DotNetVar.Type.QUATERNION),
+		DotNetVar.make(&"l", DotNetVar.Type.ANGLE).bits(9),
+		DotNetVar.make(&"m", DotNetVar.Type.STRING),
+		DotNetVar.make(&"n", DotNetVar.Type.BYTES),
+	]
+	var holder := DotNetBehaviour.new()
+	for declaration in declarations:
+		declaration.bind_config(DotNetConfig.new())
+	holder.net_vars = declarations
+	var specs: Array = holder._native_spec()[1]
+	holder.free()
+	var core: Object = ClassDB.instantiate(DotNetNative.CORE_CLASS) if loaded else null
+	var compared := 0
+	var mismatched: Array = []
+	for round in 120:
+		for index in declarations.size():
+			var value: Variant = _native_sample(declarations[index].type, round)
+			for pad in 8:
+				var w := DotNetWriter.new(64)
+				if pad > 0:
+					w.write_bits(0, pad)
+				declarations[index].write(w, value)
+				if core == null:
+					continue
+				var got: Array = core.encode_value(specs[index], value, pad)
+				compared += 1
+				if got.size() != 2 or got[0] != w.to_bytes() or int(got[1]) != w.bit_length() - pad:
+					if mismatched.size() < 3:
+						mismatched.append("%s %s pad %d" % [DotNetVar.Type.keys()[declarations[index].type], value, pad])
+	_check("native: every encoder writes DotNetVar.write's bits at every pad (%d compared; %s)" % [compared, mismatched],
+		not loaded or (compared == 120 * 14 * 8 and mismatched.is_empty()))
 
 
 ## A value for a declaration of [param type], with edge cases every few rounds.
@@ -5193,16 +3896,6 @@ func _threads_scenario(
 	return out
 
 
-## [param d] with its keys in sorted order, so two dictionaries built in another order compare.
-func _sorted_dict(d: Dictionary) -> Dictionary:
-	var keys := d.keys()
-	keys.sort()
-	var out := {}
-	for k: Variant in keys:
-		out[k] = d[k]
-	return out
-
-
 ## A [method DotNetBehaviour.peer_view_snapshot] in the fields the native core keeps, keys sorted:
 ## the GDScript-only memo fields dropped, and a view holding nothing else read as none.
 func _normal_view(view: Dictionary) -> Dictionary:
@@ -5220,19 +3913,6 @@ func _normal_view(view: Dictionary) -> Dictionary:
 	for k in ["acked", "believed", "last_sent_ms", "relost"]:
 		empty = empty and (out[k] as Dictionary).is_empty()
 	return {} if empty else out
-
-
-## "" when [param a] and [param b] hold the same bytes in the same order, else the first index
-## and size that differ.
-func _first_difference(a: Array, b: Array) -> String:
-	if a.size() != b.size():
-		return "%d entries against %d" % [a.size(), b.size()]
-	for i in a.size():
-		var x: PackedByteArray = var_to_bytes(a[i])
-		var y: PackedByteArray = var_to_bytes(b[i])
-		if x != y:
-			return "entry %d (%d B against %d B)" % [i, x.size(), y.size()]
-	return ""
 
 
 func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:
@@ -5682,7 +4362,7 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 	return out
 
 
-## The stuck-on-the-spawn-pad report (game-g2gfast, 2026-10-14): a browser's first visit stalls
+## The stuck-on-the-spawn-pad report: a browser's first visit stalls
 ## for seconds while it loads and compiles shaders, then draws slow frames, and the engine drops
 ## every physics step past its cap. Handed only the steps' deltas, the clock never saw the
 ## dropped time; the reported lead learnt it a round trip late, and with the absolute catch-up
@@ -5759,7 +4439,7 @@ func _test_dropped_time() -> void:
 		int(polled["late"]) * 50 <= int(polled["ticks"]) and int(polled["snaps"]) == 0)
 
 
-## The Zombie Zone web measurement (2026-10-22): the clock synced, then a loading cover held
+## The Zombie Zone web measurement: the clock synced, then a loading cover held
 ## seconds of stalls, and when it dropped the clock snapped and the input lead jumped. A stall
 ## after sync must leave no snap and a lead within bounds.
 func _test_cover_stalls() -> void:
@@ -5783,7 +4463,14 @@ func _test_cover_stalls() -> void:
 		_check("%d ticks: lead stays within 0.5 s (%d)" % [rate, int(seen["lead_max"])],
 			int(seen["lead_max"]) <= rate / 2)
 
-	# Zombie Zone on the web (net.clock trace, 2026-10-22): the game's ping measured across a
+	_cover_stalls_ping()
+	_cover_stalls_cold_and_live()
+	_sections_completed += 1
+
+
+## A ping measured across a stall must not become the round trip.
+func _cover_stalls_ping() -> void:
+	# Zombie Zone on the web: the game's ping measured across a
 	# 10.7 s stall read 14.8 s, and every snapshot after it carried that as the round trip. The
 	# median, the jitter and with them the lead ran to 800 ticks and the clock snapped nine
 	# times in one frame. Armed: a round trip a stall explains is held near the median.
@@ -5858,13 +4545,17 @@ func _test_cover_stalls() -> void:
 	_check("a stall is not forgotten behind later short stalls (%d held)" % burst.rtt_rejected(),
 		burst.rtt_rejected() == 1)
 
+
+
+## A stall before any median, and a stall inside a live lead history.
+func _cover_stalls_cold_and_live() -> void:
 	# Cold start: a stall before any untouched sample leaves no median to hold near, and the
 	# first real round trips must not be pinned at 250 ms.
 	var cold := DotNetClock.new(64)
 	cold.follow_engine_time = false
-	frame = 1
-	wall = 15625
-	steps = 1
+	var frame := 1
+	var wall := 15625
+	var steps := 1
 	cold.note_engine_frame(frame, wall, steps, 64, 16)
 	frame += 1
 	wall += 2000000
@@ -5920,7 +4611,6 @@ func _test_cover_stalls() -> void:
 		rtt_in_stall < 400.0)
 	_check("and returns to the real round trip after it (%d ms)" % int(live.rtt_ms()),
 		absf(live.rtt_ms() - 88.0) < 20.0 and int(live.describe()["snaps"]) == 0)
-	_sections_completed += 1
 
 
 func _test_join_hitch() -> void:
@@ -6069,26 +4759,14 @@ func _test_integration() -> void:
 	print("")
 	print("[integration]")
 
-	server = DotNetManager.new()
+	server = _bare_manager(true, 1)
 	server.name = "Server"
-	server.is_server = true
-	server.service_scope = &"server"
-	server.local_peer_id = 1
-	server.auto_tick = false
-	server.config_file = ""
-	server.config = DotNetConfig.new()
 	server.config.snapshot_rate = 20
 	server.config.tick_rate = 60
 	add_child(server)
 
-	client = DotNetManager.new()
+	client = _bare_manager(false, 2)
 	client.name = "Client"
-	client.is_server = false
-	client.service_scope = &"client"
-	client.local_peer_id = 2
-	client.auto_tick = false
-	client.config_file = ""
-	client.config = DotNetConfig.new()
 	client.config.snapshot_rate = 20
 	client.config.tick_rate = 60
 	add_child(client)
@@ -6193,65 +4871,9 @@ func _test_integration() -> void:
 	_sections_completed += 1
 
 
-## An observer that learns of an entity after the server's first snapshots still gets the
-## state that never changes again (a game's alive/health, sent once), when it sends no
-## acknowledgement until the mirror exists: the server must send that state again then.
-func _test_late_mirror_observer_vars() -> void:
-	_sections_entered += 1
-	print("")
-	print("[late mirror]")
-
-	var s := DotNetManager.new()
-	s.is_server = true
-	s.service_scope = &"server"
-	s.local_peer_id = 1
-	s.auto_tick = false
-	s.config_file = ""
-	s.config = DotNetConfig.new()
-	var c := DotNetManager.new()
-	c.is_server = false
-	c.service_scope = &"client"
-	c.local_peer_id = 2
-	c.auto_tick = false
-	c.config_file = ""
-	c.config = DotNetConfig.new()
-	s.config.ack_window_snapshots = 4
-	add_child(s)
-	add_child(c)
-	s.setup()
-	c.setup()
-
-	var held: Array[PackedByteArray] = []
-	s.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
-		if peer_id != 2:
-			return
-		if d != DotNetMessage.Delivery.UNRELIABLE:
-			c.receive(payload, 1)
-		else:
-			held.append(payload)
-	s.start()
-	c.start()
-	s.add_peer(2)
-
-	var build := func(_context: Dictionary) -> Node:
-		var identity := _make_entity(&"mirror", 0)
-		var vars := ObserverVars.new()
-		vars.name = "ObserverVars"
-		identity.get_parent().add_child(vars)
-		identity.behaviours.append(vars)
-		vars.identity = identity
-		vars._bind(DotNetConfig.new())
-		return identity.get_parent()
-	s.spawner.register_factory(&"mirror", build)
-	c.spawner.register_factory(&"mirror", build)
-
-	# Owned by peer 3, so peer 2 observes it.
-	var server_entity: DotNetIdentity = s.spawner.spawn(&"mirror", 3, Transform3D.IDENTITY, 0).value
-	var server_vars := server_entity.behaviours[1] as ObserverVars
-	server_vars.alive = true
-	server_vars.hp = 87
-	server_vars.armour = 40
-
+## Ninety ticks of the server's snapshots reaching [param c] four ticks late, the mirror spawned
+## at tick 30; returns the mirror.
+func _drive_late_mirror(s: DotNetManager, c: DotNetManager, held: Array[PackedByteArray], server_vars: ObserverVars, server_entity: DotNetIdentity) -> DotNetIdentity:
 	var later: Array = []
 	var acks: Array = []
 	var client_entity: DotNetIdentity = null
@@ -6277,6 +4899,48 @@ func _test_late_mirror_observer_vars() -> void:
 			client_entity = c.spawner.spawn_remote(
 				&"mirror", server_entity.net_id, 3, Transform3D.IDENTITY, 0
 			).value
+	return client_entity
+
+
+## An observer that learns of an entity after the server's first snapshots still gets the
+## state that never changes again (a game's alive/health, sent once), when it sends no
+## acknowledgement until the mirror exists: the server must send that state again then.
+func _test_late_mirror_observer_vars() -> void:
+	_sections_entered += 1
+	print("")
+	print("[late mirror]")
+
+	var s := _bare_manager(true, 1)
+	var c := _bare_manager(false, 2)
+	s.config.ack_window_snapshots = 4
+	add_child(s)
+	add_child(c)
+	s.setup()
+	c.setup()
+
+	var held: Array[PackedByteArray] = []
+	s.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if peer_id != 2:
+			return
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			c.receive(payload, 1)
+		else:
+			held.append(payload)
+	s.start()
+	c.start()
+	s.add_peer(2)
+
+	s.spawner.register_factory(&"mirror", _build_mirror)
+	c.spawner.register_factory(&"mirror", _build_mirror)
+
+	# Owned by peer 3, so peer 2 observes it.
+	var server_entity: DotNetIdentity = s.spawner.spawn(&"mirror", 3, Transform3D.IDENTITY, 0).value
+	var server_vars := server_entity.behaviours[1] as ObserverVars
+	server_vars.alive = true
+	server_vars.hp = 87
+	server_vars.armour = 40
+
+	var client_entity := _drive_late_mirror(s, c, held, server_vars, server_entity)
 
 	_check("the late mirror exists", client_entity != null)
 	var client_vars := client_entity.behaviours[1] as ObserverVars
@@ -6287,10 +4951,6 @@ func _test_late_mirror_observer_vars() -> void:
 	s.queue_free()
 	c.queue_free()
 	_sections_completed += 1
-
-
-func _build_player(_context: Dictionary) -> Node:
-	return _make_entity(&"player", 0).get_parent()
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -6582,103 +5242,6 @@ func _test_spawning() -> void:
 	_check("declared prefab with no identity refused", not declared.has_prefab(&"bad"))
 
 	_sections_completed += 1
-
-
-## Scratch state for the pooling factory in [method _test_spawning].
-##
-## Idle instances are parented to [member _pool_parent], the way a real pool
-## keeps them out of the live container.
-var _pool_parent: Node = null
-var _pool: Array[Node] = []
-var _pool_reused: int = 0
-var _pool_context: Dictionary = {}
-
-
-## A bare networked entity: Node3D root, DotNetIdentity child.
-##
-## No behaviour, because the spawner does not care about them and a behaviour here
-## would be an inner class of this script, which is not a thing a PackedScene
-## should have to carry.
-func _build_entity_node() -> Node3D:
-	var body := Node3D.new()
-	body.name = "PooledEntity"
-	var identity := DotNetIdentity.new()
-	identity.name = "NetIdentity"
-	identity.authority = DotNetIdentity.Authority.SERVER
-	body.add_child(identity)
-	identity.owner = body
-	return body
-
-
-## Packs one into a PackedScene, with or without the identity.
-##
-## Packing rather than preloading keeps the demo a single file. It also exercises
-## register_prefab's fallback check: a node built from DotNetIdentity.new() saves
-## with its base type and a script property, not the type name.
-func _pack_entity(with_identity: bool) -> PackedScene:
-	var body := Node3D.new()
-	body.name = "Entity"
-
-	if with_identity:
-		var identity := DotNetIdentity.new()
-		identity.name = "NetIdentity"
-		identity.authority = DotNetIdentity.Authority.SERVER
-		body.add_child(identity)
-		identity.owner = body
-
-	var scene := PackedScene.new()
-	scene.pack(body)
-	body.free()
-	return scene
-
-
-## Builds an entity: a Node3D with an identity and a movement behaviour.
-func _make_entity(prefab: StringName, owner_peer: int) -> DotNetIdentity:
-	var body := Node3D.new()
-	body.name = "Entity"
-
-	var identity := DotNetIdentity.new()
-	identity.name = "NetIdentity"
-	identity.prefab_id = prefab
-	identity.owner_peer_id = owner_peer
-	identity.authority = DotNetIdentity.Authority.SHARED
-	if prefab == &"objective":
-		identity.interest_tags = PackedStringArray(["objective"])
-	body.add_child(identity)
-
-	var movement := Movement.new()
-	movement.name = "Movement"
-	body.add_child(movement)
-
-	# _ready has not run yet for a node outside the tree, so the identity's own
-	# resolution is done here for tests that never add it.
-	identity.entity = body
-	identity.behaviours = [movement]
-	movement.identity = identity
-	movement._bind(DotNetConfig.new())
-
-	return identity
-
-
-## Puts a test entity's body in the scene tree and returns the identity.
-func _in_tree(identity: DotNetIdentity) -> DotNetIdentity:
-	add_child(identity.get_parent())
-	return identity
-
-
-func _out_of_tree(identity: DotNetIdentity) -> void:
-	var body := identity.get_parent()
-	remove_child(body)
-	body.free()
-
-
-func _check(what: String, passed: bool) -> void:
-	if passed:
-		_passed += 1
-		print("  %-52s ok" % what)
-	else:
-		_failed += 1
-		print("  %-52s FAILED" % what)
 
 
 ## The input history is a derived quantity and is raised, not warned about.

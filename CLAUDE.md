@@ -27,7 +27,7 @@ Read the family [CLAUDE.md](../../CLAUDE.md) first; this file is only what is sp
 
 | Path | What |
 | --- | --- |
-| `addons/dot_net/dot_net_manager.gd` | tick loop, snapshot send/receive, message routing |
+| `addons/dot_net/dot_net_manager.gd` | tick loop, snapshot receive, message routing; extends `dot_net_manager_send.gd` < `_wire.gd` < `_state.gd` (snapshot send, wire build, state) |
 | `addons/dot_net/core/` | `DotNetClock` (three timelines: read it first), `DotNetConfig` (all tuning; `describe_budget()`) |
 | `addons/dot_net/wire/` | writer (bit packing, quantisation), reader (the untrusted side), messages, the registry (derived ids, framing, schema exchange), packets (batching, fragmentation) |
 | `addons/dot_net/replication/` | `DotNetVar`, `DotNetIdentity`, `DotNetBehaviour` (what a game subclasses most), registry (ids never reused), spawner (prefab allow-list, factories) |

@@ -2,15 +2,14 @@
 # Baselines only shrink: scripts/<gate> --update lowers or drops entries and refuses to add.
 addons/dot_net/bandwidth/dot_net_budget.gd::banner	3
 addons/dot_net/bandwidth/dot_net_budget.gd::long_block	6
-addons/dot_net/core/dot_net_clock.gd::banner	4
+addons/dot_net/core/dot_net_clock.gd::banner	2
 addons/dot_net/core/dot_net_clock.gd::history	1
-addons/dot_net/core/dot_net_clock.gd::long_block	46
+addons/dot_net/core/dot_net_clock.gd::long_block	31
 addons/dot_net/core/dot_net_config.gd::history	1
 addons/dot_net/core/dot_net_config.gd::long_block	35
 addons/dot_net/dot_net_api.gd::long_block	2
 addons/dot_net/dot_net_manager.gd::banner	7
-addons/dot_net/dot_net_manager.gd::history	1
-addons/dot_net/dot_net_manager.gd::long_block	49
+addons/dot_net/dot_net_manager.gd::long_block	21
 addons/dot_net/dot_net_plugin.gd::long_block	1
 addons/dot_net/interest/dot_net_interest.gd::banner	2
 addons/dot_net/interest/dot_net_interest.gd::long_block	17
@@ -24,9 +23,9 @@ addons/dot_net/prediction/dot_net_input.gd::long_block	13
 addons/dot_net/prediction/dot_net_predictor.gd::banner	3
 addons/dot_net/prediction/dot_net_predictor.gd::history	2
 addons/dot_net/prediction/dot_net_predictor.gd::long_block	13
-addons/dot_net/replication/dot_net_behaviour.gd::banner	5
-addons/dot_net/replication/dot_net_behaviour.gd::history	4
-addons/dot_net/replication/dot_net_behaviour.gd::long_block	50
+addons/dot_net/replication/dot_net_behaviour.gd::banner	4
+addons/dot_net/replication/dot_net_behaviour.gd::history	2
+addons/dot_net/replication/dot_net_behaviour.gd::long_block	41
 addons/dot_net/replication/dot_net_identity.gd::banner	2
 addons/dot_net/replication/dot_net_identity.gd::history	1
 addons/dot_net/replication/dot_net_identity.gd::long_block	17
@@ -58,9 +57,9 @@ addons/dot_net/wire/dot_net_writer.gd::banner	6
 addons/dot_net/wire/dot_net_writer.gd::long_block	14
 examples/diagnostics_demo.gd::banner	6
 examples/diagnostics_demo.gd::long_block	5
-examples/netcode_demo.gd::banner	27
-examples/netcode_demo.gd::history	12
-examples/netcode_demo.gd::long_block	54
+examples/netcode_demo.gd::banner	21
+examples/netcode_demo.gd::history	10
+examples/netcode_demo.gd::long_block	41
 examples/relay_demo.gd::banner	4
 examples/relay_demo.gd::history	1
 examples/relay_demo.gd::long_block	3

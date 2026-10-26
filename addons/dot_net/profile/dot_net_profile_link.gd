@@ -1,19 +1,9 @@
 class_name DotNetProfileLink
 extends RefCounted
 
-## Carries dot-core's [DotProfileRuntime] over a [DotNetManager]: requests up, rows down.
-##
-## Opt-in: nothing is registered until [method attach]. Call it before the manager starts,
-## because message types seal on first use. The types are not [code]required[/code], so a
-## peer without them can still play.
-##
-## [codeblock]
-## var link := DotNetProfileLink.attach(manager, runtime)
-## link.actor_of = func(peer: int) -> Variant: return auth.uid_of(peer)   # server
-## link.peer_joined(peer_id)                       # server, after manager.add_peer
-## runtime.begin_sync()                            # client, before a (re)connect
-## link.submit(DotProfileRuntime.make_request("set", "npc", "zombie", "health", 400))
-## [/codeblock]
+## Carries dot-core's [DotProfileRuntime] over a [DotNetManager]: requests up, rows down. Opt-in:
+## [code]DotNetProfileLink.attach(manager, runtime)[/code] before the manager starts (message types
+## seal on first use); then [method peer_joined] per peer, [method submit] a request, [member actor_of].
 
 const CHANNEL := "profile"
 const TYPE_REQUEST := &"profile.request"

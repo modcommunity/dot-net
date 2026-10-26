@@ -72,10 +72,9 @@ extends DotConfig
 ## See game-dev docs/server-threading.md for the measurement and the design.
 @export_range(-1, 64) var snapshot_workers: int = 0
 
-## Build server snapshots in dot-net's optional native library ([DotNetNative]): the same bytes,
-## several times cheaper. Off by default; when the library cannot be loaded (none built for this
-## platform, a browser, a client) the GDScript path runs and the reason is logged once.
-## Environment [code]DOT_NET_NATIVE[/code], command line [code]--net-native[/code]. See docs/native.md.
+## Build server snapshots in the optional native library ([DotNetNative]): the same bytes, several
+## times cheaper. Falls back to GDScript, logged once, where it cannot load. See docs/native.md.
+## Environment [code]DOT_NET_NATIVE[/code], command line [code]--net-native[/code].
 @export var native: bool = false
 
 ## Where the native library's [code].cfg[/code] is; empty is the addon's own
@@ -83,10 +82,9 @@ extends DotConfig
 ## to the executable. Environment [code]DOT_NET_NATIVE_PATH[/code].
 @export var native_path: String = ""
 
-## With [member native], also run [DotNetInterestDistance]'s relevance, thinning, scores, entity cap
-## and the budget's ordering in the library, on its build threads: the same selection and bytes.
-## Ignored for any other strategy (a subclass, the grid, tag lists) and without [member native].
-## Environment [code]DOT_NET_NATIVE_INTEREST[/code], command line [code]--net-native-interest[/code].
+## With [member native], also run [DotNetInterestDistance]'s selection and the budget's ordering in
+## the library: the same bytes. Ignored for any other strategy. Environment
+## [code]DOT_NET_NATIVE_INTEREST[/code], command line [code]--net-native-interest[/code].
 @export var native_interest: bool = false
 
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
@@ -127,10 +125,8 @@ extends DotConfig
 
 @export_group("Prediction")
 
-## Predict locally-owned entities rather than waiting for the server.
-##
-## Off means every input has a full round trip of latency before anything moves,
-## which is unplayable above about 50 ms.
+## Predict locally-owned entities rather than waiting for the server. Off means a full round
+## trip of latency before anything moves, unplayable above about 50 ms.
 @export var enable_prediction: bool = true
 
 ## Inputs kept for replay during reconciliation.
@@ -340,9 +336,8 @@ extends DotConfig
 
 ## Entities built into one peer's snapshot, at most, taken in the budget's accumulated-priority
 ## order; the rest wait their turn, so each entity's update rate follows its score
-## ([member DotNetInterest.distance_falloff]). What the peer owns always goes. 0 is off.
-## Measured to save little: each peer is cut at a different point, so peers fall out of step
-## and stop sharing dirty sets and encodings. Prefer coherent far turns (docs/replication.md).
+## ([member DotNetInterest.distance_falloff]). What the peer owns always goes. 0 is off. Saves
+## little, as peers cut at different points stop sharing encodings: prefer coherent far turns.
 @export_range(0, 4096, 1) var peer_send_budget: int = 0
 
 @export_group("Limits")

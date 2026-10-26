@@ -584,7 +584,7 @@ static func _find(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 
 
 ## Indexes [param all] by net id for the snapshot about to be asked about it, so a lingering
-## entity is found by lookup, not by a walk of every identity per peer. Main thread, once per
+## entity is reached by lookup, not by a walk of every identity per peer. Main thread, once per
 ## snapshot; [code]index_snapshot([])[/code] after it.
 func index_snapshot(all: Array[DotNetIdentity]) -> void:
 	_indexed = all
