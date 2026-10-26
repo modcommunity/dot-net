@@ -4,6 +4,8 @@ Multiplayer netcode for Godot 4: tick synchronisation, a bit-packed wire format,
 
 **The distributable is `addons/dot_net/`.** It requires [dot-core](../dot-core) and does not depend on dot-server: a game can use dot-net over Godot's raw multiplayer, over dot-core's transports, or over anything else that moves bytes. It owns no socket and no client-to-server channel.
 
+Also requires **dot-profile** (`DotProfileSet`, `DotProfile`, `DotProfileRuntime`, split from dot-core): link `addons/dot_profile` next to `addons/dot_core`.
+
 ```bash
 ln -s ../../dot-core/addons/dot_core addons/dot_core
 ```
