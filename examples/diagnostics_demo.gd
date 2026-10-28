@@ -174,6 +174,14 @@ func _section_loss() -> void:
 		"%d" % dup.snapshots_lost)
 	_check("and is counted out of order", dup.out_of_order == 1)
 
+	_loss_period_and_bounds()
+
+	_line("")
+	_sections_finished += 1
+
+
+
+func _loss_period_and_bounds() -> void:
 	# A snapshot every second tick is the normal case at 64 ticks and 32 snapshots, and
 	# a gap of one period is not a loss. Counting ticks reported half of every clean link
 	# lost (0.52 measured against 0.05 injected, through a real relay on ENet).
@@ -199,10 +207,6 @@ func _section_loss() -> void:
 	_check("loss never goes negative", evil.snapshots_lost >= 0, "%d" % evil.snapshots_lost)
 	_check("loss_rate stays in 0..1",
 		evil.loss_rate() >= 0.0 and evil.loss_rate() <= 1.0, "%.3f" % evil.loss_rate())
-
-	_line("")
-	_sections_finished += 1
-
 
 # --- 3. Rates, which have to go stale ---------------------------------------
 

@@ -40,7 +40,7 @@ Read the family [CLAUDE.md](../../CLAUDE.md) first; this file is only what is sp
 | `addons/dot_net/bandwidth/`, `stats/` | per-peer budget with a starvation-bounded accumulator; `DotNetStats` |
 | `addons/dot_net/profile/` | `DotNetProfileLink`: opt-in carrier for dot-core's `DotProfileRuntime` (admin requests up, rows down, late-joiner snapshot); `attach` before start is the only switch |
 | `addons/dot_net/testing/dot_net_udp_relay.gd` | a lossy UDP relay for tests. No `class_name`: preload by path |
-| `examples/` | `netcode_demo`, `diagnostics_demo`, `loss_demo`, `relay_demo` |
+| `examples/` | `netcode_demo`, `diagnostics_demo`, `loss_demo`, `relay_demo`; `netcode_demo`'s sections live in `examples/selftest/` as a chain of scripts (`netcode_base` < `netcode_tests` < `netcode_sections_1`..`7`), each extending the one before, so a helper sits in the file of its first caller or above |
 
 ## Running and testing
 
