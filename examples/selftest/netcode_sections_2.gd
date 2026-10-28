@@ -3,21 +3,9 @@ extends "netcode_sections_1.gd"
 ## Sections of netcode_demo.gd, moved unchanged; part 2 of 7.
 
 
-## The interpolation buffer is a count of SNAPSHOTS and a render time is a TICK.
-##
-## [method DotNetInterpolator.sample] used to subtract the one from the other unconverted,
-## so a "two snapshot" buffer was two ticks: at 128 ticks and 20 snapshots, under a sixth of
-## what the config asked for and less than one snapshot interval. The render time then sat
-## past the newest snapshot most of the time and every remote entity in the family was
-## extrapolated rather than interpolated — 1,684 extrapolated frames in six seconds of
-## game-playground. Nothing above could see it: every sample there is at a hand-picked tick,
-## chosen by somebody holding the same confusion.
-##
-## So this drives it the way a game does — a server at 128 ticks sending 20 snapshots, a
-## client whose clock is anchored by those snapshots and advanced by its own ticks, and
-## [method DotNetManager.interpolate_frame] four times a tick at the fractions a renderer
-## would pass — and asserts on the interpolator's own extrapolation count, which is what
-## an operator reads when a remote player looks wrong. Synchronous: nothing here suspends.
+## The interpolation buffer is a count of SNAPSHOTS and a render time is a TICK; subtracting one
+## from the other unconverted made a "two snapshot" buffer two ticks, so every remote entity
+## was extrapolated. Driven as a game does (128 ticks, 20 snapshots); asserts the extrapolation count.
 func _test_render_delay() -> void:
 	_sections_entered += 1
 	print("")
@@ -125,13 +113,9 @@ func _test_render_delay() -> void:
 	var worst := [0.0, 0.0, 0.0]
 	var counts: Array[Dictionary] = []
 
-	# The third leg is clean and on a 120 ms round trip. The render time is counted back
-	# from the newest snapshot the client HOLDS, not from the tick the server is on: counted
-	# from the server's tick, the flight time came out of the buffer -- ten ticks of these
-	# twelve -- and three frames in four were drawn past the newest snapshot (measured
-	# through a real relay on ENet, game-arena's `headless_lossy`). Snapshots in this loop
-	# arrive the instant they are sent, so a buffer that is right here is right because of
-	# where it is measured from, not because the link was kind.
+	# The third leg is clean on a 120 ms round trip. The render time counts back from the newest
+	# snapshot the client HOLDS, not the server's tick, or the flight time eats the buffer. Snapshots
+	# arrive the instant they are sent, so it is right because of where it is measured from.
 	for leg in range(3):
 		lossy[0] = leg == 1
 		if leg == 2:
@@ -189,11 +173,9 @@ func _test_render_delay() -> void:
 			float(worst[leg]) < 0.02
 		)
 
-	# And then they stop. The last snapshot that moves them carries the stop; every one after
-	# it carries nothing for `position`, because nothing changed. What the client is drawing
-	# a second later has to be where the server left them — not the blend it happened to be
-	# drawing when the stop arrived, which is what a property read back after the
-	# interpolator had written into it used to hand the next snapshot as the server's word.
+	# And then they stop. Every snapshot after the stop carries nothing for `position`, so what
+	# is drawn later has to be where the server left them, not the blend being drawn when the
+	# stop arrived (a property read back after the interpolator wrote into it).
 	lossy[0] = false
 	server_move.velocity = Vector3.ZERO
 	for tick in range(1153, 1153 + 128):
@@ -315,11 +297,9 @@ func _test_prediction() -> void:
 		input.move = Vector2(1.0, 0.0) if tick % 2 == 1 else Vector2(0.0, 1.0)
 		inputs.append(input)
 
-	# The server, doing exactly what DotNetManager.server_tick does: take the
-	# input for the tick, apply it, then simulate.
-	# In the tree, unlike the other sections' entities: reconciliation reads
-	# `world_position()` to measure the correction, and `global_position` on a
-	# Node3D outside the tree is an engine error per call.
+	# The server, as DotNetManager.server_tick does: take the input for the tick, apply it,
+	# then simulate. In the tree, unlike the other sections' entities: reconciliation reads
+	# `world_position()`, and `global_position` outside the tree is an engine error per call.
 	var server_entity := _in_tree(_make_entity(&"player", 2))
 	server_entity.is_authoritative = true
 	var server_movement := server_entity.behaviours[0] as Movement
@@ -369,11 +349,9 @@ func _test_prediction() -> void:
 	_check("velocity reconverged too",
 		client_movement.velocity.distance_to(server_movement.velocity) < 0.001)
 
-	# A hole in the history: the client's clock jumped forward over ticks 14-16 (a
-	# catch-up), so it never made commands for them and the server ran them on tick 13's,
-	# as it runs any tick whose command never came. The replay has to do the same, not
-	# stop at the hole: stopping left game-arena's predicted player 2 m short of the
-	# server at 20% loss (2026-10-09).
+	# A hole in the history: the client's clock jumped over ticks 14-16, so it made no commands
+	# for them and the server ran them on tick 13's. The replay must do the same, not stop at
+	# the hole (that left the predicted player 2 m short at 20% loss).
 	var holed_server := _in_tree(_make_entity(&"player", 2))
 	holed_server.is_authoritative = true
 	var holed_server_movement := holed_server.behaviours[0] as Movement
@@ -478,12 +456,10 @@ func _test_prediction() -> void:
 		_out_of_tree(entity)
 
 
-# --- The buffer growing ----------------------------------------------------
 
-## A link that turns jittery: the interpolation buffer has to grow, and it must not move
-## the render time backwards to do it -- and once grown it has to cover how late the
-## snapshots actually are. 128 ticks, a snapshot every 4, played tick by tick with the
-## receive timeline on the quickest arrivals, as `DotNetClock` keeps it.
+## A link that turns jittery: the interpolation buffer must grow without moving the render
+## time backwards, and once grown cover how late snapshots are. 128 ticks, a snapshot every 4,
+## with the receive timeline on the quickest arrivals, as `DotNetClock` keeps it.
 func _test_buffer_growth() -> void:
 	print("[the buffer growing]")
 	var config := DotNetConfig.new()
@@ -549,12 +525,9 @@ func _check_two_slips(physics: float) -> void:
 		least, most], least > 0.5 and most < 1.5)
 
 
-## What is drawn between ticks stays continuous through the three things that move a
-## client's timelines in jumps: a physics frame that ran no tick or two (the clock drifting),
-## the receive timeline re-anchoring a tick at a time, and a snapshot stream resuming after an
-## extrapolation. Each is played at 144 frames a second against 64 ticks, and each against
-## its control: the same frames drawn the way they were before (the engine's fraction alone,
-## the receive timeline as it is, no easing), which has to show the jump these remove.
+## What is drawn between ticks stays continuous through the three jumps in a client's timelines:
+## a frame that ran no tick, the receive timeline re-anchoring, and a stream resuming after
+## extrapolation. At 144 fps against 64 ticks, each against a control that has to show the jump.
 func _test_drawing_through_slips() -> void:
 	print("")
 	print("[drawing through slips]")
@@ -635,11 +608,9 @@ func _test_interpolation() -> void:
 	interpolator.push(1, 100, {"position": Vector3(0, 0, 0)})
 	interpolator.push(1, 110, {"position": Vector3(10, 0, 0)})
 
-	# The buffer is 2 snapshots, and at the default 60 ticks / 20 snapshots a snapshot is 3
-	# ticks, so this renders 6 ticks behind: tick 101, a tenth of the way from 100 to 110.
-	# This comment used to say "2 ticks of delay in this unit", which is the bug
-	# `_test_render_delay` is about written down as a fact; the check below it passed either
-	# way, because x=7 is also between the two snapshots.
+	# The buffer is 2 snapshots, and at 60 ticks / 20 snapshots a snapshot is 3 ticks, so this
+	# renders 6 ticks behind: tick 101, a tenth of the way from 100 to 110. (x=7 is between the
+	# two snapshots either way, so the check alone would not tell 2 ticks from 6.)
 	var midpoint := interpolator.sample(1, 107)
 	var sampled: Vector3 = midpoint.get("position", Vector3.ZERO)
 	_check(
@@ -710,12 +681,9 @@ func _test_interpolation() -> void:
 		extrapolated.length() < 1000.0
 	)
 
-	# --- the interpolated value has to reach something ------------------------
-	#
-	# Everything above checks that a smooth value is computed. This checks that anything
-	# is told about it. Without the notification a game only copies replicated state on a
-	# snapshot, so a remote entity moves in 20 Hz steps and the interpolator's whole
-	# output is discarded — which looks exactly like an interpolator that does not work.
+	# Everything above checks that a smooth value is computed; this checks that anything is told
+	# about it. Without the notification a game copies state only on a snapshot, so a remote
+	# moves in 20 Hz steps and the interpolator's output is discarded.
 	var config2 := DotNetConfig.new()
 	config2.adaptive_interpolation = false
 	config2.interpolation_buffer = 2.0

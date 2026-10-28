@@ -3,12 +3,9 @@ extends "netcode_sections_4.gd"
 ## Sections of netcode_demo.gd, moved unchanged; part 5 of 7.
 
 
-## A snapshot bigger than [member DotNetConfig.mtu] goes out in parts, each applying alone.
-##
-## Godot's ENet peer fragments an unreliable packet over its MTU, and losing any fragment
-## loses the packet: a game whose snapshots ran past it (mg-buses-from-hell, at a round's
-## spawn) lost about twice as many on a native client, and nothing here measured a size.
-## Every check below is armed: [member DotNetConfig.mtu] was declared and read by nothing.
+## A snapshot bigger than [member DotNetConfig.mtu] goes out in parts, each applying alone:
+## ENet fragments an unreliable packet over its MTU and losing any fragment loses the packet.
+## Every check below is armed (the setting was once declared and read by nothing).
 func _test_snapshot_parts() -> void:
 	print("")
 	print("[snapshot parts]")
@@ -50,7 +47,6 @@ func _test_snapshot_parts() -> void:
 	var at := func(m: Movement) -> float:
 		return float((m.received_values().get(&"position", Vector3.ZERO) as Vector3).x)
 
-	# --- Over the MTU: parts, each under it, every entity in exactly one ---------
 
 	for i in ENTITIES:
 		on_server[i].position = Vector3(1.0 + i, 0, 0)
@@ -85,7 +81,6 @@ func _test_snapshot_parts() -> void:
 	_check("and the decode is clean (%d)" % watcher.stats.decode_failures,
 		watcher.stats.decode_failures == 0)
 
-	# --- A lost part loses its own entities and nothing else -------------------
 
 	for i in ENTITIES:
 		on_server[i].position = Vector3(100.0 + i, 0, 0)
@@ -166,7 +161,6 @@ func _test_snapshot_parts() -> void:
 	for index in range(1, newer.size()):
 		deliver.call(newer[index])
 
-	# --- Under the MTU: one packet, byte for byte the format before parts --------
 
 	host.config.mtu = 8192
 	for i in ENTITIES:
@@ -184,7 +178,6 @@ func _test_snapshot_parts() -> void:
 			count == ENTITIES and whole.size() * 8 - _bits_before_trailer(whole, watcher) < 8)
 	sent.clear()
 
-	# --- More than sixteen parts' worth: the rest waits, nothing is malformed ----
 
 	host.config.mtu = MTU
 	host.config.max_entities_per_snapshot = 0
@@ -238,9 +231,8 @@ func _check_thread_variants(off: Dictionary, extra: Dictionary) -> void:
 					and (not DotParallel.available() or int(other["pooled"]) > 0))
 
 
-## Send views exist only for what a peer is sent: the pooled path used to make one for every
-## behaviour of every entity for every peer. Two peers, entities far from both, inline and on
-## workers.
+## Send views exist only for what a peer is sent, not one per behaviour of every entity for
+## every peer. Two peers, entities far from both, inline and on workers.
 func _test_view_count() -> void:
 	var counts := {}
 	for workers in [0, 2]:
@@ -290,9 +282,9 @@ func _test_view_count() -> void:
 		counts[2][0] == 12 and counts[2][1] == 0)
 
 
-## A peer's first entity registered inside a tick, with workers on: the observer is found by
-## the snapshot but was not in the list that was frozen, so interest must be asked about a
-## frozen one. Fails (unfrozen asks) if the job takes the observer as it finds it.
+## A peer's first entity registered inside a tick, with workers on: the snapshot locates the
+## observer but it was not in the frozen list, so interest must be asked about a frozen one.
+## Fails (unfrozen asks) if the job takes the observer as it finds it.
 func _test_first_entity_mid_tick() -> void:
 	var host := _parts_manager("MidTick", true, 1200)
 	host.config.snapshot_workers = 2
@@ -550,16 +542,9 @@ func _threads_scenario(
 	return out
 
 
-## [b]An entity with nothing to say is listed, not written.[/b] Every relevant entity used to
-## go out every snapshot with its 24-bit id and a 6-bit count per behaviour even when nothing
-## had changed: about 396 of mg-buses-from-hell's 429 steady bytes, 88 entities of headers.
-## A client that announces [constant DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS] is sent
-## those as runs of ids in the part's tail and applies each exactly as an empty body, so
-## `_net_state_applied`, the interpolator and relevance all read as before. Armed, each fix
-## reverted in turn: the send side off sends 149 B against 149 B and writes all 30; the
-## receive side ignoring the list fires the hook for 1 of 30, splits fail to apply, and
-## [method _test_standing_still]'s listed run walks 19.5 m off (#17's shape); the old early
-## return sends 0 B to a peer with nothing relevant and its acknowledgement stays at 9.
+## [b]An entity with nothing to say is listed, not written.[/b] A client announcing
+## [constant DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS] gets runs of ids in the part's tail,
+## applied exactly as an empty body. Armed with each fix reverted in turn (send, receive, early return).
 func _test_unchanged_entities() -> void:
 	print("")
 	print("[unchanged entities]")

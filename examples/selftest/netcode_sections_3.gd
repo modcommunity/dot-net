@@ -3,7 +3,6 @@ extends "netcode_sections_2.gd"
 ## Sections of netcode_demo.gd, moved unchanged; part 3 of 7.
 
 
-# --- Acked baselines -------------------------------------------------------
 
 ## Two peers, and a lost packet. Both were replicated wrongly and neither showed up
 ## anywhere else, because the integration run has exactly one peer and loses only
@@ -12,7 +11,6 @@ func _test_acked_baselines() -> void:
 	print("")
 	print("[acked baselines]")
 
-	# --- A peer is not told what another peer was told -----------------------
 
 	var first := _make_entity(&"player", 0)
 	add_child(first.get_parent())
@@ -69,7 +67,6 @@ func _test_acked_baselines() -> void:
 		not seven_health and seven_position
 	)
 
-	# --- A lost snapshot is re-sent, once acknowledgements are wired ---------
 
 	var lonely := _make_entity(&"player", 0)
 	add_child(lonely.get_parent())
@@ -101,7 +98,6 @@ func _test_acked_baselines() -> void:
 	)
 	_check("and nothing that did arrive is re-sent", owed_again.size() == 1)
 
-	# --- Without acknowledgements, nothing changes ---------------------------
 
 	# The pre-existing behaviour, and what a host that has not wired acks still gets.
 	var untracked := _make_entity(&"player", 0)
@@ -117,7 +113,6 @@ func _test_acked_baselines() -> void:
 		optimistic.collect_dirty(7, false).is_empty()
 	)
 
-	# --- The record is dropped with the peer ---------------------------------
 
 	_check("peer 7 has a record", not shared.peer_view_state(7).is_empty())
 	shared.forget_peer(7)
@@ -128,11 +123,9 @@ func _test_acked_baselines() -> void:
 		_out_of_tree(entity)
 
 
-## [member DotNetConfig.share_dirty_sets] against the per-peer rule it short-cuts, run side by
-## side on two copies of one entity through the same snapshots: changes or none, peers left
-## out (interest) or held back (budget), snapshots lost, acknowledged late or never, the
-## owner's predicted entity owed until confirmed. Every peer's dirty set and bytes must be
-## the same both ways, every snapshot; and the shared path must actually be taken.
+## [member DotNetConfig.share_dirty_sets] against the per-peer rule it short-cuts, on two copies
+## of one entity through the same snapshots (loss, late acks, interest, budget, owed predicted
+## state). Every peer's dirty set and bytes must match both ways, and the shared path be taken.
 func _test_shared_dirty_sets() -> void:
 	print("")
 	print("[shared dirty sets]")
@@ -284,11 +277,9 @@ func _test_shared_dirty_sets() -> void:
 
 ## A stop whose snapshot is lost is not rewound to a stale position.
 func _check_standing_still_lossy(per_tick: float) -> void:
-	# Moving, then stopped by the server — and the snapshot carrying the stop is lost. The
-	# next one has nothing new to say against what the server BELIEVES the client has, so
-	# without re-sending until confirmed the client rewinds to where it was before the lost
-	# one: a stale position read as the server's word, on every snapshot until the loss is
-	# discovered a round trip later.
+	# Moving, then stopped by the server, and the snapshot carrying the stop is lost. The next has
+	# nothing new against what the server BELIEVES the client has, so without re-sending until
+	# confirmed the client rewinds to a stale position, read as the server's word.
 	var stopped := _standing_still_run(false, true, STILL_STOP_AT)
 	var lossy_bound := float(STILL_LEAD + 2 * STILL_INTERVAL) * per_tick + 0.01
 	_check(
@@ -307,25 +298,9 @@ func _check_standing_still_lossy(per_tick: float) -> void:
 	)
 
 
-## A server that holds a predicted entity still, and a client that predicts it moving.
-##
-## [b]The case every other prediction check here cannot reach[/b], because in all of them
-## the server moves the entity and a moving position is a changed position: it is in every
-## snapshot, and reconciliation has something to rewind to. Here the server refuses the
-## move without changing anything it replicates — no input reaches it, the way a server-only
-## freeze, a wall only the server has, or any rule the client does not know about would
-## refuse one — so the snapshot carries the entity with nothing in it. The client has to
-## read that as "the server's state is the one you were last sent" and be pulled back.
-##
-## It read it as "the server's state is whatever you are predicting", adopted its own
-## prediction as authoritative, and replayed the unacknowledged inputs on top of it — so
-## the client did not merely fail to come back, it walked away at twice its own speed.
-## game-hungario and the lobby measured 113 and 530 units in their naive admin controls.
-##
-## [param lossy] drops one snapshot in four, with acknowledgements wired as every game in
-## the family wires them, because the send side's own shortcut — a property is not re-sent
-## while its first send is in flight — is exactly what a lost packet turns into a stale
-## baseline for the one entity that now rewinds to it.
+## A server that holds a predicted entity still while a client predicts it moving: the snapshot
+## carries the entity with nothing in it (no input reaches the server, as for a server-only
+## freeze), and the client must read that as "your last-sent state" and be pulled back. [param lossy] drops one snapshot in four, acknowledgements wired.
 func _test_standing_still() -> void:
 	print("")
 	print("[a predicted entity the server holds still]")
@@ -370,10 +345,9 @@ func _test_standing_still() -> void:
 		float(moving["worst"]) < 0.05
 	)
 
-	# The same hold, with the server listing the entity as unchanged rather than writing an
-	# empty body for it. The client must reconcile on every snapshot exactly as before:
-	# reconcile is where its inputs are acknowledged and where the hold is enforced, so a
-	# listed entity that skipped it would walk away again (#17).
+	# The same hold, with the server listing the entity as unchanged rather than writing an empty
+	# body. The client must still reconcile on every snapshot, where inputs are acknowledged and
+	# the hold is enforced (#17).
 	var listed := _standing_still_run(false, false, 0, true)
 	_check(
 		"listed as unchanged: pulled back all the same (worst %.2f m)" % float(listed["worst"]),
@@ -393,9 +367,8 @@ func _test_standing_still() -> void:
 
 
 ## One run of [method _test_remote_bumps]: a server and a client in one process, the client
-## [constant BUMP_LEAD] ticks ahead, every snapshot delivered at once or lost. Returns the
-## worst and mean gap between where the client first predicted its player at a tick and
-## where the server had it, and how many ticks the server pushed it.
+## [constant BUMP_LEAD] ticks ahead, snapshots delivered at once or lost. Returns the worst and
+## mean gap to the server's position and how many ticks the server pushed it.
 func _bump_run(speed: float, loss: float, estimate: StringName) -> Dictionary:
 	var scope := "bump_%d_%d_%s" % [roundi(speed), roundi(loss * 100.0), estimate]
 	var dt := 1.0 / 60.0
@@ -552,16 +525,9 @@ func _bump_table() -> Dictionary:
 	return table
 
 
-## One run of [method _test_standing_still]. [param server_moves] decides whether the
-## server is given the client's inputs; a non-zero [param stop_at] gives them until that
-## tick and then has the server stop the entity itself, as a freeze would. [param lossy]
-## drops every fourth snapshot, which with a snapshot every third tick is the one at
-## [constant STILL_STOP_AT]. Acknowledgements are wired, as every game in the family wires
-## them.
-##
-## Returns the worst and final gap between where the client predicted the entity at a
-## tick and where the server had it at that tick, and how many times the client rewound
-## to a position the server did not have at the snapshot's tick.
+## One run of [method _test_standing_still]. [param server_moves] gives the server the client's
+## inputs (until non-zero [param stop_at], then it stops the entity itself); [param lossy] drops
+## every fourth snapshot. Returns worst and final gap, and how many rewinds went to a wrong position.
 func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact: bool = false) -> Dictionary:
 	const TICKS := 120
 	var scope := "still_%d_%d_%d_%d" % [int(server_moves), int(lossy), stop_at, int(compact)]

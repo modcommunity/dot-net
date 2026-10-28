@@ -17,10 +17,9 @@ const SNAPSHOT_PART_TRAILER_BITS := 8
 ## Where a snapshot's 12-bit entity count starts, after the 32-bit tick.
 const SNAPSHOT_COUNT_BIT := 32
 
-## The first byte of a snapshot part's tail when it lists unchanged entities (see
-## [code]docs/wire.md#unchanged-entities[/code]). Read by a client from before the tail as a
-## part trailer, it is part 15 of 1, which that client refuses as a bad trailer rather than
-## misreading; it is never sent to one, but a mistake in that gate fails loudly.
+## The first byte of a snapshot part's tail when it lists unchanged entities (docs/wire.md#unchanged-entities).
+## A client from before the tail reads it as part 15 of 1 and refuses it as a bad trailer; it is
+## never sent to one, but a mistake in that gate fails loudly.
 const UNCHANGED_TAIL_MARK := 0x0F
 
 ## A tail is the mark, the runs and an always-present part trailer, so at least this many bits
@@ -32,11 +31,9 @@ const UNCHANGED_TAIL_MIN_BITS := 16
 ## or broken server can make a client loop over, far above any game's relevant set.
 const MAX_UNCHANGED_LISTED := 1 << 16
 
-## The input lead a snapshot part may end with, after its trailer: the least arrival lead
-## (signed) and the input tick it was measured on less the snapshot's tick (signed), twelve
-## bits each. Only to a client whose schema says [constant
-## DotNetMessageRegistry.FEATURE_INPUT_LEAD], and only after a tail, so a part carrying one
-## always has the tail form. See [code]docs/wire.md#the-input-lead[/code].
+## The input lead a snapshot part may end with, after its trailer: the least arrival lead and the
+## input tick measured on less the snapshot's tick, twelve signed bits each. Only to a client whose
+## schema says [constant DotNetMessageRegistry.FEATURE_INPUT_LEAD] (docs/wire.md#the-input-lead).
 const INPUT_LEAD_FIELD_BITS := 12
 const INPUT_LEAD_BITS := 2 * INPUT_LEAD_FIELD_BITS
 
@@ -57,15 +54,9 @@ signal snapshot_applied(tick: int)
 signal entity_spawned(identity: DotNetIdentity)
 signal entity_despawned(net_id: int)
 
-## A peer's message schema cannot work with this one: a type one end REQUIRES that the
-## other does not have. [param error] is CODE_VERSION with a sentence a player can read.
-##
-## [b]dot-net cannot act on this and does not try.[/b] It owns no connection, so it cannot
-## drop the peer; what it does is stop decoding anything that peer sends. The host is the
-## one holding the socket, and a server should disconnect the peer with
-## [code]error.message[/code] as the reason -- dot-game's [code]DotGameNetcode[/code] wires
-## that to [code]DotServer.kick[/code], and a game building its own manager connects it
-## itself. A client needs nothing: the server refuses it with the same sentence.
+## A peer's message schema cannot work with this one: a type one end REQUIRES that the other lacks.
+## [param error] is CODE_VERSION with a readable sentence. dot-net owns no connection and cannot drop
+## the peer, so the host (dot-game's [code]DotGameNetcode[/code]) kicks with [code]error.message[/code].
 signal peer_schema_refused(peer_id: int, error: DotError)
 
 @export_group("Role")
@@ -77,27 +68,19 @@ signal peer_schema_refused(peer_id: int, error: DotError)
 @export var local_peer_id: int = 1:
 	set(value):
 		local_peer_id = value
-		# The registry keeps its own copy, taken at setup, and decides `is_owner` — and so
-		# `is_predicted` — from it when an entity registers. A client that learns its peer
-		# id from a handshake after setup (a hello, say) otherwise
-		# registers its own occupant as somebody else's, and walks a full round trip behind
-		# its own keyboard with every check on a loopback that set the id first passing.
+		# The registry keeps its own copy, taken at setup, and decides `is_owner` (so `is_predicted`)
+		# from it. A client learning its peer id from a handshake after setup would otherwise register
+		# its own occupant as somebody else's and walk a round trip behind its keyboard.
 		if registry != null:
 			registry.set_local_peer(value)
 
-## Run the tick loop in [method Node._physics_process].
-##
-## Off when the host drives ticks itself — a dedicated server that already has a
-## simulation loop, or a test stepping deterministically.
+## Run the tick loop in [method Node._physics_process]. Off when the host drives ticks itself (a
+## dedicated server with its own loop, or a test stepping deterministically).
 @export var auto_tick: bool = true
 
-## Suffix for this manager's [DotRegistry] name.
-##
-## Two managers in one process — a listen server, or a test running both sides —
-## would otherwise both claim [code]dot_net_manager[/code] and the second would
-## displace the first. Set it to [code]"server"[/code] and [code]"client"[/code] and
-## each registers under its own scoped name. See
-## [method DotRegistry.register_scoped].
+## Suffix for this manager's [DotRegistry] name. Two managers in one process (a listen server, a
+## test running both sides) would both claim [code]dot_net_manager[/code]; set "server" and "client"
+## so each registers under its own scoped name ([method DotRegistry.register_scoped]).
 @export var service_scope: StringName = &""
 
 @export_group("Configuration")
@@ -136,11 +119,9 @@ var predictor: DotNetPredictor = null
 ## Server-side only.
 var history: DotNetHistory = null
 
-## How a payload reaches a peer.
-##
-## Signature: [code]func(peer_id: int, payload: PackedByteArray, delivery: DotNetMessage.Delivery) -> void[/code].
-## A peer id of 0 means broadcast. Set by the host; without it the manager simulates
-## but sends nothing, which is exactly what a single-player or replay session wants.
+## How a payload reaches a peer: [code]func(peer_id: int, payload: PackedByteArray, delivery: DotNetMessage.Delivery)[/code].
+## A peer id of 0 means broadcast. Set by the host; without it the manager simulates but sends
+## nothing, which is what a single-player or replay session wants.
 var send_fn: Callable = Callable()
 
 ## peer_id -> DotNetInput.Buffer, on the server.
@@ -171,13 +152,9 @@ var _perf_server_send_usec: int = 0
 ## peer_id -> newest snapshot tick they have acknowledged, on the server.
 var _acks: Dictionary = {}
 
-## peer_id -> whether that peer has ever acknowledged anything.
-##
-## Acknowledgements are optional: this addon does not own the client-to-server path
-## (it does not carry inputs either — see [member send_fn]), so whether they arrive
-## is up to the host. Until one does for a given peer, an unconfirmed snapshot is
-## assumed delivered once it ages out of the window, which is the behaviour every
-## host had before [method receive_ack] existed. See [DotNetBehaviour.PeerView].
+## peer_id -> whether that peer has ever acknowledged anything. Acknowledgements are optional (the
+## host owns the client-to-server path), so until one arrives an unconfirmed snapshot is assumed
+## delivered once it ages out of the window. See [DotNetBehaviour.PeerView].
 var _ack_wired: Dictionary = {}
 
 ## peer_id -> the newest snapshot tick when the peer was added. Server side.
@@ -192,20 +169,17 @@ var _last_inputs: Dictionary = {}
 var _snapshot_heard_tick := -1
 var _held_ticks := 0
 
-## Newest tick a snapshot was built for, on the server.
-##
-## The bound on what a peer may claim to have acknowledged. An acknowledgement is
-## client-controlled, and one naming a tick the server has not reached would promote
-## state that was never sent.
+## Newest tick a snapshot was built for, on the server: the bound on what a peer may claim to have
+## acknowledged. An acknowledgement is client-controlled, and one naming a tick not yet reached
+## would promote state that was never sent.
 var _last_snapshot_tick: int = 0
 
 ## Newest snapshot tick applied in full, on a client. What [method ack_tick] reports.
 var _applied_snapshot_tick: int = 0
 
-## Client side: the newest snapshot tick any part of which has been read, which parts of it
-## have been applied in full (a bitmask), and how many parts it was sent in (0 until a part
-## has been read to its end). -1 before any, so a first snapshot at tick 0 is not a repeat.
-## See [method receive_snapshot].
+## Client side: the newest snapshot tick any part of which has been read, which parts are applied
+## in full (a bitmask), and how many parts it was sent in (0 until the last is read). -1 before any,
+## so a first snapshot at tick 0 is not a repeat. See [method receive_snapshot].
 var _receiving_tick: int = -1
 var _receiving_mask: int = 0
 var _receiving_total: int = 0

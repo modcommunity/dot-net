@@ -57,9 +57,7 @@ addons/dot_net/wire/dot_net_writer.gd::banner	6
 addons/dot_net/wire/dot_net_writer.gd::long_block	14
 examples/diagnostics_demo.gd::banner	6
 examples/diagnostics_demo.gd::long_block	5
-examples/netcode_demo.gd::banner	21
-examples/netcode_demo.gd::history	10
-examples/netcode_demo.gd::long_block	41
+examples/netcode_demo.gd::long_block	2
 examples/relay_demo.gd::banner	4
 examples/relay_demo.gd::history	1
 examples/relay_demo.gd::long_block	3

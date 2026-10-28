@@ -12,10 +12,8 @@ var identity: DotNetIdentity = null
 ## Declared properties, in registration order.
 var net_vars: Array[DotNetVar] = []
 
-## property -> last value received, on a receiving peer.
-##
-## The receive side only. The send side is [member _views], one entry per peer:
-## see [PeerView] for why one shared dictionary could not do both jobs.
+## property -> last value received, on a receiving peer. The receive side only; the send side is
+## [member _views], one entry per peer (see [PeerView]).
 var _baseline: Dictionary = {}
 
 ## property -> true, for what the most recent [method read_state] carried. The receive side
@@ -33,30 +31,9 @@ var _config: DotNetConfig = null
 var _read_tick: int = -1
 
 
-## What one peer is believed to have, and what it has confirmed.
-##
-## [b]Why this is per peer.[/b] Dirty tracking used to be a single dictionary on the
-## behaviour, updated by whichever send happened to run first. Snapshots are built
-## one peer at a time, so the first peer to be served marked every property clean
-## and [b]every other peer received nothing[/b] — a two-client game replicated to
-## exactly one of them, and the third client to come into range of an entity saw
-## only whatever changed after it arrived. Rate limiting had the same fault: one
-## peer's send silenced the property for all of them.
-##
-## [b]Why there are three fields and not one.[/b] Snapshots go out unreliably, so a
-## property written into a packet has not necessarily arrived:
-##
-## - [member acked] is what the peer has [i]confirmed[/i] receiving.
-## - [member pending] is what has been sent since, still unconfirmed, oldest first.
-## - [member believed] is [member acked] with [member pending] laid over it, and is
-##   what dirty tracking compares against — so a property is sent once and not
-##   re-sent every tick while its acknowledgement is in flight.
-##
-## When a snapshot is confirmed lost, its entry leaves [member pending] without ever
-## reaching [member acked], [member believed] is rebuilt without it, and the
-## properties it carried go dirty again and are re-sent. That is the whole loss
-## recovery mechanism: no retransmit queue, no timers, and nothing on the wire but
-## the next snapshot, which was going out anyway.
+## What one peer is believed to have, and what it has confirmed. Per peer because one shared dirty
+## dictionary let the first peer served mark everything clean for all. [member acked] is confirmed,
+## [member pending] is sent since (oldest first), [member believed] is acked with pending laid over; a lost snapshot leaves pending and its properties go dirty again.
 class PeerView extends RefCounted:
 	## property -> value the peer has confirmed.
 	var acked: Dictionary = {}
@@ -64,11 +41,8 @@ class PeerView extends RefCounted:
 	## property -> value we believe the peer has or is about to have.
 	var believed: Dictionary = {}
 
-	## [code]{"tick": int, "values": Dictionary}[/code], ascending by tick.
-	##
-	## An [Array] rather than a tick-keyed [Dictionary] because it is only ever
-	## appended to at the newest tick and consumed from the oldest, so insertion
-	## order [i]is[/i] tick order and nothing has to sort it.
+	## [code]{"tick": int, "values": Dictionary}[/code], ascending by tick. An [Array] because it is only
+	## appended at the newest tick and consumed from the oldest, so insertion order is tick order.
 	var pending: Array[Dictionary] = []
 
 	## property -> last send time in ms, for [member DotNetVar.max_rate].
@@ -82,14 +56,9 @@ class PeerView extends RefCounted:
 	## See [method collect_dirty].
 	var relost: Dictionary = {}
 
-	## Whether acknowledgements are arriving for this peer.
-	##
-	## Until one does, an unconfirmed snapshot is assumed delivered once it ages out
-	## of the window. That is what this addon did before acknowledgements existed and
-	## it is what a host that has not wired [method DotNetManager.receive_ack] keeps
-	## getting — the same bandwidth, and the same inability to recover a lost
-	## property. Nothing degrades by adding the field; loss recovery is what turning
-	## it on buys. See [method DotNetManager.receive_ack].
+	## Whether acknowledgements are arriving for this peer. Until one does, an unconfirmed snapshot is
+	## assumed delivered once it ages out of the window (no loss recovery), as for a host that has not
+	## wired [method DotNetManager.receive_ack].
 	var strict: bool = false
 
 	## The snapshot serial ([member DotNetBehaviour._read_serial]) whose reads [member believed]
@@ -126,14 +95,9 @@ class PeerView extends RefCounted:
 		}
 
 
-## Within one snapshot, what [method write_state] and [method collect_dirty] remember between
-## peers: each distinct set of properties encoded, the last set signed, and the dirty sets
-## shared by peers in step. The manager's own thread keeps
-## these in the behaviour's own members ([member _encoded] and the rest); a snapshot built on
-## workers has one per behaviour per task when snapshots are built on workers,
-## because these are filled in as peers ask and two threads filling one would race. A
-## memo of answers that depend only on the snapshot's reads, so any number of them give the
-## same bits.
+## Within one snapshot, what [method write_state] and [method collect_dirty] remember between peers:
+## each distinct set encoded, the last set signed, the dirty sets shared by peers in step. A worker
+## task has one per behaviour, since two threads filling one would race; a memo of pure reads.
 class EncodeCache extends RefCounted:
 	## The encoding of each distinct set of properties, by the bit of a byte it starts at
 	## (always 0 for a set with nothing byte-aligned in it) and then by the set, as a bitmask
@@ -163,17 +127,14 @@ class EncodeCache extends RefCounted:
 		shared_dirty.clear()
 
 
-# --- Subclass interface ----------------------------------------------------
 
 ## Declare replicated properties here, with [method replicate].
 func _register_net_vars() -> void:
 	pass
 
 
-## Called once this entity has a network id, on every peer.
-##
-## The place to do setup that needs to know [member DotNetIdentity.is_owner] or
-## whether this peer is authoritative — neither is known in [method Node._ready].
+## Called once this entity has a network id, on every peer: the place for setup that needs
+## [member DotNetIdentity.is_owner] or authority, neither known in [method Node._ready].
 func _net_ready() -> void:
 	pass
 
@@ -183,28 +144,16 @@ func _net_removed() -> void:
 	pass
 
 
-## Fixed-tick simulation. Runs only where this entity can be simulated.
-##
-## See [method DotNetIdentity.can_simulate]. On a predicted entity this runs on both
-## the owning client and the server, with the same inputs, which is what makes
-## reconciliation converge — so it must be deterministic given the same input and
-## must not read anything that differs between machines (wall clock, random without a
-## seeded stream, other players' unpredicted state).
+## Fixed-tick simulation. Runs only where this entity can be simulated ([method DotNetIdentity.can_simulate]).
+## On a predicted entity it runs on the owning client and the server with the same inputs, so it must
+## be deterministic: no wall clock, unseeded random, or other players' unpredicted state.
 func _net_simulate(_tick: int, _delta: float) -> void:
 	pass
 
 
-## Whether simulating this behaviour on its owning client would change anything now.
-## Asked on a predicted entity after a reconcile has rewound it to the server's state.
-##
-## [b]A replay of a simulation that does nothing is the whole lead for nothing.[/b] A dead
-## player simulates nothing, while the server moves its body anyway (a fall, a push, a
-## spectator's view), so no snapshot can match the prediction and every one replayed the
-## whole input lead to land where the rewind had already put it: game-arena's client,
-## dead, replayed 10 ticks on every snapshot (2026-10-17). False when every behaviour of
-## the entity says so, and the rewind is kept without a replay. Default true. Decide from
-## the rewound state ([method _net_state_applied] has run), so the snapshot that
-## respawns the player replays as usual.
+## Whether simulating this behaviour on its owning client would change anything now, asked on a
+## predicted entity after a reconcile rewound it. False when every behaviour says so (a dead player
+## simulates nothing) and the rewind is kept without replaying the lead. Default true.
 func _net_predicts() -> bool:
 	return true
 
@@ -216,24 +165,9 @@ func _net_state_applied(_tick: int) -> void:
 	pass
 
 
-## Reads a property. Override to compute rather than store.
-## Called after interpolation has written this behaviour's interpolated properties.
-##
-## [b]Distinct from [method _net_state_applied], and both are needed.[/b]
-## `_net_state_applied` runs when a *snapshot* arrives — at the snapshot rate, a few times
-## a second — and is where a game adopts authoritative state. This runs every *frame*, on
-## a remote entity, after [DotNetInterpolator] has written the smoothed value of every
-## property declared [method DotNetVar.interpolated].
-##
-## Without it the interpolator's work is computed and thrown away. A game that copies
-## `net_position` into a node or a simulation state only from `_net_state_applied` moves
-## every remote entity at the snapshot rate — 20 Hz, in steps — while the interpolated
-## value sits in the property nobody read. It looks like the interpolator is broken; it is
-## not, it is unread.
-##
-## It deliberately does not carry the bookkeeping `_net_state_applied` does. The tick is a
-## *render* tick, behind the server's, and recording it as the newest state applied would
-## make reconciliation rewind to a tick the server never sent.
+## Reads a property. Override to compute rather than store. Called every frame on a remote entity after
+## [DotNetInterpolator] wrote the smoothed values, unlike [method _net_state_applied] (snapshot rate).
+## It does not record the tick: it is a render tick, and recording it would make reconciliation rewind to one never sent.
 func _net_interpolated(_tick: int) -> void:
 	pass
 

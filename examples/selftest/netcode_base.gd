@@ -2,7 +2,6 @@ extends Node
 
 ## Fixtures, harness state and the helpers every section of netcode_demo.gd uses.
 
-# --- Test fixtures ---------------------------------------------------------
 
 ## A movement component, of the kind a game would write.
 class Movement extends DotNetBehaviour:
@@ -75,17 +74,9 @@ class Movement extends DotNetBehaviour:
 		return {"grounded": grounded}
 
 
-## A behaviour that records what the interpolator told it.
-##
-## Exists because the interesting question about interpolation is not whether it computes
-## a smooth value — [method DotNetInterpolator.sample] is checked directly above — but
-## whether anything is ever told about it. A game copies replicated state into a node from
-## a hook, and if the only hook it has is the one a snapshot fires, every remote entity
-## moves at the snapshot rate while the interpolated value sits in a property nobody read.
-## Counts the engine's own errors while installed. The only way a suite can assert that
-## something produced NO `Condition "!is_inside_tree()"` line: those go to stderr, change no
-## exit code, and a green run that prints ten of them is the shape this family keeps
-## finding in its logs.
+## Counts the engine's own errors while installed: the only way a suite can assert that
+## something produced NO `Condition "!is_inside_tree()"` line, which goes to stderr and
+## changes no exit code.
 class EngineErrors extends Logger:
 	var _lock := Mutex.new()
 	var _seen := PackedStringArray()
@@ -108,6 +99,8 @@ class EngineErrors extends Logger:
 		return n
 
 
+## A behaviour that records what the interpolator told it: the hook a game copies state from,
+## which a snapshot-only hook would leave moving at the snapshot rate.
 class Interpolated extends DotNetBehaviour:
 	var position: Vector3 = Vector3.ZERO
 	var health: int = 100
@@ -277,11 +270,9 @@ class Pacer extends DotNetBehaviour:
 		heard_position = said.get(&"position", heard_position)
 
 
-## A predicted player that walks +x into a [Pacer] and is pushed back out of it along x:
-## the smallest simulation in which a client predicts a bump against something it does not
-## predict. [member obstacle_at] answers where the bot is
-## for a tick, `Vector3.INF` for "collide with nothing"; the server's answer is the truth,
-## the client's is whatever estimate is under test.
+## A predicted player that walks +x into a [Pacer] and is pushed back along x: the smallest
+## simulation where a client predicts a bump against something it does not predict.
+## [member obstacle_at] is the bot's position per tick (`Vector3.INF` for nothing).
 class Bumper extends DotNetBehaviour:
 	## Two capsule radii, 0.35 m each, as dot-player-controller's standing hull.
 	const APART := 0.7
@@ -455,29 +446,13 @@ class VitalMessage extends DotNetMessage:
 		pass
 
 
-# --- Harness ---------------------------------------------------------------
 
 var _passed := 0
 var _failed := 0
 
-## Suspending sections entered, and suspending sections that ran to the end.
-##
-## A section that suspends must be called with [code]await[/code]. Called without
-## it, the section runs only as far as its first suspension and everything after
-## that — including its assertions — is silently dropped, while [method _run]
-## carries straight on to [method SceneTree.quit]. Nothing reports it: the count
-## printed at the end is a count of checks that ran, so checks that never ran
-## cannot lower it, and the exit code stays 0.
-##
-## That is not hypothetical. [method _test_interpolation] was called without
-## [code]await[/code], so "adaptive buffer responds" never ran once in this demo's
-## life, and the locals of the suspended coroutine — two interpolators, their two
-## configs and three tracks — were the seven objects Godot reported leaked at
-## exit. Every previous audit read the count, saw 125, and believed it.
-##
-## Every suspending section increments both: the first on entry, the second on its
-## last line. [method _run] compares them, which turns a silent drop into a failed
-## check. A new suspending section must do the same.
+## Suspending sections entered, and those that ran to the end. A suspending section called
+## without [code]await[/code] drops its assertions silently and the count cannot show it, so
+## [method _run] compares the two counts and every such section must bump both.
 var _sections_entered := 0
 var _sections_completed := 0
 
@@ -519,7 +494,6 @@ class TagInterest extends DotNetInterest:
 
 
 
-# --- Shared dirty sets -----------------------------------------------------
 
 ## A behaviour with nothing that keeps its dirty sets apart (no epsilon, no rate limit), and
 ## one of everything else that decides them: an owner-only, an observers-only and a
@@ -549,21 +523,9 @@ const STILL_INTERVAL := 3
 const STILL_STOP_AT := 60
 
 
-## [b]Bumping a remote under loss.[/b] A client predicts its own player against the others at
-## an estimate of where they are; the server pushes it out of where they really are. The gap
-## between the two is the prediction error a bump costs, and this section measures it for each
-## way of making the estimate (docs/prediction.md#bumping-a-remote).
-##
-## A [Bumper] walks at 3 m/s into a [Pacer] that comes at it, pushes it back, turns at once
-## and walks away, at [constant BUMP_SPEEDS]. Snapshots are lost at random, the same draws for
-## every estimate. The gap is taken at each tick as first predicted, which is where the
-## player is drawn before any correction.
-##
-## The estimates: `heard`, where the bot was last heard (what every game does); `ignore`, no
-## bot in the prediction at all; `line`, the interpolator's line through the last two
-## positions sampled at the input tick; `extrapolated`, [method DotNetBehaviour.extrapolated_value]
-## with [member DotNetConfig.remote_extrapolation_sec] at [constant BUMP_EXTRAPOLATE_SEC]; and
-## `default`, the same call with the setting left at its default.
+## [b]Bumping a remote under loss.[/b] The gap between a client's estimate of another player
+## and the server's truth is the prediction error a bump costs; measured per estimate
+## (`heard`, `ignore`, `line`, `extrapolated`, `default`), docs/prediction.md#bumping-a-remote.
 const BUMP_LEAD := 6
 const BUMP_TICKS := 1200
 const BUMP_SPEEDS: Array[float] = [4.0, 8.0]
@@ -575,27 +537,15 @@ const BUMP_ESTIMATES: Array[StringName] = [
 ]
 
 
-## [member DotNetConfig.reconcile_once_per_frame]: snapshots that arrive together are
-## reconciled once, against the newest, and land exactly where reconciling each would.
-##
-## Two clients read the same payloads from one server in bursts of [constant BURST] (what a
-## WebSocket hands over after a long frame): A reconciles every snapshot as it is read, B
-## defers and flushes once a burst. B must replay once a burst, not once a snapshot, touch
-## nothing until it flushes, and end every burst where A is -- the coalescing is only worth
-## having if it is the same answer.
+## [member DotNetConfig.reconcile_once_per_frame]: snapshots that arrive together reconcile
+## once against the newest and land where reconciling each would. Two clients read the same
+## bursts of [constant BURST]; B must replay once a burst and end each burst where A is.
 const BURST := 4
 
 
-## Snapshots that arrive OUT OF ORDER and TWICE, through two real managers with
-## acknowledgements wired end to end.
-##
-## [b]Nothing here had ever seen either.[/b] Over WebSocket "unreliable" is reliable and in
-## order, so every client so far received every snapshot once, in sequence; a native client
-## on ENet (dot-server's dual stack, 2026-10-07) gets real UDP. A late snapshot is ignored
-## by tick, as superseded -- which loses whatever only it carried, unless the server re-sends
-## it once the client acknowledges a newer one. That recovery is checked behaviour by
-## behaviour in [acked baselines]; this is the whole path: the encoder, the wire, the
-## receiver's tick rule, the client's acknowledgement and the server's resend.
+## Snapshots that arrive OUT OF ORDER and TWICE through two real managers with
+## acknowledgements wired end to end: a late snapshot is ignored by tick, so the server must
+## re-send what only it carried (the whole path; the pieces are in [acked baselines]).
 var _reorder_rng := RandomNumberGenerator.new()
 var _reorder_held_change := false
 
@@ -658,21 +608,16 @@ func _build_player(_context: Dictionary) -> Node:
 	return _make_entity(&"player", 0).get_parent()
 
 
-## Scratch state for the pooling factory in [method _test_spawning].
-##
-## Idle instances are parented to [member _pool_parent], the way a real pool
-## keeps them out of the live container.
+## Scratch state for the pooling factory in [method _test_spawning]; idle instances are
+## parented to [member _pool_parent], out of the live container.
 var _pool_parent: Node = null
 var _pool: Array[Node] = []
 var _pool_reused: int = 0
 var _pool_context: Dictionary = {}
 
 
-## A bare networked entity: Node3D root, DotNetIdentity child.
-##
-## No behaviour, because the spawner does not care about them and a behaviour here
-## would be an inner class of this script, which is not a thing a PackedScene
-## should have to carry.
+## A bare networked entity: Node3D root, DotNetIdentity child. No behaviour, which would be
+## an inner class of this script that a PackedScene should not have to carry.
 func _build_entity_node() -> Node3D:
 	var body := Node3D.new()
 	body.name = "PooledEntity"
@@ -684,11 +629,9 @@ func _build_entity_node() -> Node3D:
 	return body
 
 
-## Packs one into a PackedScene, with or without the identity.
-##
-## Packing rather than preloading keeps the demo a single file. It also exercises
-## register_prefab's fallback check: a node built from DotNetIdentity.new() saves
-## with its base type and a script property, not the type name.
+## Packs one into a PackedScene, with or without the identity. Packing rather than preloading
+## keeps the demo one file and exercises register_prefab's fallback check (a node from
+## DotNetIdentity.new() saves its base type and a script property).
 func _pack_entity(with_identity: bool) -> PackedScene:
 	var body := Node3D.new()
 	body.name = "Entity"

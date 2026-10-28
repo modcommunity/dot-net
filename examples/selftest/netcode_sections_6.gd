@@ -7,12 +7,9 @@ func _test_snapshot_threads() -> void:
 	print("")
 	print("[snapshot threads]")
 
-	# The same scripted ten-peer game built on this thread, on four workers, and on two with
-	# DotParallel.verify on. Every payload sent, and every PeerView and budget accumulator after
-	# each tick, must come out byte for byte the same. The scenario is built to reach every
-	# per-peer record a build writes: distance interest that changes with motion, an owner per
-	# peer, loss in the acks, a budget that starves, parts at a small MTU, and half the peers on
-	# the old wire format.
+	# The same scripted ten-peer game on this thread, on four workers, and on two with
+	# DotParallel.verify on: every payload, PeerView and budget accumulator must come out byte
+	# for byte the same. The scenario reaches every per-peer record a build writes.
 	var was_verify := DotParallel.verify
 	var runs_before := DotParallel.verify_runs
 
@@ -295,20 +292,9 @@ func _test_input_batches() -> void:
 	_input_batches_server_half(buffer, writer, read)
 
 
-## The server says how early each client's commands arrive, and the clock steers by it.
-##
-## One server, two clients on the same simulated link: one that reads the report and one from
-## before it (its table names no features). Every 1/60 s frame the server takes what has
-## arrived and runs a tick, and each client takes its snapshots, advances its clock and sends
-## a command for every tick it ran. The link is 40 ms each way, then 70, then 40 again. The
-## round trip a game feeds the clock is modelled on ENet's: it moves an eighth of the way to
-## the truth every half second.
-##
-## Armed: the client from before the report is the control (with its lead from the modelled
-## round trip, nearly every one of the 240 ticks after the rise had its command late: 469
-## counted, each late and then starved); with the receive timeline not held to real time while the clock runs fast
-## (no [code]_receive_excess[/code]), it was still 6 ticks past the newest snapshot a second
-## and a half after the rise, against the control's 3; it is 4.
+## The server says how early each client's commands arrive and the clock steers by it (a control
+## client predates the report; link 40 ms each way, then 70, then 40). Armed: without the report
+## 469 commands came late; without `_receive_excess` the receive timeline ran 6 ticks past, not 4.
 func _test_input_lead() -> void:
 	print("")
 	print("[the input lead the server reports]")
@@ -490,12 +476,9 @@ func _test_input_lead() -> void:
 		stray.is_lead_reported() and stray_lead <= 12)
 
 
-## A first visit's frames, against a server running in real time: the engine running at most
-## [param cap] steps a frame and dropping the rest, [param stalls] (seconds) at the start, then
-## frames of 60 to 150 ms. [param follow] hands the clock the engine's numbers once a frame, as
-## [method DotNetClock.advance] does inside a real physics frame; without it the clock is handed
-## only the steps' deltas, which is all it had before. Returns what the server saw after the
-## stalls: commands late, ticks with none, and when the last late one arrived.
+## A first visit's frames against a server in real time: the engine runs at most [param cap]
+## steps a frame and drops the rest, [param stalls] (seconds) at the start, then 60 to 150 ms
+## frames. [param follow] hands the clock the engine's numbers. Returns what the server saw after.
 func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds: float = 6.0,
 		frame_ms: float = 150.0, read_first: bool = false, settle_ms: float = 1000.0 / 60.0,
 		each_frame: Callable = Callable()) -> Dictionary:
@@ -630,12 +613,9 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 	return out
 
 
-## The stuck-on-the-spawn-pad report: a browser's first visit stalls
-## for seconds while it loads and compiles shaders, then draws slow frames, and the engine drops
-## every physics step past its cap. Handed only the steps' deltas, the clock never saw the
-## dropped time; the reported lead learnt it a round trip late, and with the absolute catch-up
-## skipped once the reports steered, the client stayed behind and the server discarded nearly
-## every command as late. See docs/timelines.md#time-the-engine-drops.
+## The stuck-on-the-spawn-pad report: a browser's first visit stalls for seconds, then draws slow
+## frames, and the engine drops every physics step past its cap. A clock handed only the steps'
+## deltas never sees the dropped time (docs/timelines.md#time-the-engine-drops).
 func _test_dropped_time() -> void:
 	print("")
 	print("[time the engine drops: a first visit's stalls and slow frames]")
@@ -667,9 +647,8 @@ func _test_dropped_time() -> void:
 				int(blind["late"]) >= 10 * maxi(1, int(fixed["late"])))
 
 	# The floor, on its own: a clock steered by the reports that finds itself behind the server
-	# (a stall it never saw, as every clock was before it looked at the wall) catches up at once.
-	# Armed: before, the reported lead's path returned without looking and the clock stayed 30
-	# ticks behind, every command late, until a report a round trip later said so.
+	# (a stall it never saw) catches up at once. Armed: the reported lead's path returned without
+	# looking and the clock stayed 30 ticks behind, every command late.
 	var behind := DotNetClock.new(60)
 	behind.follow_engine_time = false
 	behind.sync_from_server(1000, 100.0)
@@ -709,10 +688,9 @@ func _test_dropped_time() -> void:
 
 ## A ping measured across a stall must not become the round trip.
 func _cover_stalls_ping() -> void:
-	# Zombie Zone on the web: the game's ping measured across a
-	# 10.7 s stall read 14.8 s, and every snapshot after it carried that as the round trip. The
-	# median, the jitter and with them the lead ran to 800 ticks and the clock snapped nine
-	# times in one frame. Armed: a round trip a stall explains is held near the median.
+	# A web game's ping measured across a 10.7 s stall read 14.8 s, and every snapshot after carried
+	# it as the round trip, running the lead to 800 ticks. Armed: a round trip a stall explains
+	# is held near the median.
 	var web := DotNetClock.new(64)
 	web.follow_engine_time = false
 	web.sync_from_server(1000, 88.0)

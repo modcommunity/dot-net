@@ -197,17 +197,9 @@ func _test_reconcile_once_per_frame() -> void:
 		guest.free()
 
 
-## [member DotNetConfig.skip_matching_replays]: a snapshot the prediction already reached
-## replays nothing, and one it did not is replayed as before. Two clients read the same
-## snapshots: A replays every one, B skips the ones it predicted. The server overrules the
-## input every 16 ticks, so B has real corrections to make; it must make them (end where A
-## does, within what the wire's quantisation allows) and skip the rest.
-##
-## [param own_state]: the behaviour simulates on state of its own and copies the
-## properties into it from `_net_state_applied`, as every game does. Reading a deferred
-## snapshot runs that hook with the server's older state, and the manager then puts only
-## the properties back; a skip that left it there had the next tick simulate from a round
-## trip ago.
+## [member DotNetConfig.skip_matching_replays]: a snapshot the prediction already reached replays
+## nothing, one it did not is replayed. A replays all, B skips; the server overrules every 16
+## ticks, so B must make the real corrections ([param own_state]: behaviour keeps its own state).
 func _test_skip_matching_replays(own_state: bool) -> void:
 	print("")
 	print("[replays skipped when the prediction matched%s]" % (", own simulation state" if own_state else ""))
@@ -221,11 +213,9 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	host.config.snapshot_rate = 60
 	add_child(host)
 
-	# A: replays everything. B: skips, predicting through `DotNetPredictor.predict`.
-	# C: skips, predicting through `DotNetManager.predict_tick` as a host with its own client
-	# tick does. D: skips, but simulates its predicted behaviours by hand, as game-arena's
-	# bridge did until 2026-10-17: the predictor never remembers those ticks, so only a snapshot
-	# a replay happened to cover can match, and most replay the lead anyway.
+	# A: replays everything. B: skips, through `DotNetPredictor.predict`. C: skips, through
+	# `DotNetManager.predict_tick`. D: skips but simulates by hand, so the predictor never
+	# remembers those ticks and only a snapshot a replay happened to cover can match.
 	var guests: Array[DotNetManager] = []
 	for g in range(4):
 		var skip := g > 0
@@ -368,10 +358,9 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 		guest.free()
 
 
-## [member DotNetConfig.stagger_snapshots]: every peer still gets a snapshot exactly every
-## ticks_per_snapshot() ticks, but on its own phase, so no one tick builds them all. Run
-## both ways, because a test that only ran staggered could not tell staggering from a
-## server that happened to send to everybody at once.
+## [member DotNetConfig.stagger_snapshots]: each peer still gets a snapshot every
+## ticks_per_snapshot() ticks, on its own phase. Run both ways, or staggering could not be
+## told from a server that sent to everybody at once.
 func _test_staggered_snapshots() -> void:
 	_sections_entered += 1
 	print("")
@@ -527,15 +516,9 @@ func _reorder_run(every_other: bool) -> void:
 		host.server_tick(tick)
 
 		for payload in sent:
-			# The snapshot carrying the change is always held back, and any other one is
-			# with a fixed chance; a held snapshot is delivered after the next one, when it
-			# is older than one already applied and ignored.
-			#
-			# [b]Not every other one, which was tried first and never converged[/b]: the
-			# client acknowledges only what it applies, the server re-sends in its very next
-			# snapshot, and with every pair swapped that next snapshot is always the held
-			# one -- the re-send lands late, every time, for ever. A link that reorders with
-			# that exact period would starve a property; jitter does not have a period.
+			# The snapshot carrying the change is always held back, any other with a fixed chance; a
+			# held one arrives after the next and is ignored as older. Not every other one: the re-send
+			# would then land late every time (a link with that exact period would starve a property).
 			var carries_change := tick >= 61 and tick <= 63 and held.is_empty() and changed_at < 0 \
 				and not _reorder_held_change
 			if held.is_empty() and (carries_change or every_other or _reorder_rng.randf() < 0.3):
@@ -581,9 +564,9 @@ func _test_reordered_and_repeated() -> void:
 	print("")
 	print("[reordered and repeated snapshots]")
 	_reorder_run(false)
-	# The link that used to starve a property: every other snapshot held back, so the one
-	# re-send after a loss always landed in a held one. A lost property is owed until it is
-	# confirmed now, so it is sent again in each snapshot until one is applied.
+	# Every other snapshot held back would starve a property, since the re-send after a loss
+	# always landed in a held one. A lost property is owed until confirmed, so it is re-sent
+	# in each snapshot until one is applied.
 	_reorder_run(true)
 	_sections_completed += 1
 

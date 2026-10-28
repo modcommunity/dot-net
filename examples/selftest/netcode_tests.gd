@@ -4,7 +4,6 @@ extends "netcode_base.gd"
 
 
 
-# --- Wire format -----------------------------------------------------------
 
 func _test_wire() -> void:
 	print("[wire]")
@@ -50,10 +49,9 @@ func _test_wire() -> void:
 	_check("oversized length refused", refused.is_empty() and not hostile_reader.ok())
 
 
-## A run of bits encoded once and laid into another writer, at every bit offset, with a
-## string in it. A string is written byte-aligned, so its padding depends on where in a byte
-## it starts: state encoded at one offset and laid in at another read back as garbage from
-## the string on (game-playground's NPC weapon id, the first time snapshots did this).
+## A run of bits encoded once and laid into another writer at every bit offset, with a string
+## in it: a string is byte-aligned, so state laid in at another offset reads back as garbage
+## from the string on.
 func _test_bit_runs() -> void:
 	print("")
 	print("[bit runs]")
@@ -440,10 +438,9 @@ func _check_render_timeline_jitter() -> void:
 
 ## A replicated node taken out of the tree is neither recorded nor rewound, and raises no engine error.
 func _check_history_skips_orphans(history: DotNetHistory, target: DotNetIdentity) -> void:
-	# A replicated node taken out of the tree between ticks — a round re-laying its map
-	# does this, before the identity is unregistered. Recording it read its global basis
-	# and printed an engine error per entity per tick; recording it at all would put a
-	# sample at the origin for a rewind to drag a hitbox through.
+	# A replicated node taken out of the tree between ticks (a round re-laying its map), before
+	# the identity is unregistered: recording it would sample the origin and a rewind would drag
+	# a hitbox through it.
 	var gone := _make_entity(&"player", 4)
 	gone.net_id = 21
 	var errors := EngineErrors.new()
@@ -460,17 +457,10 @@ func _check_history_skips_orphans(history: DotNetHistory, target: DotNetIdentity
 	gone.get_parent().free()
 
 
-# --- Integration -----------------------------------------------------------
 
-## Runs a server and a client against each other over a lossy loopback.
-## Client-side prediction replay, against a server simulating the same inputs.
-##
-## [DotNetPredictor] had no section of its own, and the integration run below does
-## not substitute for one: it feeds a [i]constant[/i] input for all sixty ticks, and
-## a replay that ignores the input history lands on the right answer whenever the
-## input never changes. The zig-zag here is the entire point.
-## A silent peer's last input is repeated for DotNetConfig.starved_input_hold_sec and then
-## neutralised, and a client with no snapshot for prediction_hold_sec predicts on a held input.
+## Client-side prediction replay against a server simulating the same inputs. The integration
+## run feeds a [i]constant[/i] input, which a replay ignoring the input history also gets right,
+## so the zig-zag here is the point. A silent peer's input is held, then neutralised.
 func _test_starved_input() -> void:
 	print("[starved input]")
 	var mi := MemberInput.new()
@@ -539,10 +529,9 @@ func _test_starved_input() -> void:
 
 ## A client that learns its peer id after setup still predicts the entity it owns.
 func _check_late_peer_id() -> void:
-	# A client that learns its peer id after setup — from a handshake, as the lobby's does.
-	# The registry kept the id it was built with, so its own entity registered as somebody
-	# else's and was never predicted, on a real socket only: every loopback in the family
-	# set the id before setup.
+	# A client that learns its peer id after setup, as the lobby's does: the registry must not
+	# keep the id it was built with, or its own entity registers as somebody else's and is never
+	# predicted (on a real socket only).
 	var late := DotNetManager.new()
 	late.name = "LatePeer"
 	late.is_server = false
@@ -563,12 +552,10 @@ func _check_late_peer_id() -> void:
 	late.free()
 
 
-# --- Correction offsets ---------------------------------------------------
 
-## What a renderer adds to a predicted entity so a correction is eased: every one, and
-## added to what is still easing. Nothing in the family read [method
-## DotNetPredictor.visual_offset] until game-g2gfast's `headless_feel` measured a 30 cm
-## correction jumping the eye in one frame.
+## What a renderer adds to a predicted entity so a correction is eased: every one, and added
+## to what is still easing. Nothing else read [method DotNetPredictor.visual_offset] before
+## a measured 30 cm correction jumped the eye in one frame.
 func _test_correction_offsets() -> void:
 	print("[correction offsets]")
 	var config := DotNetConfig.new()

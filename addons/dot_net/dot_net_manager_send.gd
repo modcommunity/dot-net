@@ -31,12 +31,9 @@ func _send_snapshots(
 
 	_last_snapshot_tick = tick
 
-	# There is deliberately no world-wide baseline snapshot here any more. One was
-	# built and stored every snapshot tick — a full read of every replicated property
-	# of every entity — against the day whole-snapshot deltas landed, and nothing
-	# ever read it. Baselines are per peer instead, and they have to be: interest
-	# management means no two peers were sent the same set of entities, so a single
-	# world baseline is not a baseline for anybody. See [DotNetBehaviour.PeerView].
+	# No world-wide baseline snapshot: with interest management no two peers were sent the same
+	# entities, so a single baseline is a baseline for nobody. Baselines are per peer, see
+	# [DotNetBehaviour.PeerView].
 
 	var sent_to := 0
 
@@ -71,10 +68,9 @@ func _send_snapshots(
 
 			var scores := interest.scores_for(observer, relevant, context)
 
-			# Both caps at once — see [method DotNetConfig.entity_cap]. max_tracked_entities
-			# was documented from the first version and enforced by nothing; it is applied
-			# HERE rather than by a score sort of our own, because prioritise is what pins
-			# always_relevant and a plain sort would cut the observer's own entity.
+			# Both caps at once, see [method DotNetConfig.entity_cap]. Applied HERE, not by a score sort
+			# of our own, because prioritise is what pins always_relevant and a plain sort would cut
+			# the observer's own entity.
 			relevant = interest.prioritise(
 				observer, relevant, config.entity_cap(), context, peer_id, scores
 			)
@@ -104,10 +100,9 @@ func _send_snapshots(
 	snapshot_sent.emit(tick, sent_to)
 
 
-## The worker count this snapshot is built with: 0 (here, on the calling thread) unless
-## [member DotNetConfig.snapshot_workers] asks for workers, [method DotParallel.available] and
-## the interest strategy says [method DotNetInterest.is_thread_safe]. The reason it is 0 when
-## asked for is logged once per change, and kept for [method describe_lines].
+## The worker count this snapshot is built with: 0 (on the calling thread) unless
+## [member DotNetConfig.snapshot_workers] asks, [method DotParallel.available] and the interest
+## strategy allows. The reason it is 0 when asked for is logged once per change.
 func _snapshot_workers() -> int:
 	var reason := ""
 	var workers := 0
@@ -318,24 +313,9 @@ func _send_snapshots_native(
 	return results.size()
 
 
-## Snapshots for every peer on this phase, built on [param workers] worker threads and sent
-## from here in peer order. Returns how many peers were sent one.
-##
-## [b]Each task writes its own peers' records in place.[/b] A peer's [DotNetBehaviour.PeerView]s
-## and its budget record are touched by the one task that owns the peer, so they need no copy;
-## what is made here first is every record a build would otherwise insert into a table the
-## tasks share (a view for each behaviour and peer, the peer's budget record). An earlier
-## version built into copies of the views and installed them afterwards, so that a build could
-## be run twice and compared ([member DotParallel.verify]); the copies made each build dearer
-## than the inline one and the install cost 4 ms at 32 players and 15 at 64, more than the
-## workers saved. The tasks are not pure, so no [code]compare[/code] is given and verify never
-## re-runs them: netcode_demo's [snapshot threads] compares a whole game built on workers with
-## the same game built inline instead.
-##
-## [b]One task per worker, never one per peer.[/b] A group task is handed only an item index,
-## not which worker runs it, so a per-worker cache cannot be picked by worker; one task owning
-## a contiguous run of peers creates its own [DotNetBehaviour.EncodeCache]s and shares each
-## entity's encoding among its own peers, which is most of what the cache saved on one thread.
+## Snapshots for every peer on this phase, built on [param workers] threads and sent from here in
+## peer order. Each task writes its own peers' records in place (shared-table inserts are made first);
+## one task per worker, never per peer, so each owns a run of peers and shares its [DotNetBehaviour.EncodeCache].
 func _send_snapshots_pooled(
 	tick: int, identities: Array[DotNetIdentity], phase: int, period: int,
 	context: Dictionary, workers: int

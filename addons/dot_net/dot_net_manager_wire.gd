@@ -42,16 +42,9 @@ class SnapshotBuild extends RefCounted:
 	var oversize: Dictionary = {}
 
 
-## The per-peer half of [method _send_snapshots] for a caller that has already filtered,
-## prioritised and accumulated [param relevant]: builds the snapshot on this thread, into the
-## live records, and sends it.
-##
-## [b]The path every snapshot takes unless [member DotNetConfig.snapshot_workers] is on, kept
-## as it was before workers existed[/b], rather than [method _build_peer] then
-## [method _apply_build] with a [SnapshotJob] and a [SnapshotBuild] in between: those cost the
-## inline path about 14% at 32 and 64 players (g2gfast's load probe), for a split only the
-## pooled path needs. [method _build_peer] is the same build for a worker; a change to one is
-## a change to both, and netcode_demo's [snapshot threads] section compares them byte for byte.
+## The per-peer half of [method _send_snapshots] for a caller that has already filtered and
+## accumulated [param relevant]: builds on this thread into the live records and sends. Kept as it
+## was rather than via [method _build_peer] (14% dearer inline); a change to one is a change to both.
 func _send_to_peer(
 	peer_id: int,
 	tick: int,
@@ -60,18 +53,9 @@ func _send_to_peer(
 	if not send_fn.is_valid():
 		return false
 
-	# [b]A snapshot bigger than [member DotNetConfig.mtu] goes out as several parts, each a
-	# whole snapshot of its own entities.[/b] Godot's ENet peer fragments an unreliable packet
-	# over its MTU (1392 bytes of payload) into unreliable fragments, and losing any one of
-	# them loses the whole packet: a two-fragment snapshot is lost about twice as often on a
-	# native client, and the one most often lost is the biggest, the one after a round's
-	# spawn. Cutting it here instead means a lost part loses only the entities in it, which
-	# the acknowledgement path already re-sends. See docs/wire.md#snapshot-parts.
-	#
-	# The cut is decided before an entity is written, from its exact encoded size
-	# ([method DotNetBehaviour.state_bits]), because writing has side effects on the peer's
-	# record that cannot be taken back, and the encoding of anything byte-aligned depends on
-	# the bit it starts at, so a written entity cannot be moved to another packet afterwards.
+	# [b]A snapshot bigger than [member DotNetConfig.mtu] goes out as several parts, each a whole
+	# snapshot of its own entities.[/b] ENet fragments over its MTU and losing one fragment loses the
+	# packet; the cut is decided before writing, from the exact size, which cannot be undone after (docs/wire.md#snapshot-parts).
 	var limit_bits := config.mtu * 8 - SNAPSHOT_PART_TRAILER_BITS
 
 	# How early this peer's commands have been arriving, for its clock to steer by: in every
@@ -109,10 +93,9 @@ func _send_to_peer(
 	var oldest_pending: int = tick - config.ack_window_snapshots * config.ticks_per_snapshot()
 
 	for identity in relevant:
-		# The entity this peer predicts. Its client reads a property's absence as "the
-		# server's is unchanged" and rewinds to what it last received, so for this entity
-		# alone a property stays owed until the peer has confirmed it — see
-		# [method DotNetBehaviour.collect_dirty]. One entity per peer, usually.
+		# The entity this peer predicts. Its client reads a property's absence as "unchanged" and
+		# rewinds to what it last received, so a property stays owed here until confirmed
+		# ([method DotNetBehaviour.collect_dirty]).
 		var predicted_by_peer := identity.owner_peer_id == peer_id \
 			and identity.authority == DotNetIdentity.Authority.SHARED
 
@@ -151,10 +134,9 @@ func _send_to_peer(
 			budget.note_starved(peer_id)
 			continue
 
-		# Measured only near the end of a part: an entity is rarely more than twice its full
-		# update's estimate plus 32 bytes (only a long string or a custom codec could be), and
-		# the exact figure is a lookup per behaviour per entity per peer, which at 64 players
-		# is four thousand a snapshot for an answer that is "it fits" nearly every time.
+		# Measured only near the end of a part: an entity is rarely over twice its estimate plus 32
+		# bytes, and the exact figure costs a lookup per behaviour per entity per peer for an
+		# answer that is nearly always "it fits".
 		if counts[counts.size() - 1] > 0 \
 				and writer.bit_length() + estimated * 16 + 256 > limit_bits \
 				and _entity_end_bit(writer.bit_length(), identity, dirties) > limit_bits:
@@ -196,20 +178,16 @@ func _send_to_peer(
 		counts[counts.size() - 1] += 1
 		written += 1
 
-	# A part that ended up empty (only possible as the last, when everything after the cut
-	# was starved) is not sent: a part with no entities would still be a part the client
-	# waits for before it acknowledges the tick. The first part is kept even when empty: a
+	# A part left empty (only the last, after a cut starved everything) is not sent, or the client
+	# would wait on it before acknowledging the tick. The first is kept even when empty: a
 	# snapshot of nothing still goes out, see below.
 	if parts.size() > 1 and counts[counts.size() - 1] == 0:
 		parts.pop_back()
 		counts.remove_at(counts.size() - 1)
 
-	# [b]A snapshot goes out every snapshot tick, even with nothing in it.[/b] It is the
-	# client's clock: `sync_from_server`, the receive timeline and the interpolation buffer are
-	# all fed from snapshot arrivals, and the acknowledgement that resolves what is pending
-	# rides on a snapshot applied. When every relevant entity was written each time this could
-	# only be empty with nothing relevant; now that unchanged entities cost a few bits, a quiet
-	# world is a small snapshot, never a missing one. Six bytes, read by every client version.
+	# [b]A snapshot goes out every snapshot tick, even with nothing in it.[/b] It is the client's
+	# clock (`sync_from_server`, receive timeline, interpolation buffer) and the acknowledgement
+	# rides on one applied. A quiet world is a small snapshot, never a missing one.
 
 	# The unchanged list goes at the end of the last part when it fits there, else in a part of
 	# its own, else (sixteen parts already) not at all: those entities then miss one refresh,
@@ -281,10 +259,9 @@ func _freeze_job(peer_id: int, tick: int) -> SnapshotJob:
 	var job := SnapshotJob.new()
 	job.peer_id = peer_id
 	job.observer = _observer_for(peer_id)
-	# [b]The observer may not be in [code]identities[/code][/b], which was read before input
-	# and simulation: a peer's first entity registered during this tick (a join, a respawn) is
-	# found by [method _observer_for] but was never frozen, and interest would read its
-	# [code]global_position[/code] on a worker. Frozen here, on the main thread.
+	# [b]The observer may not be in [code]identities[/code][/b], read before input and simulation: a
+	# peer's first entity registered this tick is located by [method _observer_for] but never
+	# frozen, and interest would read its position on a worker. Frozen here, on the main thread.
 	if job.observer != null and not job.observer.is_position_frozen():
 		job.observer.freeze_position()
 		_late_frozen.append(job.observer)
@@ -312,12 +289,9 @@ func _freeze_job(peer_id: int, tick: int) -> SnapshotJob:
 	return job
 
 
-## [method _send_to_peer] on a worker: one peer's snapshot parts, built into the peer's live
-## [DotNetBehaviour.PeerView]s and budget record (made before the fork, and touched by no other
-## task, since each peer belongs to one), with [param caches] (behaviour ->
-## [DotNetBehaviour.EncodeCache]) the task's own memo. Everything shared (the counters, the
-## interest cache, the log, the send) comes back in the build for [method _apply_build].
-## A copy of [method _send_to_peer], not a generalisation of it: see that method.
+## [method _send_to_peer] on a worker: one peer's parts built into the peer's live
+## [DotNetBehaviour.PeerView]s and budget record, with the task's own [param caches]. Everything
+## shared comes back in the build for [method _apply_build]. A copy, not a generalisation.
 func _build_peer(
 	job: SnapshotJob,
 	tick: int,
@@ -329,18 +303,9 @@ func _build_peer(
 	build.peer_id = peer_id
 	var peer_budget := job.peer_budget
 
-	# [b]A snapshot bigger than [member DotNetConfig.mtu] goes out as several parts, each a
-	# whole snapshot of its own entities.[/b] Godot's ENet peer fragments an unreliable packet
-	# over its MTU (1392 bytes of payload) into unreliable fragments, and losing any one of
-	# them loses the whole packet: a two-fragment snapshot is lost about twice as often on a
-	# native client, and the one most often lost is the biggest, the one after a round's
-	# spawn. Cutting it here instead means a lost part loses only the entities in it, which
-	# the acknowledgement path already re-sends. See docs/wire.md#snapshot-parts.
-	#
-	# The cut is decided before an entity is written, from its exact encoded size
-	# ([method DotNetBehaviour.state_bits]), because writing has side effects on the peer's
-	# record that cannot be taken back, and the encoding of anything byte-aligned depends on
-	# the bit it starts at, so a written entity cannot be moved to another packet afterwards.
+	# [b]A snapshot bigger than [member DotNetConfig.mtu] goes out as several parts, each a whole
+	# snapshot of its own entities.[/b] ENet fragments over its MTU and losing one fragment loses the
+	# packet; the cut is decided before writing, from the exact size, which cannot be undone after (docs/wire.md#snapshot-parts).
 	var limit_bits := config.mtu * 8 - SNAPSHOT_PART_TRAILER_BITS
 
 	var lead := job.lead
@@ -370,10 +335,9 @@ func _build_peer(
 	var entity_caches: Array = []
 
 	for identity: DotNetIdentity in relevant:
-		# The entity this peer predicts. Its client reads a property's absence as "the
-		# server's is unchanged" and rewinds to what it last received, so for this entity
-		# alone a property stays owed until the peer has confirmed it — see
-		# [method DotNetBehaviour.collect_dirty]. One entity per peer, usually.
+		# The entity this peer predicts. Its client reads a property's absence as "unchanged" and
+		# rewinds to what it last received, so a property stays owed here until confirmed
+		# ([method DotNetBehaviour.collect_dirty]).
 		var predicted_by_peer := identity.owner_peer_id == peer_id \
 			and identity.authority == DotNetIdentity.Authority.SHARED
 
@@ -424,10 +388,9 @@ func _build_peer(
 			starved += 1
 			continue
 
-		# Measured only near the end of a part: an entity is rarely more than twice its full
-		# update's estimate plus 32 bytes (only a long string or a custom codec could be), and
-		# the exact figure is a lookup per behaviour per entity per peer, which at 64 players
-		# is four thousand a snapshot for an answer that is "it fits" nearly every time.
+		# Measured only near the end of a part: an entity is rarely over twice its estimate plus 32
+		# bytes, and the exact figure costs a lookup per behaviour per entity per peer for an
+		# answer that is nearly always "it fits".
 		if counts[counts.size() - 1] > 0 \
 				and writer.bit_length() + estimated * 16 + 256 > limit_bits \
 				and _entity_end_bit_cached(writer.bit_length(), identity, dirties, entity_caches) > limit_bits:
@@ -468,20 +431,16 @@ func _build_peer(
 		counts[counts.size() - 1] += 1
 		written += 1
 
-	# A part that ended up empty (only possible as the last, when everything after the cut
-	# was starved) is not sent: a part with no entities would still be a part the client
-	# waits for before it acknowledges the tick. The first part is kept even when empty: a
+	# A part left empty (only the last, after a cut starved everything) is not sent, or the client
+	# would wait on it before acknowledging the tick. The first is kept even when empty: a
 	# snapshot of nothing still goes out, see below.
 	if parts.size() > 1 and counts[counts.size() - 1] == 0:
 		parts.pop_back()
 		counts.remove_at(counts.size() - 1)
 
-	# [b]A snapshot goes out every snapshot tick, even with nothing in it.[/b] It is the
-	# client's clock: `sync_from_server`, the receive timeline and the interpolation buffer are
-	# all fed from snapshot arrivals, and the acknowledgement that resolves what is pending
-	# rides on a snapshot applied. When every relevant entity was written each time this could
-	# only be empty with nothing relevant; now that unchanged entities cost a few bits, a quiet
-	# world is a small snapshot, never a missing one. Six bytes, read by every client version.
+	# [b]A snapshot goes out every snapshot tick, even with nothing in it.[/b] It is the client's
+	# clock (`sync_from_server`, receive timeline, interpolation buffer) and the acknowledgement
+	# rides on one applied. A quiet world is a small snapshot, never a missing one.
 
 	# The unchanged list goes at the end of the last part when it fits there, else in a part of
 	# its own, else (sixteen parts already) not at all: those entities then miss one refresh,
@@ -619,10 +578,9 @@ static func _write_unchanged_tail(writer: DotNetWriter, runs: PackedInt32Array) 
 		cursor = runs[i] + runs[i + 1]
 
 
-## Elias gamma of [code]value + 1[/code], so zero is one bit: as many zero bits as the number
-## has bits after its leading one, then the number from its leading one down. Written
-## most-significant bit first, one bit at a time, because the reader counts zeros to learn
-## the width.
+## Elias gamma of [code]value + 1[/code], so zero is one bit: zero bits for the width after the leading
+## one, then the number from its leading one down, most-significant bit first, because the reader
+## counts zeros to learn the width.
 static func _write_gamma(writer: DotNetWriter, value: int) -> void:
 	var n := value + 1
 	var width := 0

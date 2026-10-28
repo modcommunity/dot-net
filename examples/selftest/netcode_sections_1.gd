@@ -3,7 +3,6 @@ extends "netcode_tests.gd"
 ## Sections of netcode_demo.gd, moved unchanged; part 1 of 7.
 
 
-# --- Messages --------------------------------------------------------------
 
 func _test_messages() -> void:
 	print("")
@@ -133,12 +132,9 @@ func _test_messages() -> void:
 	_check("dispatched to the handler", received.size() == 1)
 
 
-## Two ends built from different sources: the point of deriving ids from names.
-##
-## "Old" registers less than "new". Old must skip what it does not have and carry on --
-## mid-batch included -- a field appended to a shared type must cross in both directions,
-## and a REQUIRED type one end lacks must be refused with a sentence rather than a
-## decode error an hour later.
+## Two ends built from different sources (ids derive from names): "old" registers less than
+## "new". Old must skip what it lacks, mid-batch included, a field appended to a shared type
+## must cross both ways, and a REQUIRED type one end lacks is refused with a sentence.
 func _test_mismatched_schemas() -> void:
 	print("")
 	print("[mismatched schemas]")
@@ -326,7 +322,6 @@ func _test_mismatched_schemas() -> void:
 	c.free()
 
 
-# --- Clock -----------------------------------------------------------------
 
 func _test_clock() -> void:
 	print("")
@@ -376,12 +371,9 @@ func _test_clock() -> void:
 	follower.sync_from_server(50000, 100.0)
 	_check("large error snaps", follower.tick > 49000)
 
-	# [b]The threshold is a DURATION, and every check above runs at the rate it was
-	# written as a tick count for.[/b] 60 ticks is one second at 60 Hz and 0.47 s at 128,
-	# so a 128-tick server -- the rate this genre runs and the rate g2gfast ships --
-	# snapped on any half-second hitch: a map change, a stalled frame, a browser tab
-	# doing layout. A snap discards everything predicted, so the world jumps, and it
-	# jumped only on the one game nothing was tested at.
+	# [b]The threshold is a DURATION, not a tick count.[/b] 60 ticks is one second at 60 Hz but
+	# 0.47 s at 128, so a 128-tick server snapped on any half-second hitch (a map change, a
+	# stalled frame) and a snap discards everything predicted.
 	var fast := DotNetClock.new(128, false)
 	fast.sync_from_server(10000, 0.0)
 	fast.sync_from_server(10000, 20.0)
@@ -395,13 +387,9 @@ func _test_clock() -> void:
 		absi(fast.tick - fast_before) < 5
 	)
 
-	# [b]Half a second BEHIND is not drift, and smoothing it was the bug.[/b] That is what
-	# a hitch does — the engine drops every physics step past eight in a frame, so the
-	# clock loses the stall's length — and a client behind its target stamps every
-	# command for a tick the server has already simulated. At 5% that took ten seconds at
-	# 128 ticks, every command of them discarded: a browser's first connect, where every
-	# load and shader compile is a stall, was a player who could not steer until the
-	# clock crawled back. Armed: smoothing this leaves the clock 60 ticks short.
+	# [b]Half a second BEHIND is not drift; smoothing it is wrong.[/b] A hitch makes the clock lose
+	# the stall, and a client behind its target stamps every command for a tick the server has
+	# already simulated. Armed: smoothing this leaves the clock 60 ticks short.
 	var behind := DotNetClock.new(128, false)
 	behind.sync_from_server(10000, 0.0)
 	behind.sync_from_server(10000, 20.0)
@@ -476,7 +464,6 @@ func _replication_wire_round_trip(config: DotNetConfig, second: DotNetIdentity, 
 	secret.audience = DotNetVar.Audience.EVERYONE
 
 
-# --- Replication -----------------------------------------------------------
 
 func _test_replication() -> void:
 	_sections_entered += 1
@@ -544,13 +531,9 @@ func _test_replication() -> void:
 
 ## The render timeline moves between packets, and a late packet does not pull it back.
 func _check_render_timeline() -> void:
-	# --- the render timeline has to move between packets ----------------------
-	#
-	# `server_tick()` is what `render_tick()` — and therefore every interpolated position
-	# — is derived from. An estimate that only moved when a snapshot arrived would make
-	# the rendered tick a step function of arrivals: the interpolator would produce a new
-	# value on the frames a packet happened to land on and the same value on every frame
-	# in between, which is the 20 Hz stepping interpolation exists to remove.
+	# `server_tick()` feeds `render_tick()`, so an estimate that only moved when a snapshot
+	# arrived would step the rendered tick with arrivals: the 20 Hz stepping interpolation
+	# exists to remove.
 	var clock := DotNetClock.new(60, false)
 	clock.adaptive_margin = false
 	clock.sync_from_server(1000, 0.0)
@@ -582,10 +565,9 @@ func _check_render_timeline() -> void:
 		clock.server_tick() == 1010
 	)
 
-	# [b]A late packet is not the server going back in time.[/b] It was: every sample
-	# re-anchored the timeline absolutely, so on a link whose packets take 30..80 ms the
-	# render timeline went back and forth with each one -- measured through a real relay
-	# on ENet, 35 times backwards in ten seconds by up to 3.9 ticks.
+	# [b]A late packet is not the server going back in time.[/b] Re-anchoring absolutely on every
+	# sample sent the render timeline back and forth on a 30..80 ms link (35 backward steps in
+	# ten seconds on a real relay).
 	clock.sync_from_server(1004, 0.0)
 	_check(
 		"one late packet does not pull it back (%d)" % clock.server_tick(),
@@ -715,19 +697,9 @@ func _test_interest() -> void:
 	_check("cap applied", capped.size() == 2)
 	_check("always_relevant survives the cap", capped_ids.has(4))
 
-	# --- what a cached answer must never drop ---------------------------------
-	#
-	# The cache holds which entities were relevant at one instant. An entity spawned
-	# since is in nobody's cached set, so an observer would not receive its own new
-	# entity — nor an always-relevant one — until the cache expired.
-	#
-	# [b]That window is not small and on some hosts it never closes.[/b] In a game where
-	# players respawn, split or fire projectiles it is a quarter of a second of an entity
-	# that exists only by prediction; and on a host that ticks faster than the wall clock
-	# — which is every headless test and every fast-forwarded replay — the age never
-	# reaches the interval and the entity is never sent at all. The position still looks
-	# right the whole time, because the owner is predicting it, so the symptom is only in
-	# what cannot be predicted: mass, health, ammunition, a team change.
+	# The cache holds the entities relevant at one instant, so an entity spawned since is in
+	# nobody's set (not even its owner's) until it expires. On a host ticking faster than the
+	# wall clock the age never reaches the interval, and the entity is never sent at all.
 	var cached := DotNetInterestDistance.new()
 	cached.radius = 100.0
 	cached.evaluation_interval_sec = 5.0

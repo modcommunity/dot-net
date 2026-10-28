@@ -112,10 +112,9 @@ func _test_join_hitch() -> void:
 				most = maxi(most, int(v.y))
 		return most
 
-	# A load hitch shorter than the engine's step cap: no time is dropped, so nothing is credited,
-	# and every command produced in the frame after it was produced a hitch late and reached the
-	# server that much early. Steered by those reports, game-g2gfast's client at 128 ran 18 ticks
-	# early after a 0.3 s hitch and gave them back at the slow drift rate over three seconds.
+	# A load hitch shorter than the engine's step cap drops no time, so nothing is credited, and the
+	# commands made after it reached the server that much early. Steered by those reports a client
+	# at 128 ran 18 ticks early after a 0.3 s hitch and gave them back slowly.
 	var short: Dictionary = _first_visit(128, 8, [0.3], true, 3.0, 1000.0 / 240.0, false, 1000.0 / 240.0)
 	var early: int = most_early.call(short, 1000.0, 3000.0)
 	print("    128 ticks, 0.3 s hitch: at most %d early after 1 s, %d late" % [early, int(short["late"])])
@@ -123,10 +122,9 @@ func _test_join_hitch() -> void:
 			% [early, slack], early <= slack + 2 and early >= 0)
 	_check("and none late (%d)" % int(short["late"]), int(short["late"]) == 0)
 
-	# The same hitch at 60 is past the step cap (8 steps are 0.13 s), so the dropped part is
-	# credited as well. The reports of the commands the credit produces still raise the lead
-	# for a second (9 early, against 16 before the long frame was discounted and the clock slowed
-	# fast), so this asks only that it is back within the slack by 2.5 s, where it was 9 early.
+	# The same hitch at 60 is past the step cap, so the dropped part is credited too. The lead
+	# still rises for a second (9 early), so this asks only that it is back within the slack
+	# by 2.5 s.
 	var over: Dictionary = _first_visit(60, 8, [0.3], true, 3.0, 1000.0 / 60.0, false, 1000.0 / 60.0)
 	var later: int = most_early.call(over, 2500.0, 3000.0)
 	print("    60 ticks, 0.3 s hitch: at most %d early 1-3 s on, %d at 2.5 s, %d late" % [
@@ -442,25 +440,12 @@ func _test_late_mirror_observer_vars() -> void:
 	_sections_completed += 1
 
 
-# --- Helpers ---------------------------------------------------------------
 
 
-# --- Spawning --------------------------------------------------------------
 
-## [DotNetSpawner] is 370 lines named by nothing in this file until now, and it is
-## one of the documented places a game plugs in — the prefab table is the reason a
-## spawn message can name an id instead of a scene path, which is the only thing
-## stopping a peer from asking every other peer to load an arbitrary scene.
-##
-## The pooling path is the interesting one. [member free_on_despawn] exists so a
-## game can keep the node, and [method register_factory] exists so it can hand the
-## same node back — which means the spawner has to cope with a node that is
-## already somewhere in the tree.
-## [b]An entity whose node is freed before the netcode stops.[/b] A game change frees the
-## old world's scene before the module that registered its entities stops its manager, so
-## `clear()` meets identities that are already gone. Each one was a script error
-## ("Trying to assign invalid previously freed instance") and 171 of them printed on one
-## `changelevel` away from mg-buses-from-hell, on a run that passed.
+## [b]An entity whose node is freed before the netcode stops.[/b] A game change frees the old
+## world's scene before the module stops its manager, so `clear()` meets identities that are
+## already gone; each was a script error ("invalid instance") on a run that passed.
 func _test_freed_entity() -> void:
 	_sections_entered += 1
 	print("")
@@ -489,10 +474,9 @@ func _test_freed_entity() -> void:
 	_sections_completed += 1
 
 
-## [b]An entity unregistered by another behaviour inside the same server tick[/b] (#30): a
-## round that re-lays its map from a player's `_net_simulate` takes the old map's entities out
-## of the registry and the tree while the manager is still walking the list it took first.
-## Each was simulated once more against a node with no transform, and recorded and sent.
+## [b]An entity unregistered by another behaviour inside the same server tick[/b] (#30): a round
+## re-laying its map from `_net_simulate` removes entities from the registry and tree while the
+## manager still walks its list; each was simulated once more with no transform.
 func _test_unregistered_mid_tick() -> void:
 	_sections_entered += 1
 	print("")
@@ -602,6 +586,9 @@ func _test_config_sizing() -> void:
 	)
 
 
+## The spawner's prefab table lets a spawn message name an id instead of a scene path, so a peer
+## cannot make others load an arbitrary scene. The pooling path ([member free_on_despawn],
+## [method register_factory]) hands back a node already in the tree.
 func _test_spawning() -> void:
 	_sections_entered += 1
 	print("")
@@ -679,7 +666,6 @@ func _test_spawning() -> void:
 	_check("remote spawn uses the id it was given",
 		remote.ok and (remote.value as DotNetIdentity).net_id == 4242)
 
-	# --- Factories, and the pooling path they exist for -------------------
 	_pool.clear()
 	_pool_context = {}
 	_pool_parent = Node.new()
@@ -722,11 +708,9 @@ func _test_spawning() -> void:
 	_check("despawned", despawned.ok and registry.get_identity(pooled_id) == null)
 	_check("node kept for the pool", is_instance_valid(pooled_node))
 
-	# A pool parks idle instances somewhere out of the way rather than leaving
-	# them in the live container — otherwise "pooled" and "live" are the same set,
-	# and the reuse path is indistinguishable from the first spawn. It is exactly
-	# that difference the spawner has to handle: the node comes back with a
-	# parent, and the parent is not the container.
+	# A pool parks idle instances out of the live container, or "pooled" and "live" are the same
+	# set and reuse looks like a first spawn. The spawner must handle a node that comes back with
+	# a parent that is not the container.
 	pooled_node.get_parent().remove_child(pooled_node)
 	_pool_parent.add_child(pooled_node)
 	_pool.append(pooled_node)
@@ -751,7 +735,6 @@ func _test_spawning() -> void:
 
 	spawner.free_on_despawn = true
 
-	# --- Despawn ----------------------------------------------------------
 	_check("despawning nothing is an error", not spawner.despawn(999999).ok)
 
 	var extra := spawner.spawn(&"player", 7)
@@ -761,11 +744,9 @@ func _test_spawning() -> void:
 	_check("despawn_owned_by returns the count", swept == owned, )
 	_check("peer 7 owns nothing", registry.owned_by(7).is_empty())
 
-	# --- The inspector table ----------------------------------------------
-	# register_prefab's contract is that a prefab with no identity is a *startup*
-	# error rather than a spawn that silently produces a non-networked object. The
-	# inspector path has to honour that too, or the guarantee only holds for games
-	# that register in code.
+	# register_prefab's contract is that a prefab with no identity is a *startup* error, not a
+	# silently non-networked spawn. The inspector path must honour it too, or the guarantee
+	# only holds for games that register in code.
 	var declared := DotNetSpawner.new()
 	declared.name = "DeclaredSpawner"
 	declared.prefabs = {"good": good, "bad": identity_less}
