@@ -101,6 +101,8 @@ func write_svarint(value: int) -> void:
 
 
 ## Writes a float mapped onto [param bits] steps across a known range. The workhorse.
+## Out-of-range values clamp, not wrap: a clamped position looks wrong at the edge, a wrapped one
+## teleports.
 func write_float_range(value: float, min_value: float, max_value: float, bits: int) -> void:
 	if max_value <= min_value:
 		push_error("DotNetWriter.write_float_range: max must exceed min")

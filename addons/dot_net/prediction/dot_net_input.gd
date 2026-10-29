@@ -69,7 +69,8 @@ func sanitise(tick_rate: int) -> void:
 
 
 ## Rounds this input in place to exactly what the server will decode: written and read back through the
-## wire format.
+## wire format. The server simulates on the rounded command; simulating on the raw one drifts on
+## every turning tick.
 func round_trip() -> void:
 	var writer := DotNetWriter.new(32)
 	write(writer)

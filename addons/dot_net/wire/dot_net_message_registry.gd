@@ -66,6 +66,8 @@ var _skipped_noted: Dictionary = {}
 
 
 ## The wire id a type name travels as. The same number in every build that has the type.
+## Derived from the name alone, so a message's bytes are its only contract: append fields, never
+## reorder or retype one.
 static func wire_id_for(type_name: StringName) -> int:
 	var digest := DotHash.sha256_text(String(type_name))
 	return digest.substr(0, 8).hex_to_int()

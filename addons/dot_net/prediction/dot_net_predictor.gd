@@ -126,7 +126,8 @@ func _forget_through(net_id: int, through: int) -> void:
 
 
 ## Accepts an authoritative state and replays everything since. [param authoritative_values] is what
-## the server said for [param server_tick].
+## the server said for [param server_tick]. The replay only converges if [method _net_simulate] is
+## deterministic given input and start state; otherwise the client disagrees with the server every tick.
 func reconcile(
 	identity: DotNetIdentity,
 	server_tick: int,

@@ -751,6 +751,8 @@ func receive_ack(peer_id: int, tick: int) -> DotResult:
 			DotError.CODE_STATE, "No such peer.", "peer %d" % peer_id
 		)
 
+	# The tick comes from a client: one past the newest sent would confirm state never sent. A stale
+	# (lower) ack is not refused; reordering makes it normal, and it is ignored below.
 	if tick < 0 or tick > _last_snapshot_tick:
 		return DotResult.fail(
 			DotError.CODE_INVALID,
