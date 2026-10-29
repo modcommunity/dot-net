@@ -2,25 +2,8 @@
 class_name DotNetIdentity
 extends Node
 
-## Makes the node it is attached to a networked entity.
-##
-## Add one as a child of anything that needs to exist on more than one machine. It
-## carries the network id, who owns it, who has authority over what, and which
-## [DotNetBehaviour]s under it replicate state.
-##
-## [b]Attach it to a child, not the root.[/b] A component rather than a base class,
-## so a networked entity can extend whatever your game needs —
-## [CharacterBody3D], [RigidBody3D], your own class — instead of inheriting from
-## something dot-net chose. The entity itself is [member entity], resolved through a
-## [DotNodeRef] so it can be the parent, an ancestor, or a node somewhere else
-## entirely.
-##
-## [codeblock]
-## Player (CharacterBody3D)
-##  ├── NetIdentity (DotNetIdentity)      entity_ref -> parent
-##  ├── Movement    (DotNetBehaviour)     replicates position, velocity
-##  └── Health      (DotNetBehaviour)     replicates health, alive
-## [/codeblock]
+## Makes the node it is attached to a networked entity. Add one as a child of anything that needs to
+## exist on more than one machine.
 
 const CHANNEL := "net.identity"
 
@@ -30,16 +13,11 @@ enum Authority {
 	##
 	## The default, and the only model that is safe against a modified client.
 	SERVER,
-	## The owning client decides its own transform; the server relays it.
-	##
-	## Cheaper and smoother for the owner, and it trusts the client completely — a
-	## modified one can teleport. Reasonable for cosmetic entities and co-op; never
-	## for anything competitive.
+	## The owning client decides its own transform; the server relays it. Cheaper and smoother for the
+	## owner, and it trusts the client completely — a modified one can teleport.
 	CLIENT,
-	## The owning client predicts and the server validates and corrects.
-	##
-	## The usual choice for a player character: responsive locally, authoritative
-	## where it matters.
+	## The owning client predicts and the server validates and corrects. The usual choice for a player
+	## character: responsive locally, authoritative where it matters.
 	SHARED,
 }
 
@@ -57,16 +35,12 @@ signal became_owner()
 
 @export_group("Identity")
 
-## Network id. Assigned by the server; 0 until spawned.
-##
-## Never set this by hand — the registry allocates it, and a duplicate means two
-## entities receiving each other's state.
+## Network id. Assigned by the server; 0 until spawned. Never set this by hand — the registry allocates
+## it, and a duplicate means two entities receiving each other's state.
 @export var net_id: int = 0
 
-## Peer that owns this entity. 0 means the server owns it.
-##
-## Ownership decides who may send input for it, which properties they receive, and
-## whether the local machine predicts it.
+## Peer that owns this entity. 0 means the server owns it. Ownership decides who may send input for it,
+## which properties they receive, and whether the local machine predicts it.
 @export var owner_peer_id: int = 0
 
 ## Prefab id used to recreate this on clients. See [DotNetSpawner].
@@ -76,34 +50,27 @@ signal became_owner()
 
 @export_group("Wiring")
 
-## The node this identity represents. Defaults to the parent.
-##
-## Behaviours read and write properties on it, and interest management reads its
-## position from it.
+## The node this identity represents. Defaults to the parent. Behaviours read and write properties on
+## it, and interest management reads its position from it.
 @export var entity_ref: DotNodeRef = null
 
 @export_group("Replication")
 
-## Replicate to every observer regardless of interest management.
-##
-## For entities that must never pop in — an objective marker, a boss, the level
-## geometry's moving parts. Costs bandwidth from every client, so use it sparingly.
+## Replicate to every observer regardless of interest management. For entities that must never pop in —
+## an objective marker, a boss, the level geometry's moving parts.
 @export var always_relevant: bool = false
 
-## Interest tags, for strategies that filter by category.
-##
-## A [DotNetInterest] implementation can use these to answer questions distance
-## cannot: "replicate entities on my team wherever they are", "never replicate props
-## to spectators".
+## Interest tags, for strategies that filter by category. A [DotNetInterest] implementation can use
+## these to answer questions distance cannot: "replicate entities on my team wherever they are", "never
+## replicate props to spectators".
 @export var interest_tags: PackedStringArray = PackedStringArray()
 
 ## Relative priority when bandwidth is short. Higher is sent first.
 @export_range(0.0, 100.0, 0.5) var priority: float = 1.0
 
-## Keep replicating for this long after leaving interest, in seconds.
-##
-## Stops an entity on the edge of the radius from flickering in and out as it moves
-## back and forth across the boundary — which costs a full spawn each time.
+## Keep replicating for this long after leaving interest, in seconds. Stops an entity on the edge of
+## the radius from flickering in and out as it moves back and forth across the boundary — which costs a
+## full spawn each time.
 @export_range(0.0, 30.0, 0.5) var interest_linger_sec: float = 2.0
 
 ## The resolved entity node.
@@ -112,10 +79,7 @@ var entity: Node = null
 ## Behaviours found under this identity.
 var behaviours: Array[DotNetBehaviour] = []
 
-## Whether this process has authority over this entity.
-##
-## Set by the manager at registration. Behaviours read it to decide whether to
-## simulate or to apply received state.
+## Whether this process has authority over this entity. Set by the manager at registration.
 var is_authoritative: bool = false
 
 ## Whether the local peer owns this.
@@ -149,11 +113,9 @@ func _ready() -> void:
 	_collect_behaviours()
 
 
-## Finds the behaviours this identity replicates.
-##
-## Searched from [member entity] rather than from this node, so behaviours can be
-## siblings of the identity — which is the natural layout when the identity is a
-## child of the entity.
+## Finds the behaviours this identity replicates. Searched from [member entity] rather than from this
+## node, so behaviours can be siblings of the identity — which is the natural layout when the identity
+## is a child of the entity.
 func _collect_behaviours() -> void:
 	behaviours.clear()
 
@@ -168,10 +130,8 @@ func _collect_behaviours() -> void:
 const _MAX_BEHAVIOURS := 63
 
 
-## Walks the subtree, stopping at nested identities.
-##
-## A child entity with its own [DotNetIdentity] owns its own behaviours; claiming
-## them here would replicate them twice and under the wrong id.
+## Walks the subtree, stopping at nested identities. A child entity with its own [DotNetIdentity] owns
+## its own behaviours; claiming them here would replicate them twice and under the wrong id.
 func _collect_from(node: Node) -> void:
 	for child in node.get_children():
 		if child is DotNetIdentity and child != self:
@@ -187,8 +147,6 @@ func _collect_from(node: Node) -> void:
 
 		_collect_from(child)
 
-
-# --- Registration ----------------------------------------------------------
 
 ## Called by the manager once an id is assigned.
 func _on_registered(assigned_id: int, tick: int, authoritative: bool, local_peer: int) -> void:
@@ -238,11 +196,8 @@ func is_registered() -> bool:
 	return _registered
 
 
-## Changes the owner, notifying both sides.
-##
-## Used for pickups, vehicles, possession — anything where control transfers. The
-## previous owner stops predicting it and the new one starts, which is why both
-## learn about it rather than only the new owner.
+## Changes the owner, notifying both sides. Used for pickups, vehicles, possession — anything where
+## control transfers.
 func set_owner_peer(new_peer_id: int, local_peer: int) -> void:
 	if owner_peer_id == new_peer_id:
 		return
@@ -262,8 +217,6 @@ func set_owner_peer(new_peer_id: int, local_peer: int) -> void:
 		{"net_id": net_id, "from": previous, "to": new_peer_id}
 	)
 
-
-# --- Authority queries -----------------------------------------------------
 
 ## Whether this process may simulate the entity's own movement.
 func can_simulate() -> bool:
@@ -290,21 +243,13 @@ func should_send() -> bool:
 	return false
 
 
-## Whether the local peer predicts this entity.
-##
-## True for a shared-authority entity the local peer owns — the case prediction and
-## reconciliation exist for.
+## Whether the local peer predicts this entity. True for a shared-authority entity the local peer owns
+## — the case prediction and reconciliation exist for.
 func is_predicted() -> bool:
 	return authority == Authority.SHARED and is_owner and not is_authoritative
 
 
 ## [method world_position] as it is now, kept and answered until [method thaw_position].
-##
-## What [DotNetManager] does to every identity before it builds snapshots on worker threads
-## ([member DotNetConfig.snapshot_workers]): interest asks for positions, and a worker that
-## reads [code]global_position[/code] gets an error and zero in a debug build and a value
-## racing the physics step in a release one. One read per entity on the main thread, where
-## the per-peer path read it once per entity per peer.
 func freeze_position() -> void:
 	_position_frozen = false
 	_frozen_position = world_position()
@@ -323,25 +268,17 @@ var _frozen_position: Vector3 = Vector3.ZERO
 var _position_frozen: bool = false
 
 
-## World position, for interest management and lag compensation.
-##
-## Reads whichever transform the entity actually has, so a 2D game works without a
-## separate code path.
+## World position, for interest management and lag compensation. Reads whichever transform the entity
+## actually has, so a 2D game works without a separate code path.
 func world_position() -> Vector3:
 	if _position_frozen:
 		return _frozen_position
 	if entity == null or not is_instance_valid(entity):
 		return Vector3.ZERO
 
-	# [b]In the tree as well as valid, and the second is not enough.[/b] A game is allowed to
-	# take a replicated node out of the tree between ticks — a round re-laying its map does
-	# exactly that, and it does it from inside this addon's own loop over identities — and a
-	# [Node3D] that is not in the tree answers `global_position` with
-	# `Condition "!is_inside_tree()" is true` and a full backtrace, once per entity per tick.
-	# To an operator reading a server log that is indistinguishable from a crash, for a state
-	# that is entirely expected. dot-entity guards its own `position()` for the same reason
-	# and writes down the same finding: [Node2D] does not even error, it quietly returns the
-	# LOCAL position instead, so the two dimensions disagree without saying so.
+	# [b]In the tree as well as valid, and the second is not enough.[/b] A game is allowed to take a
+	# replicated node out of the tree between ticks — a round re-laying its map does exactly that, and it
+	# does it from inside this addon's own loop over identities.
 	if not (entity as Node).is_inside_tree():
 		return Vector3.ZERO
 

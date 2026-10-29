@@ -127,7 +127,6 @@ class EncodeCache extends RefCounted:
 		shared_dirty.clear()
 
 
-
 ## Declare replicated properties here, with [method replicate].
 func _register_net_vars() -> void:
 	pass

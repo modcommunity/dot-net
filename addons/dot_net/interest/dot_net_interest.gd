@@ -2,44 +2,17 @@
 class_name DotNetInterest
 extends Resource
 
-## Decides which entities a client is told about. Subclass to define your own rule.
-##
-## [b]The single biggest lever on server bandwidth.[/b] Sending every entity to every
-## client is quadratic: 100 players each hearing about 100 entities is 10,000 updates
-## a tick. Sending only what a client can perceive turns that into a constant per
-## client, and it is the difference between 20 players and 200 on the same hardware.
-##
-## It is also an anti-cheat measure, and the only one that actually works. A client
-## that is never told where an enemy is cannot draw a box around them, no matter what
-## it does to its own renderer. Everything else — obfuscation, client-side checks,
-## detection — is a delaying action; not sending the data is not.
-##
-## [b]A [Resource], so a game swaps the whole strategy without touching dot-net.[/b]
-## The built-ins cover the common cases; a game with rooms, teams, portals,
-## line-of-sight or a fog of war writes its own and the rest of the pipeline does not
-## change.
-##
-## [codeblock]
-## class_name TeamInterest extends DotNetInterest
-##
-## func _is_relevant(observer, entity, ctx) -> bool:
-##     # Teammates always; everyone else only within earshot.
-##     if entity.has_tag("player") and _same_team(observer, entity):
-##         return true
-##     return observer.world_position().distance_to(entity.world_position()) < 50.0
-## [/codeblock]
+## Decides which entities a client is told about. Subclass to define your own rule. [b]The single
+## biggest lever on server bandwidth.[/b] Sending every entity to every client is quadratic: 100
+## players each hearing about 100 entities is 10,000 updates a tick.
 
 const CHANNEL := "net.interest"
 
 ## Human-readable name, for `net_status`.
 @export var strategy_name: String = "custom"
 
-## Consulted at most this often per observer, in seconds. 0 evaluates every snapshot.
-##
-## Interest rarely changes as fast as state does. Re-evaluating a grid query 20 times
-## a second for 100 players is real CPU for an answer that changes a few times a
-## second; a cached answer refreshed at 4 Hz is almost always identical and costs a
-## twentieth as much.
+## Consulted at most this often per observer, in seconds. 0 evaluates every snapshot. Interest rarely
+## changes as fast as state does.
 @export_range(0.0, 5.0, 0.05) var evaluation_interval_sec: float = 0.25
 
 ## Entities past [member far_distance] are sent in one snapshot of this many, staggered by net id
@@ -86,25 +59,14 @@ func native_config(_config: DotNetConfig) -> Dictionary:
 var _cache: Dictionary = {}
 
 ## observer peer_id -> {net_id: leave_at_ms}
-##
-## Entities that have left interest but are still being sent, to stop an entity on
-## the boundary from flickering in and out.
 var _lingering: Dictionary = {}
 
 ## observer peer_id -> {capped: bool, warned: bool, since_tick: int}
-##
-## Whether [method prioritise] is currently cutting this peer's relevant set, so the
-## log reports the EDGES of that condition rather than every snapshot it holds.
 var _cap_state: Dictionary = {}
 
 
-# --- Subclass interface ----------------------------------------------------
-
-## Whether [param observer] should know about [param entity].
-##
-## [param context] carries whatever the manager knows: [code]tick[/code],
-## [code]peer_id[/code], and the config. Override this and nothing else for most
-## strategies.
+## Whether [param observer] should know about [param entity]. [param context] carries whatever the
+## manager knows: [code]tick[/code], [code]peer_id[/code], and the config.
 func _is_relevant(
 	_observer: DotNetIdentity,
 	_entity: DotNetIdentity,
@@ -113,11 +75,9 @@ func _is_relevant(
 	return true
 
 
-## Optional bulk filter, when a strategy can answer faster than one at a time.
-##
-## A spatial index can return a candidate set directly instead of being asked about
-## every entity in the world — which is the difference between O(n) and O(visible)
-## per observer. Return null to fall back to [method _is_relevant] per entity.
+## Optional bulk filter, when a strategy can answer faster than one at a time. A spatial index can
+## return a candidate set directly instead of being asked about every entity in the world — which is
+## the difference between O(n) and O(visible) per observer.
 func _candidates(
 	_observer: DotNetIdentity,
 	_all: Array[DotNetIdentity],
@@ -132,11 +92,8 @@ func _prepare(_all: Array[DotNetIdentity], _context: Dictionary) -> void:
 	pass
 
 
-## Relative importance of an entity to an observer, for prioritisation.
-##
-## Consulted when the bandwidth budget cannot carry everything relevant. Higher is
-## sent first. The default weights by proximity, because a distant entity's staleness
-## is less visible than a near one's.
+## Relative importance of an entity to an observer, for prioritisation. Consulted when the bandwidth
+## budget cannot carry everything relevant.
 func _score(
 	observer: DotNetIdentity,
 	entity: DotNetIdentity,
@@ -148,8 +105,6 @@ func _score(
 	var distance := observer.world_position().distance_to(entity.world_position())
 	return entity.priority / (1.0 + distance * distance_falloff)
 
-
-# --- Public API ------------------------------------------------------------
 
 ## Whether [method thin_into] drops anything at all, so a caller can skip it.
 func thins() -> bool:
@@ -196,28 +151,14 @@ func _far_distance_for(entity: DotNetIdentity) -> float:
 	return far_distance
 
 
-## Whether [method relevance], [method ranked] and [method _score] may run on a worker
-## thread, for several peers at once ([member DotNetConfig.snapshot_workers]). False unless a
-## strategy says otherwise, and the built-in ones say so only for themselves (their own script,
-## not a subclass), because a subclass is a game's code and nothing here can tell whether it
-## reads a node, a physics space or a shared container. Return true from a subclass when
-## [method _is_relevant], [method _candidates] and [method _score] read nothing but
-## [method DotNetIdentity.world_position] (frozen for the snapshot), the identities' own fields,
-## [param context] and the strategy's own exports, and write nothing at all. [method _prepare]
-## runs on the main thread before the fork and may do anything.
-##
-## A strategy that answers false keeps every snapshot on the manager's thread: correct, and as
-## fast as before the option existed.
+## Whether [method relevance], [method ranked] and [method _score] may run on a worker thread, for
+## several peers at once ([member DotNetConfig.snapshot_workers]).
 func is_thread_safe() -> bool:
 	return false
 
 
-## The entities [param observer] should receive, with the cache and linger applied.
-##
-## The manager's own path, writing the cache as it goes. [method relevance] and
-## [method commit_relevance] are the same answer split for a worker thread; kept apart
-## rather than this calling them, because the split's copies and untyped lists cost every
-## snapshot on this thread (see [method DotNetManager._send_to_peer]).
+## The entities [param observer] should receive, with the cache and linger applied. The manager's own
+## path, writing the cache as it goes.
 func relevant_for(
 	observer: DotNetIdentity,
 	all: Array[DotNetIdentity],
@@ -232,18 +173,6 @@ func relevant_for(
 
 		if age < evaluation_interval_sec:
 			# Pinned before the cache is consulted, not after [method _evaluate] runs.
-			# The cache is a cache of *which entities existed and where* at one instant,
-			# and an entity spawned since is in nobody's cached set — so without this an
-			# observer does not receive its own newly spawned entity until the cache
-			# expires, and neither does anything marked always relevant.
-			#
-			# [b]That is not a small window.[/b] In a game where players respawn, split or
-			# spawn projectiles, a quarter of a second of an entity that exists only by
-			# prediction is a monster that pops into place on every respawn — and on a
-			# host that ticks faster than the wall clock, which is every headless test,
-			# the cache never expires at all and the entity is never sent even once. The
-			# position still looks right the whole time, because the owning client is
-			# predicting it; what does not arrive is everything it cannot predict.
 			var resolved_typed: Array[DotNetIdentity] = []
 			_resolve_pinned_into(resolved_typed, cached["ids"], observer, all)
 			return resolved_typed
@@ -285,21 +214,9 @@ func relevant_for(
 	return relevant
 
 
-## [method relevant_for] without its writes: [code][relevant, cache entry, lingering][/code],
-## the last two null when the cached answer was used, for [method commit_relevance] to store.
-## What a snapshot built on a worker thread asks, since the cache is shared by every peer.
-##
-## [b]The list is an untyped [Array][/b], here and in [method ranked] and [method _evaluate].
-## Appending a node to an [code]Array[DotNetIdentity][/code] checks its script through
-## [method Node.get_script], which refuses a worker thread for a node in the tree: the append
-## fails with "The caller thread can't call the function get_script()" and the entity is
-## silently missing from the snapshot. A main-thread caller wanting the typed list
-## [method Array.assign]s it, as [method relevant_for] does.
-##
-## The time is [code]context["now_ms"][/code] when the caller gives one, which the manager
-## does once per snapshot: read here per peer, two peers a millisecond apart on either side of
-## the evaluation interval could get a cached and a fresh answer in one snapshot, and the same
-## snapshot built twice could differ.
+## [method relevant_for] without its writes: [code][relevant, cache entry, lingering][/code], the last
+## two null when the cached answer was used, for [method commit_relevance] to store. What a snapshot
+## built on a worker thread asks, since the cache is shared by every peer.
 func relevance(
 	observer: DotNetIdentity,
 	all: Array[DotNetIdentity],
@@ -314,18 +231,6 @@ func relevance(
 
 		if age < evaluation_interval_sec:
 			# Pinned before the cache is consulted, not after [method _evaluate] runs.
-			# The cache is a cache of *which entities existed and where* at one instant,
-			# and an entity spawned since is in nobody's cached set — so without this an
-			# observer does not receive its own newly spawned entity until the cache
-			# expires, and neither does anything marked always relevant.
-			#
-			# [b]That is not a small window.[/b] In a game where players respawn, split or
-			# spawn projectiles, a quarter of a second of an entity that exists only by
-			# prediction is a monster that pops into place on every respawn — and on a
-			# host that ticks faster than the wall clock, which is every headless test,
-			# the cache never expires at all and the entity is never sent even once. The
-			# position still looks right the whole time, because the owning client is
-			# predicting it; what does not arrive is everything it cannot predict.
 			var resolved: Array = []
 			_resolve_pinned_into(resolved, cached["ids"], observer, all)
 			return [resolved, null, null]
@@ -337,10 +242,9 @@ func relevance(
 	for identity: DotNetIdentity in relevant:
 		ids[identity.net_id] = true
 
-	# Anything that was relevant and no longer is keeps being sent for a while.
-	# Without this an entity pacing across the boundary costs a full spawn and
-	# despawn several times a second.
-	# A copy: the stored one is written to below, and this must not write.
+	# Anything that was relevant and no longer is keeps being sent for a while. Without this an entity
+	# pacing across the boundary costs a full spawn and despawn several times a second. A copy: the
+	# stored one is written to below, and this must not write.
 	var linger := (_lingering.get(peer_id, {}) as Dictionary).duplicate()
 	var previous: Dictionary = _cache.get(peer_id, {}).get("ids", {})
 
@@ -374,17 +278,9 @@ func commit_relevance(peer_id: int, answer: Array) -> void:
 	_cache[peer_id] = answer[1]
 
 
-## Adds what an observer must receive whatever the cache says.
-##
-## The same two exemptions [method _evaluate] applies, applied to a cached answer: an
-## entity the observer owns, and anything marked [member DotNetIdentity.always_relevant].
-## Both are guarantees rather than heuristics — a client that stopped being told about its
-## own character would be unplayable, and an objective marker that popped in is a bug
-## rather than an optimisation — so neither may wait for a cache to expire.
-##
-## Returns a new dictionary rather than mutating the cached one: mutating it would make
-## the cache grow with every entity that has ever been pinned into it, and those entries
-## would then survive the expiry that is supposed to re-evaluate them.
+## Adds what an observer must receive whatever the cache says. The same two exemptions [method
+## _evaluate] applies, applied to a cached answer: an entity the observer owns, and anything marked
+## [member DotNetIdentity.always_relevant].
 func _pinned(
 	ids: Dictionary,
 	observer: DotNetIdentity,
@@ -448,13 +344,8 @@ func _evaluate_into(
 			out.append(identity)
 
 
-## Sorts by score and truncates to the entity cap.
-##
-## The backstop when interest management alone is not enough — a hundred players in
-## one room. Something has to be dropped, and dropping the least relevant is better
-## than dropping whatever happened to be last.
-## [param scores] is [method scores_for]'s answer when the caller has it, so nothing is
-## scored twice.
+## Sorts by score and truncates to the entity cap. The backstop when interest management alone is not
+## enough — a hundred players in one room.
 func prioritise(
 	observer: DotNetIdentity,
 	entities: Array[DotNetIdentity],
@@ -523,26 +414,9 @@ func _rank_into(
 		out.append(entities[int(keys[i].y)])
 
 
-## Reports the edges of "the cap is cutting what this peer should see".
-##
-## [b]This is the one thing in this class an operator can act on.[/b] Everything else
-## here is a per-observer per-tick decision, and a line per decision is twenty a
-## second per peer that never says anything. But when the entity cap cuts a set that
-## interest management already chose, the dropped entities are ones this client
-## SHOULD be seeing — a player standing in plain sight who is not drawn — and the
-## remedy is a setting: raise [member DotNetConfig.max_entities_per_snapshot] or
-## [member DotNetConfig.max_tracked_entities], or tighten the strategy. Nothing in
-## the process said so before.
-##
-## WARN the first time a peer is capped, because that is a configuration somebody
-## should look at eventually; DEBUG for every later crossing, both ways, because a peer
-## on the boundary of a crowded room crosses it repeatedly and a WARN per crossing
-## would bury the one that matters. The "clear" edge wants the set back under 90% of
-## the cap, for the same reason: a set hovering at the cap would otherwise flap once
-## a snapshot. [param peer_id] 0 is a caller outside the snapshot loop — a test or
-## a tool asking directly — and is not reported.
-## The entity cap's record and log lines for one peer: [method prioritise]'s first step, for a
-## caller that ranked with [method ranked] off the main thread. Main thread (it logs).
+## Reports the edges of "the cap is cutting what this peer should see". [b]This is the one thing in
+## this class an operator can act on.[/b] Everything else here is a per-observer per-tick decision, and
+## a line per decision is twenty a second per peer that never says anything.
 func note_cap(peer_id: int, count: int, limit: int, context: Dictionary) -> void:
 	_note_cap(peer_id, count, limit, context)
 
@@ -633,10 +507,8 @@ func forget_peer(peer_id: int) -> void:
 	_cap_state.erase(peer_id)
 
 
-## Drops every cached answer, forcing re-evaluation.
-##
-## For a level change, a team switch, anything that invalidates the rule's inputs
-## wholesale.
+## Drops every cached answer, forcing re-evaluation. For a level change, a team switch, anything that
+## invalidates the rule's inputs wholesale.
 func invalidate() -> void:
 	_cache.clear()
 	_lingering.clear()

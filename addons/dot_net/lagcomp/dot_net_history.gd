@@ -1,28 +1,9 @@
 class_name DotNetHistory
 extends RefCounted
 
-## Past positions of every entity, so the server can judge a shot the way the
-## shooter saw it.
-##
-## [b]The problem lag compensation solves.[/b] A client renders remote players
-## interpolated into the past — one buffer-length behind the server, plus half a round
-## trip of travel time. When the player aims at a head and fires, that head was there
-## on their screen, and it is not there now on the server. Judging the shot against
-## the server's present means a player with 100 ms of latency must lead every target
-## by a body width, which is unplayable and unfair in a way players correctly perceive
-## as the game being broken.
-##
-## [b]The fix, and who pays for it.[/b] The server rewinds every other entity to where
-## the shooter saw them, tests the shot there, and restores. The shooter gets the hit
-## they earned. The victim occasionally dies after reaching cover — they moved during
-## the shooter's latency window, and someone has to absorb that. Every competitive
-## shooter makes the same trade in the same direction, because the alternative
-## penalises the player who did nothing wrong.
-##
-## [b]The bound matters.[/b] [member DotNetConfig.max_rewind_sec] caps how far back a
-## client's claim is honoured. Without it, a client that lies about its latency can
-## rewind arbitrarily far and shoot targets that were somewhere else a full second
-## ago.
+## Past positions of every entity, so the server can judge a shot the way the shooter saw it. [b]The
+## problem lag compensation solves.[/b] A client renders remote players interpolated into the past —
+## one buffer-length behind the server, plus half a round trip of travel time.
 
 const CHANNEL := "net.lagcomp"
 
@@ -69,11 +50,9 @@ class Track extends RefCounted:
 		while samples.size() > capacity:
 			samples.pop_front()
 
-	## The state at a tick, interpolating between the two recorded around it.
-	##
-	## Interpolated rather than nearest: at a 20 Hz record rate the nearest sample can
-	## be 25 ms wrong, which at running speed is a third of a metre — the difference
-	## between a hit and a miss.
+	## The state at a tick, interpolating between the two recorded around it. Interpolated rather than
+	## nearest: at a 20 Hz record rate the nearest sample can be 25 ms wrong, which at running speed is a
+	## third of a metre — the difference between a hit and a miss.
 	func sample_at(tick: float) -> Sample:
 		if samples.is_empty():
 			return null
@@ -131,26 +110,13 @@ func _init(p_config: DotNetConfig) -> void:
 	config = p_config
 
 
-# --- Recording -------------------------------------------------------------
-
 ## Records the current state of every entity. Called once per snapshot on the server.
-##
-## Recording at the snapshot rate rather than the tick rate is deliberate: the client
-## only ever saw snapshot-rate positions, so finer history records moments nobody
-## could have been aiming at, at several times the memory.
 func record(identities: Array[DotNetIdentity], tick: int) -> void:
 	if not config.enable_lag_compensation:
 		return
 
 	for identity in identities:
-		# Not in the world, not recorded. A game may take a replicated node out of the
-		# tree between ticks — a round re-laying its map does, from inside the manager's
-		# own loop, before the identity is unregistered — and [method
-		# DotNetIdentity.world_position] already answers ZERO for one rather than erroring.
-		# This loop then read `global_basis` straight off it, which errors once per entity
-		# per tick with a backtrace an operator cannot tell from a crash (smash-copter's
-		# ten decks, every round). And a sample recorded at the origin would be worse than
-		# none: a rewind to that tick would drag a hitbox through the middle of the map.
+		# Not in the world, not recorded.
 		if not _in_world(identity):
 			continue
 
@@ -176,17 +142,9 @@ func _track_for(net_id: int) -> Track:
 	return _tracks[net_id]
 
 
-# --- Rewinding -------------------------------------------------------------
-
-## Moves entities to where they were at [param target_tick].
-##
-## [b]Must be paired with [method restore].[/b] Leaving the world rewound means every
-## subsequent operation that tick — physics, other players' shots, the next
-## snapshot — happens in the past. The pattern is rewind, test, restore, with nothing
-## that can return early in between.
-##
-## [param exclude_net_id] leaves the shooter alone; rewinding the entity doing the
-## shooting would move its own muzzle.
+## Moves entities to where they were at [param target_tick]. [b]Must be paired with [method
+## restore].[/b] Leaving the world rewound means every subsequent operation that tick — physics, other
+## players' shots, the next snapshot — happens in the past.
 func rewind(
 	identities: Array[DotNetIdentity],
 	target_tick: int,
@@ -259,10 +217,8 @@ func rewind(
 	})
 
 
-## Puts every rewound entity back where it was.
-##
-## Safe to call when nothing is rewound, so it can go in a deferred block without a
-## guard.
+## Puts every rewound entity back where it was. Safe to call when nothing is rewound, so it can go in a
+## deferred block without a guard.
 func restore() -> int:
 	var count := _rewound.size()
 
@@ -279,10 +235,7 @@ func restore() -> int:
 	return count
 
 
-## Runs [param body] with the world rewound, restoring afterwards.
-##
-## The safe form, and the one to use. A hand-written rewind/restore pair leaves the
-## world in the past the first time somebody adds an early return between them.
+## Runs [param body] with the world rewound, restoring afterwards. The safe form, and the one to use.
 func with_rewind(
 	identities: Array[DotNetIdentity],
 	target_tick: int,
@@ -332,12 +285,8 @@ static func _apply(
 		(entity as Node2D).global_position = Vector2(position.x, position.y)
 
 
-# --- Queries ---------------------------------------------------------------
-
-## Where an entity was at a tick, without moving anything.
-##
-## For tests that do their own maths rather than using the physics engine — a hitscan
-## against a capsule, a proximity check.
+## Where an entity was at a tick, without moving anything. For tests that do their own maths rather
+## than using the physics engine — a hitscan against a capsule, a proximity check.
 func position_at(net_id: int, tick: float) -> Variant:
 	if not _tracks.has(net_id):
 		return null
@@ -346,10 +295,9 @@ func position_at(net_id: int, tick: float) -> Variant:
 	return sample.position if sample != null else null
 
 
-## The tick a client was rendering, given its ping and the interpolation delay.
-##
-## What a shot should be judged against: the client saw the world half a round trip
-## ago, delayed by its own interpolation buffer on top.
+## The tick a client was rendering, given its ping and the interpolation delay. What a shot should be
+## judged against: the client saw the world half a round trip ago, delayed by its own interpolation
+## buffer on top.
 func client_view_tick(
 	current_tick: int,
 	rtt_ms: float,

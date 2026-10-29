@@ -2,35 +2,21 @@
 class_name DotNetInterestDistance
 extends DotNetInterest
 
-## Replicates entities within a radius of the observer.
-##
-## The simplest useful strategy, and enough for most games. Costs one distance check
-## per entity per observer, which is fine into the low thousands of entities and
-## becomes the bottleneck above that — [DotNetInterestGrid] exists for that case.
-##
-## [b]Per-tag radii are the useful part.[/b] A player needs to know about other
-## players much further away than about dropped items or decorative props, and one
-## radius for everything is either too small for players or too large for props.
+## Replicates entities within a radius of the observer. The simplest useful strategy, and enough for
+## most games.
 
 ## Default radius in metres.
 @export var radius: float = 200.0
 
 ## Per-tag overrides, as [code]tag -> radius[/code].
-##
-## The first matching tag on an entity wins, so order the entity's tags by
-## specificity.
 @export var radius_by_tag: Dictionary = {}
 
-## Entities with any of these tags are always replicated.
-##
-## For categories rather than individuals — [member DotNetIdentity.always_relevant]
-## covers a single entity, this covers "every objective".
+## Entities with any of these tags are always replicated. For categories rather than individuals —
+## [member DotNetIdentity.always_relevant] covers a single entity, this covers "every objective".
 @export var always_tags: PackedStringArray = PackedStringArray()
 
-## Use squared distance and skip the square root.
-##
-## Free correctness-preserving speedup; off only if a subclass overrides the
-## comparison in a way that needs real distances.
+## Use squared distance and skip the square root. Free correctness-preserving speedup; off only if a
+## subclass overrides the comparison in a way that needs real distances.
 @export var use_squared: bool = true
 
 

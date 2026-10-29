@@ -1,48 +1,9 @@
 class_name DotNetMessageRegistry
 extends RefCounted
 
-## Maps message types to wire ids, and routes decoded messages to handlers.
-##
-## [b]The extension point most games touch first.[/b] Register your own message
-## classes and they are batched, prioritised, direction-checked and dispatched
-## exactly like the built-in ones. Nothing in dot-net special-cases its own messages.
-##
-## [b]Two peers may register DIFFERENT sets of types, and that is the point of how ids
-## work.[/b] This registry used to number types by sorting their names, which made two
-## processes agree without negotiating -- as long as they registered exactly the same set.
-## Adding one type renumbered every type after it in the sort, and a peer one build older
-## decoded every message as the type next to it; the schema hash over the whole set turned
-## that into a refused join, which was honest and meant every addon on both ends had to be
-## built from identical sources. A server one release ahead of a client could not host it.
-##
-## Now a type's wire id is derived from its NAME alone ([method wire_id_for]: the first 32
-## bits of its SHA-256), so it is the same number in every build that has the type and
-## nothing else about the registry can move it. A type the receiver does not have is an id
-## it does not know, and every message body is framed with its length in bits, so the
-## receiver skips exactly that message and carries on -- it is not the rest of the packet
-## that becomes unreadable any more.
-##
-## [b]Why derived ids and not a table negotiated per peer.[/b] A negotiated table has to
-## reach the receiver before the first message that uses it, and in this family it cannot
-## be made to: every game encodes its own events with [method encode] and routes the bytes
-## through its own link, around [DotNetManager], so nothing here orders the table ahead of
-## them. A message decoded against a table that has not arrived is either dropped or read
-## as the wrong type. A derived id cannot be misread whatever order anything arrives in.
-## The cost is 20 bits per message against the old 12, on events and requests that go out
-## a few times a second; snapshots carry no message id at all.
-##
-## [b]The table is still exchanged, for the one thing only it can do.[/b] Each end sends
-## [method schema_payload] -- every type it knows, and which of them it REQUIRES -- and
-## [method adopt_peer_schema] compares. A type registered [code]required[/code] (the
-## default) that the peer does not know refuses the join with a sentence, through
-## [signal peer_refused]; an optional one the peer lacks is simply never understood there
-## and costs nothing. Two names whose derived ids collide are caught here too, the only
-## place both names are ever side by side.
-##
-## [b]The rule for a message author, because the ids no longer protect you from it:[/b]
-## append fields, never reorder or retype one, and read an appended field only
-## [code]if reader.has_more()[/code] so a message from an older sender keeps its default.
-## A change that is not an append is a NEW TYPE with a new name. See [DotNetMessage].
+## Maps message types to wire ids, and routes decoded messages to handlers. [b]The extension point most
+## games touch first.[/b] Register your own message classes and they are batched, prioritised,
+## direction-checked and dispatched exactly like the built-in ones.
 
 const CHANNEL := "net.msg"
 
@@ -64,15 +25,6 @@ const MAX_NAME_BYTES := 128
 const MAX_BODY_BITS := 1 << 24
 
 ## Wire features beyond the messages, as bits of one varint appended to the schema table.
-##
-## The table already goes to every peer before it matters, and an end built before a field
-## was appended to it reads what it knows and skips the rest, so it is where one end says
-## "I can read this" without a message type of its own. A sender uses a feature only once
-## the peer's table has arrived and named it ([method peer_supports]); an older peer never
-## names one and is sent what it has always read.
-##
-## [constant FEATURE_UNCHANGED_RUNS]: snapshots may list unchanged entities by id instead of
-## writing an empty body for each (see [code]docs/wire.md#unchanged-entities[/code]).
 const FEATURE_UNCHANGED_RUNS := 1
 
 ## [constant FEATURE_INPUT_LEAD]: snapshots may end with how early this client's commands are
@@ -119,18 +71,7 @@ static func wire_id_for(type_name: StringName) -> int:
 	return digest.substr(0, 8).hex_to_int()
 
 
-## Registers a message type.
-##
-## [param script] must extend [DotNetMessage]. [param direction] is enforced on
-## receipt — a message declared [constant DotNetMessage.Direction.TO_CLIENT] that
-## arrives from a client is dropped and logged, which is the check that stops a
-## client from sending itself a spawn.
-##
-## [param required] says whether a peer that does not know this type can still play.
-## True by default, because a game's own event and request types are the game: a client
-## without them is a client that cannot do anything. Pass false for a type that adds
-## something a peer can do without -- a cosmetic, a statistic, a feature a newer build
-## offers and an older one simply does not show.
+## Registers a message type. [param script] must extend [DotNetMessage].
 func register(
 	type_name: StringName,
 	script: GDScript,
@@ -217,11 +158,7 @@ func register(
 	return DotResult.success(type_name)
 
 
-## Sets the handler for a type.
-##
-## Signature: [code]func(message: DotNetMessage) -> void[/code]. Separate from
-## registration so a game can register its whole schema at startup and attach
-## handlers later, per scene or per game mode.
+## Sets the handler for a type. Signature: [code]func(message: DotNetMessage) -> void[/code].
 func on(type_name: StringName, handler: Callable) -> DotResult:
 	if not _by_name.has(type_name):
 		return DotResult.fail(
@@ -232,12 +169,8 @@ func on(type_name: StringName, handler: Callable) -> DotResult:
 	return DotResult.success(type_name)
 
 
-## Closes the schema. Called automatically on first use.
-##
-## Ids no longer depend on the set, so sealing renumbers nothing -- it exists because the
-## table a peer was sent is a promise. A type registered after it went out is a type the
-## peer was told this end does not have, and would be refused or dropped there for a
-## reason nobody would find by reading the code that registered it.
+## Closes the schema. Called automatically on first use. Ids no longer depend on the set, so sealing
+## renumbers nothing -- it exists because the table a peer was sent is a promise.
 func seal() -> void:
 	if _sealed:
 		return
@@ -260,13 +193,8 @@ func is_sealed() -> bool:
 	return _sealed
 
 
-## A hash of what a peer MUST share with this one, for display and for a handshake.
-##
-## [b]Only the required types' names.[/b] It used to cover every type and its delivery
-## class, so a peer with one extra optional type -- which can play perfectly -- showed a
-## different hash and read as incompatible. What decides compatibility now is
-## [method adopt_peer_schema]; this is the short form of the part of it that has to match,
-## printed at startup and by `net_status` so two operators can compare twelve characters.
+## A hash of what a peer MUST share with this one, for display and for a handshake. [b]Only the
+## required types' names.[/b] An extra optional type must not read as incompatible.
 func schema_hash() -> String:
 	if not _sealed:
 		seal()
@@ -305,13 +233,8 @@ func is_required(type_name: StringName) -> bool:
 	return _by_name.has(type_name) and bool(_by_name[type_name]["required"])
 
 
-# --- The table a peer is sent ------------------------------------------------
-
-## This end's schema as a standalone payload, for [DotNetManager.receive] on the other.
-##
-## Every type, with whether it is required, its direction and its delivery. Travels as a
-## message whose id is [constant SCHEMA_ID], so it goes wherever a game's own messages go
-## and is decoded by the same [method decode] -- no route of its own for a game to wire.
+## This end's schema as a standalone payload, for [DotNetManager.receive] on the other. Every type,
+## with whether it is required, its direction and its delivery.
 func schema_payload() -> PackedByteArray:
 	if not _sealed:
 		seal()
@@ -335,14 +258,9 @@ func schema_payload() -> PackedByteArray:
 	return writer.to_bytes()
 
 
-## Compares a peer's table with this one and remembers it.
-##
-## Both directions, because either end can be the newer: a type this end requires that the
-## peer does not know, and a type the peer requires that this end does not. Either refuses,
-## with a message chosen by which side is missing what -- the player reads it, so it says
-## who has to update rather than listing message names.
-##
-## A peer can send its table more than once; the latest one is the one that counts.
+## Compares a peer's table with this one and remembers it. Both directions, because either end can be
+## the newer: a type this end requires that the peer does not know, and a type the peer requires that
+## this end does not.
 func adopt_peer_schema(peer_id: int, reader: DotNetReader, is_server: bool) -> DotResult:
 	var count := reader.read_varint()
 
@@ -432,13 +350,9 @@ func _count_unknown(names: Dictionary) -> int:
 	return n
 
 
-## What to tell a player, and what to log, when two schemas cannot work together.
-## Null when they can.
-##
-## [b]Says who has to update, not which messages differ.[/b] A player cannot do anything
-## about a message type; the names go in the detail, for the operator reading the same line
-## in a log. Same shape as [code]DotSignon.explain[/code] in dot-server, which is the
-## other half of this handshake.
+## What to tell a player, and what to log, when two schemas cannot work together. Null when they can.
+## [b]Says who has to update, not which messages differ.[/b] A player cannot do anything about a
+## message type; the names go in the detail, for the operator reading the same line in a log.
 static func explain(
 	missing_there: PackedStringArray,
 	missing_here: PackedStringArray,
@@ -481,10 +395,9 @@ func knows_peer(peer_id: int) -> bool:
 	return _peers.has(peer_id)
 
 
-## Whether a peer understands a type, as far as this end knows.
-##
-## True for a peer whose table has not arrived, because until it does the honest answer is
-## "probably" and a sender that stayed quiet would lose the first messages of every join.
+## Whether a peer understands a type, as far as this end knows. True for a peer whose table has not
+## arrived, because until it does the honest answer is "probably" and a sender that stayed quiet would
+## lose the first messages of every join.
 func peer_has(peer_id: int, type_name: StringName) -> bool:
 	if not _peers.has(peer_id):
 		return true
@@ -492,10 +405,6 @@ func peer_has(peer_id: int, type_name: StringName) -> bool:
 
 
 ## Whether a peer has said it reads a wire [param feature] (a [code]FEATURE_*[/code] bit).
-##
-## False until its table arrives, unlike [method peer_has]: a feature changes what a packet
-## means, and a peer that cannot read one misreads the packet rather than skipping a
-## message, so the answer before the table is "no".
 func peer_supports(peer_id: int, feature: int) -> bool:
 	if not _peers.has(peer_id):
 		return false
@@ -518,8 +427,6 @@ func forget_peer(peer_id: int) -> void:
 			_skipped_noted.erase(key)
 
 
-# --- Encoding --------------------------------------------------------------
-
 func id_of(type_name: StringName) -> int:
 	if not _sealed:
 		seal()
@@ -534,11 +441,8 @@ func delivery_of(type_name: StringName) -> DotNetMessage.Delivery:
 	return _by_name[type_name]["delivery"]
 
 
-## Writes a message with its id header into [param writer].
-##
-## Framed as [code]id (32) | body length in bits (varint) | align | body[/code]. The
-## length is what lets a receiver without this type skip it, and lets one with an older
-## version of it stop at the end of what was sent and skip what it does not know.
+## Writes a message with its id header into [param writer]. Framed as [code]id (32) | body length in
+## bits (varint) | align | body[/code].
 func encode(message: DotNetMessage, writer: DotNetWriter) -> DotResult:
 	var name := message.type_name()
 	var id := id_of(name)
@@ -570,14 +474,9 @@ static func _frame(writer: DotNetWriter, id: int, body: DotNetWriter) -> void:
 	writer.write_aligned_bytes(body.to_bytes())
 
 
-## Reads one message from [param reader], validating its direction.
-##
-## Succeeds with [code]null[/code] for a message there is nothing to dispatch for: a
-## schema table, which it adopts; a type this end does not have, which it skips; and a
-## type a refused peer sent. A failure is a message that was malformed or not allowed.
-##
-## [param from_peer_id] is the transport's view of the sender — never a value from
-## inside the payload. [param is_server] decides which directions are legal.
+## Reads one message from [param reader], validating its direction. Succeeds with [code]null[/code] for
+## a message there is nothing to dispatch for: a schema table, which it adopts; a type this end does
+## not have, which it skips; and a type a refused peer sent.
 func decode(
 	reader: DotNetReader,
 	from_peer_id: int,
@@ -652,12 +551,9 @@ func decode(
 	message.sender_peer_id = from_peer_id
 	message.read(body)
 
-	# [b]A body that ran out is not a failure any more.[/b] The body's length was framed
-	# and checked above, so a short body is not a truncated packet: it is a sender whose
-	# version of this message had fewer fields. They read as zero, or keep their defaults
-	# behind `has_more()`, and [method DotNetMessage.validate] is what refuses a message
-	# whose values are impossible -- which it always was, since zeroes are values a sender
-	# could have written on purpose.
+	# [b]A body that ran out is not a failure any more.[/b] The body's length was framed and checked
+	# above, so a short body is not a truncated packet: it is a sender whose version of this message had
+	# fewer fields.
 
 	var valid := message.validate()
 	if not valid.ok:
@@ -666,11 +562,9 @@ func decode(
 	return DotResult.success(message)
 
 
-## Dispatches a decoded message to its handler.
-##
-## A type with no handler is not an error — a game may register a schema before the
-## scene that handles it exists — but it is logged once per type so a missing handler
-## does not present as a silently ignored feature.
+## Dispatches a decoded message to its handler. A type with no handler is not an error — a game may
+## register a schema before the scene that handles it exists — but it is logged once per type so a
+## missing handler does not present as a silently ignored feature.
 var _warned_missing: Dictionary = {}
 
 func dispatch(message: DotNetMessage) -> void:
@@ -693,8 +587,6 @@ func dispatch(message: DotNetMessage) -> void:
 
 	handler.call(message)
 
-
-# --- Introspection ---------------------------------------------------------
 
 func count() -> int:
 	return _by_name.size()

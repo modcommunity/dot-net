@@ -3,24 +3,6 @@ class_name DotNetVar
 extends Resource
 
 ## A declaration that one property is replicated, and how.
-##
-## [b]This is the main extension point in dot-net.[/b] A game describes what it wants
-## replicated and how precisely, and the rest — dirty tracking, quantisation,
-## delta compression, per-observer filtering, interpolation — follows from the
-## declaration. Nothing needs to be written per property.
-##
-## [codeblock]
-## func _register_net_vars() -> void:
-##     replicate("position", DotNetVar.Type.VECTOR3_POSITION).interpolated()
-##     replicate("health", DotNetVar.Type.UINT).bits(7).on_change(_on_health_changed)
-##     replicate("ammo", DotNetVar.Type.UINT).bits(9).to_owner_only()
-##     replicate("inventory", DotNetVar.Type.CUSTOM).codec(_write_inv, _read_inv)
-## [/codeblock]
-##
-## [b]When the built-in types are not enough, use [constant Type.CUSTOM].[/b] Supply
-## a write and a read callable and any type at all can be replicated — a dictionary,
-## a resource, a bitfield of your own design. The codec sees a [DotNetWriter] and a
-## [DotNetReader] and is otherwise unconstrained.
 
 ## Built-in wire representations. [constant Type.CUSTOM] escapes to your own codec.
 enum Type {
@@ -59,11 +41,8 @@ enum Type {
 enum Audience {
 	## Everyone who can see the entity at all.
 	EVERYONE,
-	## Only the client that owns it.
-	##
-	## For state a player needs and opponents must not have: exact ammo, cooldowns,
-	## whether an ability is off cooldown. Sending it to everyone is how a modified
-	## client gets information the game never intended to give it.
+	## Only the client that owns it. For state a player needs and opponents must not have: exact ammo,
+	## cooldowns, whether an ability is off cooldown.
 	OWNER,
 	## Everyone except the owner.
 	##
@@ -85,35 +64,24 @@ enum Audience {
 @export var min_value: float = -1.0
 @export var max_value: float = 1.0
 
-## Interpolate between snapshots on receiving clients.
-##
-## Right for anything continuous — position, rotation, a health bar that should slide.
-## Wrong for anything discrete: interpolating a weapon index produces weapons that do
-## not exist.
+## Interpolate between snapshots on receiving clients. Right for anything continuous — position,
+## rotation, a health bar that should slide.
 @export var interpolate: bool = false
 
-## Send at most this many times per second. 0 uses the snapshot rate.
-##
-## For state that changes constantly but does not need to arrive constantly — a score,
-## a stamina bar. Costs staleness, saves bandwidth.
+## Send at most this many times per second. 0 uses the snapshot rate. For state that changes constantly
+## but does not need to arrive constantly — a score, a stamina bar.
 @export_range(0.0, 240.0, 1.0) var max_rate: float = 0.0
 
-## Send priority relative to other properties on the same entity.
-##
-## Consulted when a client's bandwidth budget cannot carry everything. Position
-## usually outranks cosmetic state.
+## Send priority relative to other properties on the same entity. Consulted when a client's bandwidth
+## budget cannot carry everything.
 @export_range(0.0, 10.0, 0.1) var priority: float = 1.0
 
-## Send once on spawn and only on change afterwards.
-##
-## For values that rarely change — a team, a name, a skin. The alternative is paying
-## for them in every snapshot.
+## Send once on spawn and only on change afterwards. For values that rarely change — a team, a name, a
+## skin.
 @export var on_spawn_only: bool = false
 
-## Deadband: changes smaller than this are not sent.
-##
-## Suppresses the constant micro-updates floating-point drift produces. Only
-## meaningful for numeric types.
+## Deadband: changes smaller than this are not sent. Suppresses the constant micro-updates floating-
+## point drift produces.
 @export var epsilon: float = 0.0
 
 ## Called on a receiving client when the value changes.
@@ -138,8 +106,6 @@ static func make(p_property: StringName, p_type: Type) -> DotNetVar:
 	return v
 
 
-# --- Fluent configuration --------------------------------------------------
-#
 # Chained rather than positional because a property declaration reads as a
 # sentence, and a call with nine optional arguments does not.
 
@@ -194,10 +160,7 @@ func on_change(handler: Callable) -> DotNetVar:
 	return self
 
 
-## Supplies a codec for [constant Type.CUSTOM].
-##
-## The escape hatch that makes any type replicable. The pair must be exact inverses;
-## nothing can check that for you, so round-trip them in a test.
+## Supplies a codec for [constant Type.CUSTOM]. The escape hatch that makes any type replicable.
 func codec(writer_fn: Callable, reader_fn: Callable) -> DotNetVar:
 	type = Type.CUSTOM
 	write_fn = writer_fn
@@ -208,8 +171,6 @@ func codec(writer_fn: Callable, reader_fn: Callable) -> DotNetVar:
 func bind_config(config: DotNetConfig) -> void:
 	_config = config
 
-
-# --- Serialisation ---------------------------------------------------------
 
 ## Writes a value according to this declaration.
 func write(writer: DotNetWriter, value: Variant) -> void:
@@ -329,11 +290,7 @@ func read(reader: DotNetReader) -> Variant:
 	return null
 
 
-## Whether two values differ enough to be worth sending.
-##
-## Applies [member epsilon] to numeric types. Without a deadband, a float that drifts
-## in its last bit is dirty every tick forever, and the property costs full bandwidth
-## while never visibly changing.
+## Whether two values differ enough to be worth sending. Applies [member epsilon] to numeric types.
 func differs(old_value: Variant, new_value: Variant) -> bool:
 	if epsilon <= 0.0:
 		return not _values_equal(old_value, new_value)
@@ -380,16 +337,9 @@ func quantum() -> float:
 	return 0.0
 
 
-## Whether a value this side computed, [param predicted], is what [param received] (read off
-## the wire) says, as nearly as the wire can say it: within one and a half quanta per
-## component, or the property's [member epsilon] where that is wider, since a change
-## inside the deadband is never sent. Exact for integers, booleans, strings and bytes; a
-## custom codec is compared after a round trip through it.
-##
-## [b]False is always safe.[/b] The predictor uses this to skip a replay whose starting
-## state it already had; a "differs" that did not need to costs one replay, and a "matches"
-## that should not have would leave a misprediction standing. Hence the generous slack
-## only where the wire itself is inexact.
+## Whether a value this side computed, [param predicted], is what [param received] (read off the wire)
+## says, as nearly as the wire can say it: within one and a half quanta per component, or the
+## property's [member epsilon] where that is wider, since a change inside the deadband is never sent.
 func matches(predicted: Variant, received: Variant) -> bool:
 	var slack := maxf(epsilon, quantum() * 1.5)
 	match type:
@@ -465,8 +415,6 @@ func visible_to(peer_id: int, owner_peer_id: int) -> bool:
 			return true
 
 
-# --- Config-derived widths -------------------------------------------------
-
 func _extent() -> float:
 	return _config.world_extent if _config != null else 2048.0
 
@@ -487,10 +435,8 @@ func _rotation_bits() -> int:
 	return _config.rotation_bits if _config != null else 9
 
 
-## Approximate bits this property costs, for budgeting.
-##
-## Exact for fixed-width types and a guess for the variable ones — which is enough,
-## because the budget only needs to know roughly what it is spending.
+## Approximate bits this property costs, for budgeting. Exact for fixed-width types and a guess for the
+## variable ones — which is enough, because the budget only needs to know roughly what it is spending.
 func estimated_bits() -> int:
 	match type:
 		Type.BOOL: return 1

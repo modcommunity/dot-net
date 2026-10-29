@@ -1,23 +1,11 @@
 extends "selftest/netcode_sections_7.gd"
 
-## Runs a server and a client in one process and checks the netcode works.
+## Runs a server and a client in one process over a loopback that can delay, reorder and drop packets, and checks the netcode works.
 ##
-## Everything here is offline and deterministic. The two managers are wired to each
-## other through a loopback that can delay, reorder and drop packets, which is what
-## makes it possible to test interpolation and reconciliation at all — a real network
-## would not reproduce the same conditions twice.
-##
-## [codeblock]
-## godot --headless --path . res://examples/netcode_demo.tscn
-## [/codeblock]
-##
-## Exits non-zero on any failure, so it works as a smoke test in CI.
+## Offline and deterministic; exits non-zero on any failure, so it works as a smoke test in CI.
 
 
-## Every check this suite makes, the last one included. The section counter below cannot
-## see a check that never ran inside a section that had already announced itself — a
-## runtime error aborts the rest of that function and the counter is satisfied — so the
-## total is compared with this. Raise it with every check added.
+## Every check this suite makes, the last one included. The section counter cannot see a check that never ran inside a section that had announced itself, so the total is compared with this. Raise it with every check added.
 const CHECKS := 522
 
 

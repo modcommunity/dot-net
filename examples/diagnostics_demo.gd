@@ -1,31 +1,17 @@
 extends Node
 
-## Exercises [DotNetStats] and [DotNetSnapshot] directly — the two classes in
-## this addon that no example named.
-##
-## Both are driven indirectly by [code]netcode_demo[/code], which asserts that a
-## couple of counters moved. That is weaker than it looks: it only ever walks the
-## healthy path, so every branch that exists to describe an *unhealthy* one — loss,
-## reordering, a stalled peer, a delta against a baseline the client never got —
-## was reached by nothing. Netcode fails quietly, and these are the classes whose
-## whole job is to say what went wrong; a wrong answer here sends someone to fix
-## the wrong subsystem.
-##
-## No sockets, no manager, no ticking: values in, numbers out.
-##
-## [codeblock]
-## godot --headless --path . res://examples/diagnostics_demo.tscn
-## [/codeblock]
+## Exercises [DotNetStats] and [DotNetSnapshot] directly — the two classes in this addon that no
+## example named. Both are driven indirectly by [code]netcode_demo[/code], which asserts that a couple
+## of counters moved.
 
 var _failures: int = 0
 var _checks: int = 0
 var _sections_started: int = 0
 var _sections_finished: int = 0
 
-## Every check this suite makes, the last one included. The section counter cannot see a
-## check that never ran inside a section that had already announced itself — a runtime
-## error aborts the rest of that function and the counter is satisfied — so the total is
-## compared with this. Raise it with every check added.
+## Every check this suite makes, the last one included. The section counter cannot see a check that
+## never ran inside a section that had already announced itself — a runtime error aborts the rest of
+## that function and the counter is satisfied — so the total is compared with this.
 const CHECKS := 71
 
 
@@ -61,8 +47,6 @@ func _run() -> void:
 	_line("[b]%d checks, %d failed[/b]" % [_checks, _failures])
 	_finish(1 if _failures > 0 else 0)
 
-
-# --- 1. Counters ------------------------------------------------------------
 
 func _section_counters() -> void:
 	_sections_started += 1
@@ -116,8 +100,6 @@ func _section_counters() -> void:
 	_sections_finished += 1
 
 
-# --- 2. Loss, which is inferred and therefore easy to get wrong -------------
-
 func _section_loss() -> void:
 	_sections_started += 1
 	_line("[b]2. inferred loss and reordering[/b]")
@@ -138,11 +120,7 @@ func _section_loss() -> void:
 	_check("loss_rate is lost/(lost+arrived)",
 		is_equal_approx(gap.loss_rate(), 3.0 / 5.0), "%.3f" % gap.loss_rate())
 
-	# The denominator has to be snapshots, not packets. A client sends inputs
-	# every tick and receives snapshots at a lower rate; counting its *packets*
-	# received as the denominator made the loss rate move whenever unrelated
-	# traffic did, and a server — which receives no snapshots at all — always
-	# reported 0.0 no matter what it had recorded.
+	# The denominator has to be snapshots, not packets.
 	var diluted := DotNetStats.new()
 	diluted.note_snapshot(1)
 	diluted.note_snapshot(5)
@@ -180,7 +158,6 @@ func _section_loss() -> void:
 	_sections_finished += 1
 
 
-
 func _loss_period_and_bounds() -> void:
 	# A snapshot every second tick is the normal case at 64 ticks and 32 snapshots, and
 	# a gap of one period is not a loss. Counting ticks reported half of every clean link
@@ -208,7 +185,6 @@ func _loss_period_and_bounds() -> void:
 	_check("loss_rate stays in 0..1",
 		evil.loss_rate() >= 0.0 and evil.loss_rate() <= 1.0, "%.3f" % evil.loss_rate())
 
-# --- 3. Rates, which have to go stale ---------------------------------------
 
 func _section_rates() -> void:
 	_sections_started += 1
@@ -229,10 +205,9 @@ func _section_rates() -> void:
 	_check("traffic closes the window", s.bytes_sent_per_sec > 0.0,
 		"%.0f B/s" % s.bytes_sent_per_sec)
 
-	# ...and then the peer goes quiet. The rate has to decay on its own, because
-	# a stalled connection reporting the throughput it had when it stalled is
-	# wrong at exactly the moment someone is reading it to find out why. Rolling
-	# only from note_sent/note_received meant nothing ever closed that window.
+	# ...and then the peer goes quiet. The rate has to decay on its own, because a stalled connection
+	# reporting the throughput it had when it stalled is wrong at exactly the moment someone is reading
+	# it to find out why.
 	var was := s.bytes_sent_per_sec
 	await _wait(1.1)
 	s.roll()
@@ -248,8 +223,6 @@ func _section_rates() -> void:
 	_line("")
 	_sections_finished += 1
 
-
-# --- 4. RTT percentiles -----------------------------------------------------
 
 func _section_rtt() -> void:
 	_sections_started += 1
@@ -292,8 +265,6 @@ func _section_rtt() -> void:
 	_line("")
 	_sections_finished += 1
 
-
-# --- 5. Snapshots -----------------------------------------------------------
 
 func _section_snapshot_basics() -> void:
 	_sections_started += 1
@@ -379,10 +350,9 @@ func _section_snapshot_isolation() -> void:
 	var base := DotNetSnapshot.new(1)
 	base.set_values(1, {"x": 0.0})
 
-	# The server keeps sent snapshots as delta baselines. A shallow copy lets a
-	# later tick mutate a baseline the server is still deltaing against, and the
-	# symptom is a client decoding a delta against bytes it never had — which
-	# looks like corruption, several layers away from the cause.
+	# The server keeps sent snapshots as delta baselines. A shallow copy lets a later tick mutate a
+	# baseline the server is still deltaing against, and the symptom is a client decoding a delta against
+	# bytes it never had — which looks like corruption, several layers away from the cause.
 	var copy := base.duplicate_deep()
 	copy.set_values(1, {"x": 99.0})
 	_check("mutating the copy leaves the original alone",
@@ -406,8 +376,6 @@ func _section_snapshot_isolation() -> void:
 	_line("")
 	_sections_finished += 1
 
-
-# --- Helpers ----------------------------------------------------------------
 
 func _wait(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout

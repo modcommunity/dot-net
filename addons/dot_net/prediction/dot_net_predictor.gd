@@ -1,34 +1,9 @@
 class_name DotNetPredictor
 extends RefCounted
 
-## Client-side prediction and server reconciliation.
-##
-## [b]Why prediction.[/b] Without it, pressing forward does nothing until the input
-## reaches the server and the resulting state comes back — a full round trip. At
-## 80 ms that is noticeable; at 150 ms it is unplayable. So the client applies the
-## input immediately, to its own copy, and assumes the server will agree.
-##
-## [b]Why reconciliation.[/b] Sometimes it will not agree — the client missed a
-## collision, or another player pushed it, or it was simply wrong. The server's answer
-## for tick N arrives while the client is already at tick N+12. Snapping to it would
-## undo twelve ticks of movement the player has already seen. Instead:
-##
-## [codeblock]
-##   1. accept the server's state for tick N
-##   2. replay inputs N+1 … N+12 through the same simulation
-##   3. compare the result with what the client currently shows
-##   4. if it differs, ease from the old position to the new one
-## [/codeblock]
-##
-## Steps 1–3 are exact. Step 4 is the cosmetic part, and it is where a correction
-## either feels like a small tug or like a teleport.
-##
-## [b]The determinism requirement.[/b] Replay only converges if
-## [method DotNetBehaviour._net_simulate] produces the same result on both machines
-## given the same input and starting state. Anything that differs between them —
-## wall-clock time, unseeded random, another player's unpredicted position, a
-## physics query against geometry only one side has loaded — makes the client
-## disagree with the server every tick, and the correction never settles.
+## Client-side prediction and server reconciliation. [b]Why prediction.[/b] Without it, pressing
+## forward does nothing until the input reaches the server and the resulting state comes back — a full
+## round trip.
 
 const CHANNEL := "net.predict"
 
@@ -71,16 +46,8 @@ func _init(p_config: DotNetConfig) -> void:
 	config = p_config
 
 
-# --- Prediction ------------------------------------------------------------
-
-## Simulates one tick for every predicted entity.
-##
-## Called on the client each tick, after the input for that tick has been recorded.
-## The same code path the server runs, which is what makes the two agree.
-##
-## [param input], when given, is handed to each behaviour's [code]_net_apply_input[/code]
-## first, exactly as a replay does: the host that records its own command and predicts it
-## in one go ([method DotNetManager.predict_tick]).
+## Simulates one tick for every predicted entity. Called on the client each tick, after the input for
+## that tick has been recorded.
 func predict(
 	identities: Array[DotNetIdentity],
 	tick: int,
@@ -158,18 +125,8 @@ func _forget_through(net_id: int, through: int) -> void:
 			ticks.erase(t)
 
 
-# --- Reconciliation --------------------------------------------------------
-
-## Accepts an authoritative state and replays everything since.
-##
-## [param authoritative_values] is what the server said for [param server_tick].
-## [param input_buffer] holds the inputs the client has sent since. Returns how many
-## ticks were replayed.
-##
-## [b]The replay is the expensive part[/b] — it is one simulation step per unacked
-## tick, every time a correction arrives, which at 20 Hz snapshots and 100 ms latency
-## is about six steps twenty times a second. Keeping [method DotNetBehaviour._net_simulate]
-## cheap matters more here than anywhere else in the frame.
+## Accepts an authoritative state and replays everything since. [param authoritative_values] is what
+## the server said for [param server_tick].
 func reconcile(
 	identity: DotNetIdentity,
 	server_tick: int,
@@ -181,21 +138,13 @@ func reconcile(
 	if not identity.is_predicted():
 		return DotResult.success(0)
 
-	# The prediction already reached this state: a rewind and a replay would compute what
-	# the entity holds now. See DotNetConfig.skip_matching_replays.
-	# Deferred reconciles only: then the properties still hold the prediction (the manager
-	# held them through the read), where an immediate one has already written the server's
-	# older state over them and needs the replay to get back.
+	# The prediction already reached this state: a rewind and a replay would compute what the entity
+	# holds now. See DotNetConfig.skip_matching_replays.
 	if config.skip_matching_replays and config.reconcile_once_per_frame \
 			and _predicted_matches(identity, server_tick, authoritative_values):
-		# [b]The properties hold the prediction again; the game's simulation does not.[/b]
-		# Reading the snapshot ran `_net_state_applied` with the server's state (that hook
-		# is where every game rewinds its simulation, by copying the properties into it),
-		# and the manager then put back only the properties. A replay overwrites that
-		# simulation from the rewound properties anyway; a skip has to hand it the
-		# prediction back the same way, or the next tick simulates from a round trip ago
-		# and the eye jumps back by the lead: game-arena's headless_feel at a steady
-		# 40 ms, 300 mm and 31 corrections (2026-10-16).
+		# [b]The properties hold the prediction again; the game's simulation does not.[/b] Reading the
+		# snapshot ran `_net_state_applied` with the server's state (that hook is where every game rewinds
+		# its simulation, by copying the properties into it).
 		for behaviour in identity.behaviours:
 			behaviour._net_state_applied(server_tick)
 		_forget_through(identity.net_id, server_tick)
@@ -220,14 +169,8 @@ func reconcile(
 			applied += 1
 
 	if applied == 0:
-		# Nothing the server has ever said about this entity: no state has arrived for it
-		# yet, so there is nothing to rewind to and leaving the prediction alone is
-		# correct. [b]This is not "the snapshot changed nothing".[/b] The manager hands
-		# over [method DotNetBehaviour.authoritative_values], the server's whole state
-		# with what the snapshot left out filled from what it sent before — so an entity
-		# the server is holding still is rewound to where the server holds it. Reading an
-		# empty delta as "keep predicting" is what let a client walk away from a server
-		# that had stopped it.
+		# Nothing the server has ever said about this entity: no state has arrived for it yet, so there is
+		# nothing to rewind to and leaving the prediction alone is correct.
 		return DotResult.success(0)
 
 	# 2. Replay every input the server has not confirmed yet, unless nothing of the entity
@@ -247,19 +190,14 @@ func reconcile(
 	while predicting and replay_tick <= current_tick:
 		var input := input_buffer.peek(replay_tick)
 
-		# [b]A hole is not a gap.[/b] A tick with no input, but older and newer ones in the buffer,
-		# is a tick the client never generated a command for -- its clock jumped forward
-		# over it (`DotNetClock`'s catch-up) -- and the server ran it on the player's
-		# previous command, as it runs any tick whose command never came. The replay does
-		# the same. Stopping here instead left the prediction a catch-up's worth of ticks
-		# of a running player short of the server, 2 m in game-arena's headless_lossy at
-		# 20% loss (2026-10-09), until the next correction pulled it back.
+		# [b]A hole is not a gap.[/b] A tick with no input, but older and newer ones in the buffer, is a
+		# tick the client never generated a command for -- its clock jumped forward over it (`DotNetClock`'s
+		# catch-up) -- and the server ran it on the player's previous command.
 		if input == null:
 			var previous := input_buffer.latest_before(replay_tick)
-			# A hole has inputs on BOTH sides. Past the newest input are ticks this client
-			# has not played yet (a lockstep host reconciles before it records the tick),
-			# and replaying those on the last command predicted them twice: game-arena's
-			# headless_net push check went 0.2 m -> 1.5 m off the server.
+			# A hole has inputs on BOTH sides. Past the newest input are ticks this client has not played yet
+			# (a lockstep host reconciles before it records the tick), and replaying those on the last command
+			# predicted them twice: game-arena's headless_net push check went 0.2 m -> 1.5 m off the server.
 			if previous != null and not input_buffer.since(replay_tick + 1).is_empty():
 				input = previous
 
@@ -277,17 +215,7 @@ func reconcile(
 			)
 			break
 
-		# Put the tick's own input back before simulating it. Without this the
-		# whole replay runs on whatever input the behaviour happens to be holding
-		# — the newest one — which is not what the server simulated for these
-		# ticks, so the replay converges on a state the server never computed and
-		# the "correction" is measured against a fiction.
-		#
-		# It is silent whenever the player holds one direction for the entire
-		# unacked window, which is most of a test and none of a game: it shows up
-		# exactly when the input changes, which is exactly when a correction is
-		# most visible. `DotNetManager._apply_input` does the same thing on the
-		# server tick, and the two must match or determinism does not.
+		# Put the tick's own input back before simulating it.
 		if input != null:
 			for behaviour in identity.behaviours:
 				if behaviour.has_method("_net_apply_input"):
@@ -328,12 +256,8 @@ func reconcile(
 		if error > config.reconcile_position_epsilon:
 			_corrections_applied += 1
 
-	# [b]Every move a reconciliation makes is eased, not only the ones it counts.[/b] The
-	# epsilon decides what is a misprediction worth reporting; it is not a size below
-	# which a jump is invisible. A replay starts from the server's QUANTISED state, so on
-	# a link that delivers everything the drawn player still moved a few millimetres on
-	# every snapshot -- 32 times a second at 128 ticks -- and only a correction over a
-	# centimetre was ever offered to a renderer to hide.
+	# [b]Every move a reconciliation makes is eased, not only the ones it counts.[/b] The epsilon decides
+	# what is a misprediction worth reporting; it is not a size below which a jump is invisible.
 	if error > 0.0:
 		_begin_correction(identity, before, after, error)
 
@@ -364,10 +288,9 @@ func _begin_correction(
 	var position_before: Vector3 = before.get("position", Vector3.ZERO)
 	var position_after: Vector3 = after.get("position", Vector3.ZERO)
 
-	# [b]Added to what is still being eased, not put in its place.[/b] A renderer draws
-	# the entity plus [method visual_offset]; replacing an offset that has not finished
-	# decaying moves the drawing by whatever was left of it, which is the very jump this
-	# exists to hide. At 32 snapshots a second the previous one has always not finished.
+	# [b]Added to what is still being eased, not put in its place.[/b] A renderer draws the entity plus
+	# [method visual_offset]; replacing an offset that has not finished decaying moves the drawing by
+	# whatever was left of it, which is the very jump this exists to hide.
 	var offset := visual_offset(identity.net_id) + (position_before - position_after)
 
 	if offset.length() > config.reconcile_snap_distance:
@@ -383,10 +306,8 @@ func _begin_correction(
 	}
 
 
-## The visual offset for an entity, decaying toward zero.
-##
-## A renderer adds this to the entity's position. Returns zero when there is nothing
-## outstanding, so it can be added unconditionally.
+## The visual offset for an entity, decaying toward zero. A renderer adds this to the entity's
+## position.
 func visual_offset(net_id: int) -> Vector3:
 	if not _corrections.has(net_id):
 		return Vector3.ZERO
@@ -424,8 +345,6 @@ static func _visual_error(before: Dictionary, after: Dictionary) -> float:
 	return a.distance_to(b)
 
 
-# --- Reporting -------------------------------------------------------------
-
 func clear() -> void:
 	_corrections.clear()
 	_was_predicting.clear()
@@ -443,11 +362,8 @@ func skipped() -> int:
 	return _skipped
 
 
-## Fraction of replays that needed a visible correction.
-##
-## The number that says whether prediction is working. Near zero means the client and
-## server agree; consistently high means the simulation is not deterministic, and no
-## amount of smoothing will fix that.
+## Fraction of replays that needed a visible correction. The number that says whether prediction is
+## working.
 func correction_rate() -> float:
 	if _replays == 0:
 		return 0.0

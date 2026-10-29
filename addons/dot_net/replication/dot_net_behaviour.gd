@@ -4,45 +4,11 @@ extends "dot_net_behaviour_state.gd"
 
 ## A component whose properties replicate. The class a game subclasses most.
 ##
-## Declare what replicates in [method _register_net_vars] and the rest follows:
-## dirty tracking, quantisation, audience filtering, rate limiting and change
-## callbacks all come from the declaration.
-##
-## [codeblock]
-## class_name PlayerMovement extends DotNetBehaviour
-##
-## var position: Vector3
-## var velocity: Vector3
-## var grounded: bool
-##
-## func _register_net_vars() -> void:
-##     replicate(&"position", DotNetVar.Type.VECTOR3_POSITION) \
-##         .interpolated().with_priority(5.0)
-##     replicate(&"velocity", DotNetVar.Type.VECTOR3_VELOCITY) \
-##         .with_epsilon(0.05)
-##     replicate(&"grounded", DotNetVar.Type.BOOL)
-##
-## func _net_simulate(tick: int, delta: float) -> void:
-##     # Runs only where this entity has authority.
-##     velocity.y -= 9.8 * delta
-##     position += velocity * delta
-## [/codeblock]
-##
-## [b]Properties are read off this object by name.[/b] They can be plain variables,
-## `@export`ed ones, or backed by getters — anything [method Object.get] resolves. A
-## behaviour that would rather compute a value than store it can override
-## [method _net_read_property].
+## Declare what replicates in [method _register_net_vars]; dirty tracking, quantisation, audience filtering, rate limiting and change callbacks follow. Properties are read by name ([method Object.get]); override [method _net_read_property] to compute one.
 
 ## property -> value, read once for the snapshot being written; empty outside one.
 ##
-## [b]Every peer's snapshot reads every property of every entity it carries[/b], twice
-## (once to decide whether it is dirty, once to write it), so a server of N players read
-## each property 2N times a snapshot through a dynamic `get`. Nothing changes the world
-## while a snapshot is being built, so the value is the same every time: the manager
-## opens this with [method begin_snapshot_reads] before its peer loop and closes it with
-## [method end_snapshot_reads] after, and inside it each property is read once.
-## Outside a snapshot it is closed and reads go straight to [method _net_read_property],
-## so a caller writing state at any other time sees the live value.
+## Each snapshot reads every property twice per peer (dirty check, write) through a dynamic `get`; the manager opens this with [method begin_snapshot_reads] and closes it with [method end_snapshot_reads], and outside it reads go straight to [method _net_read_property].
 var _snapshot_reads: Dictionary = {}
 var _snapshot_reads_open: bool = false
 
@@ -92,21 +58,13 @@ var _share_dirty: bool = false
 const _KEPT_READS := 17
 
 
-## The snapshot's clock, read once by the manager for every peer ([method begin_snapshot_reads]),
-## or -1 outside one: what [member DotNetVar.max_rate] is measured against. One reading per
-## snapshot rather than one per peer makes the answer the same however the peers are split
-## between threads.
+## The snapshot's clock, read once by the manager for every peer ([method begin_snapshot_reads]), or -1 outside one: what [member DotNetVar.max_rate] is measured against.
 var _snapshot_now_ms: int = -1
 
 
 ## Opens a snapshot's reads. [param now_ms] is the snapshot's clock (-1 reads it here).
 ##
-## [param for_workers] is for a snapshot built on worker threads ([member
-## DotNetConfig.snapshot_workers]): every property is read now, on this thread, rather than
-## when first asked for, and the bandwidth estimates are worked out, so that nothing a worker
-## asks of this behaviour writes to it. A property read is [method _net_read_property], which
-## a game overrides and which may read a node; a node read off the main thread is an error in
-## a debug build and a racing value in a release one.
+## [param for_workers] (see [member DotNetConfig.snapshot_workers]) reads every property now, on this thread, and works out the bandwidth estimates, so nothing a worker asks of this behaviour writes to it or reads a node off the main thread.
 func begin_snapshot_reads(now_ms: int = -1, for_workers: bool = false) -> void:
 	# A fresh dictionary rather than a cleared one: the last one is kept, by serial.
 	_read_serial += 1
@@ -159,8 +117,6 @@ func _net_write_property(property: StringName, value: Variant) -> void:
 	set(property, value)
 
 
-# --- Declaration -----------------------------------------------------------
-
 ## How many properties one behaviour may replicate: the count of changed ones and each one's
 ## index both travel in 6 bits ([method _encode]), and [DotNetWriter] masks silently, so a 64th
 ## would be sent as a count of 0 and the 65th as index 0. Private: the width is the wire's.
@@ -169,8 +125,7 @@ const _MAX_NET_VARS := 63
 
 ## Declares a replicated property. Returns the [DotNetVar] for chaining.
 ##
-## Past [constant _MAX_NET_VARS] the declaration is refused with an error and returned
-## unregistered (it chains, and replicates nothing), rather than aliasing another property.
+## Past [constant _MAX_NET_VARS] it is refused with an error and returned unregistered, rather than aliasing another property.
 func replicate(property: StringName, type: DotNetVar.Type) -> DotNetVar:
 	var declaration := DotNetVar.make(property, type)
 	declaration.bind_config(_config)
@@ -183,8 +138,7 @@ func replicate(property: StringName, type: DotNetVar.Type) -> DotNetVar:
 
 ## Declares a property with a custom codec.
 ##
-## Shorthand for [code]replicate(name, CUSTOM).codec(w, r)[/code], which is the path
-## for any type dot-net does not know about.
+## Shorthand for [code]replicate(name, CUSTOM).codec(w, r)[/code], the path for any type dot-net does not know.
 func replicate_custom(
 	property: StringName,
 	writer_fn: Callable,
@@ -229,31 +183,9 @@ func is_bound() -> bool:
 	return _registered
 
 
-# --- Sending ---------------------------------------------------------------
-
-## Properties that changed since the last send [i]to this peer[/i].
-##
-## [param peer_id] decides both which properties are visible and which record of
-## previously-sent values they are compared against — see [PeerView]. [param force]
-## ignores dirty tracking and rate limits, which is what a spawn or a late-joining
-## client needs.
-##
-## [b]The peer passed here must be the peer passed to [method write_state].[/b] They
-## read and write the same [PeerView] and nothing can detect a mismatch: collecting
-## for one peer and writing for another marks the wrong peer clean, so the right one
-## is told nothing and the wrong one is never told again.
-##
-## [param until_acked] keeps a property dirty until the peer has [i]confirmed[/i] its
-## current value, not merely been sent it. [DotNetManager] sets it for the entity a peer
-## owns and predicts, and only that one, because that peer reads a property's absence as
-## the server's word that it is unchanged and rewinds its prediction to the value it last
-## received — see [method authoritative_values]. With the ordinary rule a send that is
-## lost leaves that value stale until the peer's acknowledgement of a LATER snapshot
-## reaches the server, a round trip at best, and every snapshot in between rewinds the
-## player to where they were before the lost one: a rubber band on exactly the moment a
-## player stops, which is when a stale position is most visible. For a property that
-## changes every snapshot it costs nothing, since it is sent anyway; for one that changes
-## once it is a round trip's worth of re-sends of one entity, per peer.
+## Properties that changed since the last send [i]to this peer[/i]. [param peer_id] picks the visible
+## properties and the [PeerView] they are compared against; it must be the peer passed to [method
+## write_state], or the wrong peer is marked clean.
 func collect_dirty(
 	peer_id: int,
 	force: bool = false,
@@ -262,11 +194,7 @@ func collect_dirty(
 	return _collect_dirty(_view_for(peer_id), peer_id, force, until_acked)
 
 
-## [method sync_peer_acks], [method trim_pending] and [method collect_dirty] for one peer, in
-## that order, as one call: what [DotNetManager] asks of every behaviour of every entity for
-## every peer each snapshot, a thousand times a snapshot at 32 players, where three calls and
-## three lookups of the same [PeerView] were a measurable part of the cost. The three are
-## still the definitions; this is them, with the view looked up once.
+## [method sync_peer_acks], [method trim_pending] and [method collect_dirty] for one peer, in that order, with the [PeerView] looked up once. The three are still the definitions; this is the hot path.
 func collect_for_peer(
 	peer_id: int,
 	acked_tick: int,
@@ -294,15 +222,9 @@ func _collect_dirty(
 ) -> Array[DotNetVar]:
 	var owner := identity.owner_peer_id
 
-	# [b]A peer in step shares its answer with every other peer in step from the same
-	# snapshot.[/b] When this peer's record is exactly the reads of snapshot K (its
-	# `synced_serial`), what it is owed now is what changed between K and now -- the same
-	# for every such peer, so compared once and shared. Without it this loop compared every
-	# property of every entity once per peer: 32 players is a thousand entity-peer pairs a
-	# snapshot, and on a full server nearly every one is a non-owner one snapshot behind.
-	# The rule is the per-peer one below with nothing per peer left in it: no force, nothing
-	# owed (the predicted entity, a property once lost), and no epsilon or rate limit
-	# (`_share_dirty`), whose answers depend on more than the two values.
+	# A peer in step shares its answer with every other peer in step from the same snapshot:
+	# when this peer's record is exactly the reads of snapshot K (`synced_serial`), what it is
+	# owed is what changed since K, the same for all such peers. No force, nothing owed, no epsilon or rate limit (`_share_dirty`).
 	var shareable := _snapshot_reads_open and _share_dirty and not force
 	if shareable and not until_acked and view.synced_serial > 0 and view.relost.is_empty():
 		var key := view.synced_serial * 2 + (1 if peer_id == owner else 0)
@@ -324,11 +246,9 @@ func _collect_dirty(
 	var now := -1
 	var believed := view.believed
 
-	# [b]Written out rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per
-	# property[/b]: this loop runs for every property of every relevant entity for every peer,
-	# about thirteen thousand times a snapshot with thirty-two players, and a GDScript call
-	# costs more than the comparison it wraps. The three are still the definitions; this is
-	# them inlined, in the same order, and `netcode_demo`'s dirty-tracking sections hold it.
+	# Written out rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per
+	# property: this loop is the hot path and a GDScript call costs more than the comparison.
+	# The three are still the definitions; netcode_demo's dirty-tracking sections hold it.
 	for declaration in net_vars:
 		match declaration.audience:
 			DotNetVar.Audience.OWNER:
@@ -399,10 +319,7 @@ func _collect_dirty(
 	return out
 
 
-## What a peer whose record is exactly the reads of snapshot [param since] is owed now:
-## the visible properties whose value differs from that read, by [method collect_dirty]'s
-## own rule. [code]null[/code] when those reads are gone or lack one of the properties, for
-## the caller to take the per-peer path. The result is shared; nothing may modify it.
+## What a peer whose record is exactly the reads of snapshot [param since] is owed now, by [method collect_dirty]'s rule. [code]null[/code] when those reads are gone or lack a property (take the per-peer path). Shared; do not modify.
 func _dirty_since(since: int, peer_id: int) -> Variant:
 	var then: Dictionary = _reads_by_serial.get(since, {})
 	if then.is_empty() and not net_vars.is_empty():
@@ -453,17 +370,8 @@ func _is_unconfirmed(
 	return declaration.differs(view.acked[declaration.property], current)
 
 
-## Writes the given properties and records them as sent to [param peer_id].
-##
-## The record is updated here rather than at collection time, so a send that is
-## dropped by the budget does not mark the property clean — it stays dirty and goes
-## out next tick.
-##
-## [param tick] is the snapshot tick being written. Passing it is what makes loss
-## recovery possible: the properties become an unconfirmed entry in the peer's
-## [PeerView], to be promoted when the peer acknowledges that tick and discarded —
-## and therefore re-sent — when it never does. A tick of 0 means "do not track",
-## which is what a caller writing state outside a snapshot wants.
+## Writes the given properties and records them as sent to [param peer_id]. Recorded here, not at
+## collection, so a send dropped by the budget stays dirty.
 func write_state(
 	writer: DotNetWriter,
 	declarations: Array[DotNetVar],
@@ -475,22 +383,14 @@ func write_state(
 	if view == null:
 		view = _view_for(peer_id)
 
-	# [b]Encoded once per snapshot for each distinct set of properties, not once per peer.[/b]
-	# Inside a snapshot every property is read once (see [member _snapshot_reads]), so the
-	# same set of properties is the same bits for every peer it goes to -- and for a moving
-	# player that set is the same for every peer but its owner. Encoding it again per peer
-	# was the quadratic part of a full server's snapshots (game-g2gfast tools/load_probe,
-	# 32 players). The per-peer half -- what that peer is believed to hold, when it was last
-	# sent, what is unconfirmed -- is still per peer, below; the values recorded are one
-	# dictionary shared by every peer's pending entry, which nothing writes to after this.
+	# Encoded once per snapshot for each distinct set of properties, not once per peer: inside a snapshot
+	# every property is read once, so the same set is the same bits for every peer.
 	var pad := writer.bit_length() & 7
 	var encoded: Array
 	var aligned := false
 	if _snapshot_reads_open and is_same(declarations, _fast_declarations):
 		# The set the last peer was given, again: a shared dirty set arrives as one array for
-		# peer after peer, and one with nothing byte-aligned in it is the same encoding at
-		# any bit, so there is nothing to look up. Skips a call, an array and two dictionary
-		# lookups per entity per peer.
+		# peer after peer, and with nothing byte-aligned in it the encoding is bit-independent.
 		encoded = _fast_encoded
 	else:
 		var found := _encoded_for(declarations, pad)
@@ -500,12 +400,9 @@ func write_state(
 	if aligned:
 		writer.write_bit_run(encoded[0], pad, encoded[1])
 	elif pad != 0 and _snapshot_reads_open:
-		# [b]Shifted once per bit of a byte, not once per peer.[/b] Laying a run in at a
-		# bit other than 0 shifts every byte of it, a GDScript loop over the whole entity,
-		# and it was the largest single cost left in a 32-player snapshot (game-g2gfast
-		# tools/load_probe: 1.4 ms of a tick) -- for bits that are the same for every peer
-		# landing at the same bit. Entities start at every bit in turn, so this is at most
-		# eight shifts per set per snapshot, against one per peer. Then a byte copy.
+		# Shifted once per bit of a byte, not once per peer: laying a run in at a nonzero bit
+		# shifts every byte of it, the largest cost left in a 32-player snapshot. At most eight
+		# shifts per set per snapshot; then a byte copy.
 		writer.write_bit_run(_shifted(encoded, pad), pad, pad + int(encoded[1]))
 	else:
 		writer.write_shifted_run(encoded[0], encoded[1])
@@ -581,14 +478,9 @@ func _shifted(encoded: Array, pad: int) -> PackedByteArray:
 	return out
 
 
-## Bits [method write_state] would add for [param declarations] to a writer standing
-## [param pad] bits into a byte (its [code]bit_length() & 7[/code]).
+## Bits [method write_state] would add for [param declarations] to a writer standing [param pad] bits into a byte (its [code]bit_length() & 7[/code]).
 ##
-## Exact, not an estimate, and the encoding it measures is the one [method write_state] then
-## copies: inside a snapshot both read the same cache, so asking first costs a lookup. What
-## [DotNetManager] decides where a snapshot is cut into parts with
-## ([member DotNetConfig.mtu]); [method estimated_bits] is a full update's guess and can be
-## several times the real figure, or short of it for a string.
+## Exact, not an estimate: the encoding measured is the one [method write_state] then copies. What [DotNetManager] cuts parts by ([member DotNetConfig.mtu]); [method estimated_bits] can be several times the real figure.
 func state_bits(declarations: Array[DotNetVar], pad: int) -> int:
 	var found := _encoded_for(declarations, pad & 7)
 	var encoded: Array = found[0]
@@ -602,11 +494,9 @@ func state_bits(declarations: Array[DotNetVar], pad: int) -> int:
 ## that bit (copied with [method DotNetWriter.write_bit_run]) or at bit 0 (shifted into place).
 func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 	var encoded: Array = []
-	# [b]One shared copy, shifted into place -- unless something in it is byte-aligned.[/b] A
-	# string or bytes aligns before its bytes, so where its padding falls depends on the bit
-	# of a byte the encoding starts at; such a set is encoded at the bit it will be laid in
-	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
-	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
+	# One shared copy, shifted into place, unless something in it is byte-aligned: a string or
+	# bytes aligns before its bytes, so such a set is encoded at the bit it will be laid in at
+	# (one copy per bit, eight at most) and copied, never shifted.
 	var key := -1
 	if _snapshot_reads_open:
 		# A shared dirty set ([method collect_dirty]) arrives as the same array for peer
@@ -647,13 +537,9 @@ func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 	return [encoded, aligned]
 
 
-## The encoding of [param declarations], as [code][bytes, end bit, recorded, rate-limited
-## properties][/code], begun
-## [param pad] zero bits into its first byte.
+## The encoding of [param declarations], as [code][bytes, end bit, recorded, rate-limited properties][/code], begun [param pad] zero bits into its first byte.
 ##
-## An index per property rather than a full bitmask: with a handful of properties the
-## index is smaller, and it does not need the receiver to know the declaration order
-## beyond the shared registration.
+## An index per property rather than a bitmask: smaller with a handful of properties, and needs only the shared registration order.
 func _encode(declarations: Array[DotNetVar], pad: int = 0) -> Array:
 	var scratch := DotNetWriter.new(64)
 	var recorded := {}
@@ -700,24 +586,9 @@ func _signature(declarations: Array[DotNetVar]) -> int:
 	return key | (1 << 62)
 
 
-## Resolves this peer's unconfirmed sends against the tick it has acknowledged.
-##
-## Called by [DotNetManager] immediately before [method collect_dirty], rather than
-## being pushed to every behaviour the moment an acknowledgement arrives: an
-## acknowledgement is one packet and a world is thousands of behaviours, so pushing
-## costs a full sweep of the registry per peer per acknowledgement. Resolving lazily
-## does the same work only for the entities actually about to be sent, which is the
-## set the caller is already walking.
-##
-## [param acked_tick] is the newest snapshot the peer has confirmed applying in
-## full. An entry at that tick is promoted to confirmed. Entries [i]older[/i] than it
-## and still unconfirmed never arrived — the peer has since applied a later snapshot,
-## so an older one is not merely late, it is superseded — and are dropped, which puts
-## the properties they carried back in the dirty set.
-##
-## [param strict] is whether acknowledgements are known to be arriving at all. When
-## they are not, an entry that ages out is assumed delivered rather than assumed
-## lost; see [member PeerView.strict].
+## Resolves this peer's unconfirmed sends against the tick it has acknowledged. Called by
+## [DotNetManager] just before [method collect_dirty], not pushed to every behaviour on each ack (a
+## full registry sweep per ack).
 func sync_peer_acks(peer_id: int, acked_tick: int, strict: bool) -> void:
 	var view := _view_for(peer_id)
 
@@ -755,13 +626,9 @@ func _sync_view(view: PeerView, acked_tick: int) -> void:
 		if entry_tick == acked_tick or not view.strict:
 			view.acked.merge(entry["values"], true)
 		else:
-			# Sent before a snapshot the peer has already applied, and still
-			# unconfirmed. Dropped without promotion, so it goes out again -- and stays
-			# owed until confirmed (`relost`), because sent once more it can be lost
-			# once more, and on a link that holds back every other snapshot the next
-			# send is always the held one. Erased from `acked` too: the peer may have
-			# applied it with only the acknowledgement lost, so "equals the acked value"
-			# no longer means it holds that value (a flag flipped and flipped back).
+			# Sent before a snapshot the peer already applied, still unconfirmed: dropped without promotion so
+			# it goes out again, and stays owed (`relost`) since it can be lost again. Erased from `acked` too:
+			# only the ack may have been lost, so "equals the acked value" no longer proves the peer holds it.
 			dropped = true
 			for property: StringName in entry["values"]:
 				view.relost[property] = true
@@ -775,35 +642,24 @@ func _sync_view(view: PeerView, acked_tick: int) -> void:
 	else:
 		for i in resolved:
 			view.pending.pop_front()
-	# [b]Only a DROP changes what the peer is believed to hold.[/b] `believed` is `acked`
-	# with every pending entry laid over it in tick order, and the entries resolved here
-	# are the oldest ones; promoting them moves their values from the front of that
-	# overlay into `acked`, which is the same dictionary afterwards. Rebuilding anyway
-	# was a copy of every property per entity per peer per acknowledgement -- a third
-	# of a 32-player server's snapshot cost, measured (`game-g2gfast tools/load_probe`).
+	# Only a DROP changes what the peer is believed to hold: promoting the oldest entries moves
+	# their values from the front of the overlay into `acked`, which is the same dictionary
+	# afterwards. Rebuilding anyway was a third of a 32-player snapshot's cost.
 	if dropped:
 		_rebuild_believed(view)
 
 
 ## Drops unconfirmed sends older than [param oldest_tick].
 ##
-## The bound on how much unconfirmed state one peer can accumulate, so a client that
-## stops acknowledging costs a window rather than a lifetime. What happens to an
-## entry that ages out depends on whether acknowledgements are arriving at all: with
-## them it is a loss and the properties re-send; without them there is no evidence
-## either way and it is assumed delivered, which is what this addon did before
-## acknowledgements existed.
+## Bounds what one peer can accumulate when it stops acknowledging. With acks an aged-out entry is a loss and re-sends; without them it is assumed delivered.
 func trim_pending(peer_id: int, oldest_tick: int) -> void:
 	var view: PeerView = _views.get(peer_id)
 
 	if view == null or view.pending.is_empty():
 		return
 
-	# [b]The oldest entry first, and nearly always that is the whole answer.[/b] Pending is
-	# in tick order, so if its oldest entry is inside the window every entry is. Walking the
-	# list into a new one regardless was an allocation and a pass over every unconfirmed send
-	# per entity per peer per snapshot -- 3.3 ms of a 32-player server's tick, for a call
-	# that trims nothing on all but the rare snapshot a peer stops acknowledging.
+	# The oldest entry first, and nearly always that is the whole answer: pending is in tick
+	# order, so if the oldest is inside the window every entry is.
 	if int(view.pending[0]["tick"]) >= oldest_tick:
 		return
 
@@ -814,11 +670,8 @@ func trim_pending(peer_id: int, oldest_tick: int) -> void:
 ## [param oldest_tick].
 func _trim_view(view: PeerView, oldest_tick: int) -> void:
 
-	# The aged-out entries are a prefix (pending is in tick order), so they come off the
-	# front and nothing else is touched. Walking the whole list into a new one was a pass
-	# over every unconfirmed send and a fresh array per entity per peer per snapshot for a
-	# host whose acknowledgements are not arriving, where one entry ages out every
-	# snapshot: 2.9 ms of a 32-player tick (`game-g2gfast tools/load_probe`, no acks).
+	# The aged-out entries are a prefix (pending is in tick order): they come off the front and
+	# nothing else is touched.
 	var aged := 0
 	var count := view.pending.size()
 
@@ -849,10 +702,7 @@ func _trim_view(view: PeerView, oldest_tick: int) -> void:
 
 ## Forgets everything recorded for one peer.
 ##
-## Called when a peer disconnects. Without it every behaviour that ever replicated to
-## that peer keeps its [PeerView] for the lifetime of the entity, which on a server
-## churning through players is a leak proportional to everyone who has ever
-## connected rather than to everyone currently playing.
+## Called on disconnect; otherwise every behaviour keeps the [PeerView] for the entity's lifetime, a leak proportional to everyone who ever connected.
 func forget_peer(peer_id: int) -> void:
 	_views.erase(peer_id)
 	if _native_core != null:
@@ -871,10 +721,7 @@ func _view_for(peer_id: int) -> PeerView:
 
 ## Rebuilds what a peer is believed to have from what it has confirmed.
 ##
-## Confirmed state first, then every still-unconfirmed send in tick order, so a
-## property sent twice is believed at its newest value and a property whose only
-## send was dropped falls back to the confirmed one — or to absent, which reads as
-## dirty and re-sends it.
+## Confirmed state first, then every unconfirmed send in tick order: a property sent twice is believed at its newest value, and one whose only send was dropped falls back to confirmed, or to absent (dirty, re-sent).
 func _rebuild_believed(view: PeerView) -> void:
 	view.synced_serial = -1
 	view.believed = view.acked.duplicate()
@@ -901,16 +748,9 @@ func peer_view_state(peer_id: int) -> Dictionary:
 	}
 
 
-# --- Receiving -------------------------------------------------------------
-
-## Reads properties and applies them, firing change handlers.
-##
-## Every failure here is reachable from the network, so an out-of-range index is
-## treated as a corrupt or mismatched stream and stops the read — continuing would
-## decode the following bytes as the wrong type.
-##
-## [param rewind] is for a predicted entity, and it is what makes reconciliation see the
-## server's answer rather than the client's own. See [method authoritative_values].
+## Reads properties and applies them, firing change handlers. Reachable from the network: an out-of-
+## range index is a corrupt stream and stops the read, as continuing would decode the rest as the wrong
+## type.
 func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotResult:
 	var count := reader.read_uint(6)
 
@@ -956,12 +796,7 @@ func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotRes
 	return DotResult.success(count)
 
 
-## What [method read_state] does for an entity a snapshot listed as unchanged: exactly a read
-## of zero properties. The snapshot names the entity without a body (see
-## [code]docs/wire.md#unchanged-entities[/code]), and every consumer downstream -- the rewind,
-## `_net_state_applied`, the predictor, the interpolator -- has to see what it saw when the
-## same entity came with an empty body, or a game's per-snapshot bookkeeping (and the
-## relevance it infers from it) changes meaning with the wire.
+## What [method read_state] does for an entity a snapshot listed as unchanged: exactly a read of zero properties (see [code]docs/wire.md#unchanged-entities[/code]), so every consumer downstream sees what it saw for an empty body.
 func apply_unchanged(tick: int, rewind: bool = false) -> void:
 	_read_now.clear()
 	_finish_read(tick, rewind)
@@ -970,13 +805,7 @@ func apply_unchanged(tick: int, rewind: bool = false) -> void:
 func _finish_read(tick: int, rewind: bool) -> void:
 	if rewind:
 		# Everything the snapshot left out goes back to what the server last said, BEFORE
-		# `_net_state_applied` — because that hook is where every game in the family
-		# rewinds its simulation, by copying these properties into it. On the owning
-		# client these properties do not hold the server's state between snapshots: the
-		# behaviour's own `_net_simulate` copies each predicted tick into them. So a
-		# snapshot that carried the entity with nothing changed handed the game its own
-		# prediction as the server's answer, and the replay then re-ran the lead on top of
-		# it — a client the server was holding still walked away at twice its speed.
+		# `_net_state_applied`, where games rewind their simulation from these properties.
 		for property: StringName in authoritative_values():
 			if not _read_now.has(property):
 				_net_write_property(property, _baseline[property])
@@ -985,22 +814,8 @@ func _finish_read(tick: int, rewind: bool) -> void:
 	_net_state_applied(tick)
 
 
-## The server's whole state for this behaviour as of the snapshot just read, on a receiving
-## peer: what that snapshot carried, and for everything it did not, what the server last
-## sent.
-##
-## [b]Why "not sent" can be read as "unchanged".[/b] A property is left out of a snapshot
-## when it has not changed against what the peer is believed to have, and for the entity a
-## peer owns and predicts, the server also re-sends anything the peer has not yet
-## [i]confirmed[/i] — see [method collect_dirty]'s [param until_acked] — so a lost packet
-## cannot leave a stale value here that then reads as the server's word. The one exception
-## is a property with a [member DotNetVar.max_rate]: it is left out because its rate
-## limit was hit, not because it stood still, so its last received value is only a guess
-## and is left out of this answer rather than rewound to.
-##
-## [b]Not [method snapshot_values][/b], which reads the properties themselves — and on a
-## predicted entity those hold the client's own prediction, not anything the server said.
-## Treating that as authoritative is the bug this exists to fix.
+## The server's whole state for this behaviour as of the snapshot just read, on a receiving peer: what
+## it carried, and for everything else what the server last sent.
 func authoritative_values() -> Dictionary:
 	var out := {}
 
@@ -1019,14 +834,9 @@ func authoritative_values() -> Dictionary:
 	return out
 
 
-## Every property's value as the server last sent it, on a receiving peer, whether or not
-## the snapshot just read carried it. Unlike [method authoritative_values] it keeps a
-## rate-limited property's last value: for drawing, the last thing the server said is the
-## best answer there is, where for a rewind it is only a guess.
+## Every property's value as the server last sent it, on a receiving peer, whether or not the snapshot just read carried it. Unlike [method authoritative_values] it keeps a rate-limited property's last value: for drawing, the best answer there is.
 ##
-## What the manager hands the interpolator for a remote entity. The properties themselves
-## are the wrong source there for the same reason they are on a predicted entity: between
-## snapshots they hold whatever the client last wrote into them — the interpolator's blend.
+## What the manager hands the interpolator for a remote entity; the properties themselves hold the interpolator's blend.
 func received_values() -> Dictionary:
 	var out := {}
 
@@ -1037,24 +847,9 @@ func received_values() -> Dictionary:
 	return out
 
 
-## Where a remote entity is at [param tick], from what the server last said: the last
-## received [param property] carried along the last received [param velocity_property] (per
-## second) for the ticks since that snapshot, at most
-## [member DotNetConfig.remote_extrapolation_sec]. With that at 0, the default, it is the last
-## received value unchanged. Null if [param property] was never received.
-##
-## [b]For a client predicting against something it does not predict[/b]: its own player
-## bumping a remote player or a bot, at an input tick ahead of everything it has heard. The
-## last heard position is a round trip and a snapshot interval old there, more under loss,
-## and a bump against it is off by the remote's speed times that age
-## (docs/prediction.md#bumping-a-remote). A game's collision asks this for the tick it is
-## simulating, replays included, so a replay agrees with itself.
-##
-## The replicated velocity, not a line through the last two positions as
-## [DotNetInterpolator] draws: that line lags a turn by a snapshot interval and reads a
-## lost snapshot as a slower entity. Velocity is required; without one the value is not
-## moved. Never past the cap, which is held rather than dropped back to the last heard value:
-## falling back would undo the whole extrapolation the moment loss made it matter.
+## Where a remote entity is at [param tick], from what the server last said: the last received [param
+## property] carried along the last received [param velocity_property] (per second) for the ticks
+## since, at most [member DotNetConfig.remote_extrapolation_sec].
 func extrapolated_value(property: StringName, velocity_property: StringName, tick: int) -> Variant:
 	if not _baseline.has(property):
 		return null
@@ -1078,11 +873,7 @@ func extrapolated_value(property: StringName, velocity_property: StringName, tic
 
 ## Forgets what a peer is known to have, so the next collection sends everything.
 ##
-## Used when a client's connection is re-established: it has no prior state, so a
-## delta against a record of what it used to have would be meaningless.
-##
-## With no argument it forgets every peer and the receive-side record too, which is
-## what this method meant before the send side became per-peer.
+## For a re-established connection: a delta against its old record would be meaningless. With no argument it forgets every peer and the receive-side record too.
 func reset_baseline(peer_id: int = -1) -> void:
 	if _native_core != null:
 		_native_core.forget_view(self, peer_id)
@@ -1158,21 +949,9 @@ func describe() -> Dictionary:
 	}
 
 
-# --- Building on a worker thread -------------------------------------------
-#
-# What [DotNetManager] calls when [member DotNetConfig.snapshot_workers] builds snapshots on
-# worker threads: [method collect_for_peer], [method write_state] and [method state_bits]
-# again, with the per-snapshot memo in a task's own [EncodeCache] instead of this behaviour's
-# members, which two threads would fill at once. [b]Copies, on purpose.[/b] The inline path
-# reading those members through an [EncodeCache] instead, and calling through one more
-# function per behaviour per peer, cost every game about 14% of its snapshot time (g2gfast's
-# load probe at 32 and 64 players) whether or not it ever asked for a worker. A change to one
-# is a change to both; netcode_demo's [snapshot threads] section compares every payload and
-# PeerView the two build, byte for byte.
-#
-# A worker writes the live [PeerView] of its own peers and nothing else: views are made on the
-# manager's thread first ([method view_for]), the reads were taken when the snapshot opened
-# ([code]begin_snapshot_reads(now, true)[/code]), and each peer belongs to one task.
+# Worker-thread variants of [method collect_for_peer], [method write_state] and [method state_bits], used when [member DotNetConfig.snapshot_workers] is set. Copies on purpose: routing the inline path through an [EncodeCache] cost every game about 14%.
+# A change to one is a change to both; netcode_demo's [snapshot threads] section compares them byte for byte.
+# A worker writes only the live [PeerView] of its own peers (made on the manager's thread first).
 
 
 ## [method collect_for_peer] against [param view] (from [method view_for], made before the
@@ -1205,10 +984,7 @@ func view_for(peer_id: int) -> PeerView:
 	return view
 
 
-## The live view's [method PeerView.snapshot], or an empty dictionary. For tests. A fresh
-## view reads as none: the pooled path makes every view before the fork (a worker may not add
-## to [member _views]), the inline path only those it collects into, and nothing tells the
-## two apart but this.
+## The live view's [method PeerView.snapshot], or an empty dictionary. For tests. A fresh view reads as none.
 func peer_view_snapshot(peer_id: int) -> Dictionary:
 	if _native_core != null:
 		return _native_core.view_snapshot(self, peer_id)
@@ -1226,15 +1002,8 @@ func _collect_dirty_cached(
 ) -> Array[DotNetVar]:
 	var owner := identity.owner_peer_id
 
-	# [b]A peer in step shares its answer with every other peer in step from the same
-	# snapshot.[/b] When this peer's record is exactly the reads of snapshot K (its
-	# `synced_serial`), what it is owed now is what changed between K and now -- the same
-	# for every such peer, so compared once and shared. Without it this loop compared every
-	# property of every entity once per peer: 32 players is a thousand entity-peer pairs a
-	# snapshot, and on a full server nearly every one is a non-owner one snapshot behind.
-	# The rule is the per-peer one below with nothing per peer left in it: no force, nothing
-	# owed (the predicted entity, a property once lost), and no epsilon or rate limit
-	# (`_share_dirty`), whose answers depend on more than the two values.
+	# A peer in step shares its answer with every other peer in step from the same snapshot:
+	# see the inline copy of this in [method collect_for_peer].
 	var shareable := _snapshot_reads_open and _share_dirty and not force
 	if shareable and not until_acked and view.synced_serial > 0 and view.relost.is_empty():
 		var key := view.synced_serial * 2 + (1 if peer_id == owner else 0)
@@ -1256,11 +1025,8 @@ func _collect_dirty_cached(
 	var now := -1
 	var believed := view.believed
 
-	# [b]Written out rather than calling `visible_to`, `_read_for_send` and `_is_dirty` per
-	# property[/b]: this loop runs for every property of every relevant entity for every peer,
-	# about thirteen thousand times a snapshot with thirty-two players, and a GDScript call
-	# costs more than the comparison it wraps. The three are still the definitions; this is
-	# them inlined, in the same order, and `netcode_demo`'s dirty-tracking sections hold it.
+	# Written out rather than calling the per-property helpers: the hot path. Same as the
+	# inline copy; netcode_demo's dirty-tracking sections hold both.
 	for declaration in net_vars:
 		match declaration.audience:
 			DotNetVar.Audience.OWNER:
@@ -1339,22 +1105,14 @@ func write_for_view(
 	tick: int,
 	cache: EncodeCache
 ) -> void:
-	# [b]Encoded once per snapshot for each distinct set of properties, not once per peer.[/b]
-	# Inside a snapshot every property is read once (see [member _snapshot_reads]), so the
-	# same set of properties is the same bits for every peer it goes to -- and for a moving
-	# player that set is the same for every peer but its owner. Encoding it again per peer
-	# was the quadratic part of a full server's snapshots (game-g2gfast tools/load_probe,
-	# 32 players). The per-peer half -- what that peer is believed to hold, when it was last
-	# sent, what is unconfirmed -- is still per peer, below; the values recorded are one
-	# dictionary shared by every peer's pending entry, which nothing writes to after this.
+	# Encoded once per snapshot for each distinct set of properties, not once per peer; see the
+	# inline copy in [method write_state].
 	var pad := writer.bit_length() & 7
 	var encoded: Array
 	var aligned := false
 	if _snapshot_reads_open and is_same(declarations, cache.fast_declarations):
-		# The set the last peer was given, again: a shared dirty set arrives as one array for
-		# peer after peer, and one with nothing byte-aligned in it is the same encoding at
-		# any bit, so there is nothing to look up. Skips a call, an array and two dictionary
-		# lookups per entity per peer.
+		# The set the last peer was given, again: nothing byte-aligned means the encoding is
+		# bit-independent.
 		encoded = cache.fast_encoded
 	else:
 		var found := _encoded_for_cached(declarations, pad, cache)
@@ -1364,12 +1122,7 @@ func write_for_view(
 	if aligned:
 		writer.write_bit_run(encoded[0], pad, encoded[1])
 	elif pad != 0 and _snapshot_reads_open:
-		# [b]Shifted once per bit of a byte, not once per peer.[/b] Laying a run in at a
-		# bit other than 0 shifts every byte of it, a GDScript loop over the whole entity,
-		# and it was the largest single cost left in a 32-player snapshot (game-g2gfast
-		# tools/load_probe: 1.4 ms of a tick) -- for bits that are the same for every peer
-		# landing at the same bit. Entities start at every bit in turn, so this is at most
-		# eight shifts per set per snapshot, against one per peer. Then a byte copy.
+		# Shifted once per bit of a byte, not once per peer: at most eight shifts per set.
 		writer.write_bit_run(_shifted(encoded, pad), pad, pad + int(encoded[1]))
 	else:
 		writer.write_shifted_run(encoded[0], encoded[1])
@@ -1416,11 +1169,8 @@ func state_bits_cached(declarations: Array[DotNetVar], pad: int, cache: EncodeCa
 
 func _encoded_for_cached(declarations: Array[DotNetVar], pad: int, cache: EncodeCache) -> Array:
 	var encoded: Array = []
-	# [b]One shared copy, shifted into place -- unless something in it is byte-aligned.[/b] A
-	# string or bytes aligns before its bytes, so where its padding falls depends on the bit
-	# of a byte the encoding starts at; such a set is encoded at the bit it will be laid in
-	# at (one copy per bit, eight at most) and copied, never shifted. Encoding everything per
-	# bit instead cost a fifth of the saving, because entities start at every bit in turn.
+	# One shared copy, shifted into place, unless something in it is byte-aligned; see the
+	# inline copy in [method state_bits].
 	var key := -1
 	if _snapshot_reads_open:
 		# A shared dirty set ([method collect_dirty]) arrives as the same array for peer

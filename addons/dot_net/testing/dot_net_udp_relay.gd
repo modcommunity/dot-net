@@ -1,47 +1,7 @@
 extends RefCounted
 
-## A lossy UDP relay: real datagrams, between a real client and a real server, dropped,
-## delayed, reordered and duplicated on a seed.
-##
-## [codeblock]
-## const Relay := preload("res://addons/dot_net/testing/dot_net_udp_relay.gd")
-##
-## var relay := Relay.new()
-## relay.seed = 7
-## relay.up.loss = 0.2                         # client -> server
-## relay.down.loss = 0.2                       # server -> client
-## relay.down.delay_ms = 55.0                  # every datagram waits 30..80 ms
-## relay.down.jitter_ms = 25.0
-## var bound := relay.start(0, "127.0.0.1", server_udp_port)
-## # the client connects to 127.0.0.1:<relay.port()> instead of the server
-## ...
-## relay.stop()
-## [/codeblock]
-##
-## [b]Why this exists.[/b] Over WebSocket "unreliable" is TCP, so until servers listened on
-## ENet as well nothing in the family had ever seen a datagram go missing, arrive twice or
-## arrive behind a newer one. The obvious tool is the kernel's queueing discipline on the
-## loopback interface, and it needs root, which a developer's machine may not give and a CI
-## runner never does. ENet's own simulated loss is a compile-time switch in the engine. A
-## relay in the same process needs nothing: the client is pointed at the relay's port, and
-## everything ENet does about loss -- retransmitting a reliable packet, timing a peer out,
-## passing an unreliable one up out of order -- happens for real, because the datagrams
-## really were lost.
-##
-## [b]A thread, not a frame.[/b] A relay polled from [method Node._process] would deliver on
-## the game's frame boundaries, so a hitch in the game being measured would also be a burst
-## in the network measuring it, and a delay could never be finer than a frame. The thread
-## owns every socket here and nothing else touches them; [method poll] is public for a
-## harness that wants to step it by hand instead ([member threaded] false).
-##
-## [b]What a seed fixes, and what it cannot.[/b] Each direction draws from its own generator,
-## in arrival order, so the same datagrams arriving in the same order meet the same fate.
-## Wall-clock delivery times are not reproducible -- the endpoints' own timing is not -- so a
-## check written against this asserts bounds and rates, never one exact sequence.
-##
-## [b]Not a class_name, on purpose.[/b] It is a test tool shipped inside the addon so that a
-## game which links dot_net can reach it by path, and a global name for it would be one more
-## identifier reserved in every consuming project for something no game ships.
+## A lossy UDP relay: real datagrams, between a real client and a real server, dropped, delayed,
+## reordered and duplicated on a seed.
 
 const CHANNEL := "net.relay"
 

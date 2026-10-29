@@ -3,35 +3,13 @@ extends RefCounted
 
 ## Renders remote entities smoothly from snapshots that arrive unevenly.
 ##
-## [b]The problem.[/b] Snapshots arrive 20 times a second, at uneven intervals,
-## sometimes out of order, sometimes not at all. Frames render 60–240 times a second.
-## Applying each snapshot as it lands produces motion that steps and stutters, and
-## every dropped packet is a visible freeze.
-##
-## [b]The fix, and its cost.[/b] Render slightly in the past — far enough that the
-## snapshots bracketing the render time have already arrived — and interpolate
-## between them. Motion becomes exactly as smooth as the frame rate. The cost is
-## latency: everything remote is displayed as it was one buffer-length ago, which is
-## why lag compensation exists on the server side to rewind by the same amount.
-##
-## [codeblock]
-##   snapshots:  ●--------●--------●--------●   arriving
-##                             ↑
-##                        render here            one interval + jitter behind
-## [/codeblock]
-##
-## [b]Adaptive buffering.[/b] A fixed delay is either too small on a jittery
-## connection (stalls) or needlessly large on a clean one (latency). The buffer grows
-## when snapshots arrive late and shrinks slowly when they do not, so a player on a
-## good connection sees less delay than one on a bad connection — which is the right
-## way round.
+## Renders slightly in the past, far enough that the snapshots bracketing the render time have arrived, and interpolates between them. The buffer grows quickly when snapshots arrive late and shrinks slowly, so a good link sees less delay. Lag compensation rewinds by the same amount.
 
 const CHANNEL := "net.interp"
 
 ## Samples kept per entity.
 ##
-## Enough to cover the buffer plus a burst of out-of-order arrivals. Beyond that,
-## older samples can never be rendered.
+## Enough to cover the buffer plus a burst of out-of-order arrivals.
 const TRACK_CAPACITY := 32
 
 ## One entity's recent states, ordered by tick.
@@ -98,18 +76,7 @@ var _timeline := PackedInt32Array()
 
 ## Current delay in SNAPSHOTS, adapted from observed arrival spacing.
 ##
-## [b]Snapshots, and converted to ticks in exactly one place.[/b] This field was called
-## `_delay_ticks` and was documented, adapted and reported as a number of snapshots — the
-## config says "snapshots of delay", [method _adapt] computes it in snapshot intervals and
-## [method delay_ms] multiplied it by one — and was then subtracted, unconverted, from a
-## TICK number in [method sample]. At the default 60/20 that is a third of the buffer
-## anybody asked for; at 128 ticks and 20 snapshots it is under a sixth, less than one
-## snapshot interval, so the render time sat past the newest snapshot most of the time and
-## every remote entity in the family was extrapolated rather than interpolated — 1,684
-## extrapolated frames in six seconds of one game. Nothing failed: extrapolation is
-## bounded, the positions were plausible, and the checks that sampled at hand-picked ticks
-## were written in the same confused unit. [method delay_ticks] is the conversion, and the
-## only thing [method sample] subtracts.
+## Snapshots, converted to ticks in one place only: [method delay_ticks] is the only thing [method sample] subtracts.
 var _delay_snapshots: float = 2.0
 
 ## Rolling estimate of the gap between arrivals, in milliseconds.
@@ -117,27 +84,16 @@ var _arrival_interval_ms: float = 0.0
 var _arrival_jitter_ms: float = 0.0
 var _last_arrival_ms: int = 0
 
-## Counters a suite and an operator read, not only [method describe]. [member _samples] is
-## every call to [method sample] that had two or more samples to choose between — the
-## denominator, without which a count of extrapolations means nothing. [member _stalls] is
-## the render time at or past the newest snapshot (extrapolating or holding), and
-## [member _extrapolations] the subset that guessed past it. On a healthy connection both
-## are near zero; a steady share of frames in either is a buffer too short for the link —
-## or, as it was here, a buffer in the wrong unit.
+## Counters a suite and an operator read. [member _samples] is every [method sample] call with two or more samples (the denominator), [member _stalls] the render time at or past the newest snapshot, [member _extrapolations] the subset that guessed past it.
+##
+## A steady share of either means a buffer too short for the link.
 var _samples: int = 0
 var _stalls: int = 0
 var _extrapolations: int = 0
 
-## Where the buffer is heading, in snapshots; [member _delay_snapshots] is the buffer
-## drawn with, and follows this at a bounded rate once frames drive it.
+## Where the buffer is heading, in snapshots; [member _delay_snapshots] is what is drawn with.
 ##
-## [b]Two numbers, because growing the buffer at once moves every remote player
-## backwards.[/b] The render time is the receive timeline minus the buffer, so a buffer
-## that jumps from 1.3 snapshots to 2.2 puts the render time back 3.6 ticks in one frame:
-## measured in game-g2gfast's `headless_feel` at 128 ticks, the render timeline stepped
-## back 11 times in eight seconds by up to 3.45 ticks when a 30..80 ms link replaced a
-## steady one -- a runner drawn a third of a metre back and then forward. Followed at
-## [constant GROW_RATE], the render time only ever slows down.
+## Two numbers because growing at once moves every remote player backwards; followed at [constant GROW_RATE] the render time only ever slows down.
 var _target_snapshots: float = 2.0
 
 ## How fast the drawn buffer may follow its target, in ticks of buffer per tick of time.
@@ -149,15 +105,9 @@ const GROW_RATE := 0.2
 ## a host drives frames, which leaves the easing off.
 var _frame_elapsed: float = 0.0
 
-## How long a jump out of an extrapolation takes to ease away, in seconds (the time constant
-## of an exponential: 63% gone after this, 95% after three times it).
+## How long a jump out of an extrapolation takes to ease away, in seconds (an exponential time constant).
 ##
-## [b]Without it a resumed stream was a snap.[/b] Extrapolating past the newest snapshot
-## guesses along a straight line; when the next one lands the drawing jumps to where it says,
-## and the guess was off by however far the entity turned. Measured in game-arena's
-## `headless_feel` over 5% loss, 30..80 ms: 33 of 864 frames drew a runner more than 2 cm off
-## its motion, the worst 17 cm in one frame; eased, the same distance is covered over a tenth
-## of a second, a few millimetres a frame.
+## Without it a resumed stream snaps to wherever the next snapshot says.
 const RESUME_EASE_SEC := 0.06
 
 ## A jump larger than this, in metres, is a teleport and is drawn at once.
@@ -183,8 +133,6 @@ func _init(p_config: DotNetConfig) -> void:
 	_target_snapshots = _delay_snapshots
 
 
-# --- Receiving -------------------------------------------------------------
-
 ## Records a snapshot's values for an entity.
 func push(net_id: int, tick: int, values: Dictionary) -> void:
 	if not _tracks.has(net_id):
@@ -200,8 +148,7 @@ func push(net_id: int, tick: int, values: Dictionary) -> void:
 
 ## Notes that a snapshot arrived, for the adaptive buffer.
 ##
-## Called once per snapshot, not once per entity — the thing being measured is how
-## regularly packets land, not how many entities they carried.
+## Once per snapshot, not per entity: what is measured is how regularly packets land.
 func note_arrival() -> void:
 	var now := Time.get_ticks_msec()
 
@@ -224,18 +171,9 @@ func note_arrival() -> void:
 		_adapt()
 
 
-## Notes how late the snapshot for [param tick] arrived: [param received_tick] is the
-## clock's receive timeline once it has seen it ([method DotNetClock.received_tick]),
-## which the quickest arrivals set, so this is the time the packet spent over the
-## quickest, in ticks.
+## Notes how late the snapshot for [param tick] arrived: [param received_tick] is the clock's receive timeline once it has seen it ([method DotNetClock.received_tick]), so this is the time the packet spent over the quickest, in ticks.
 ##
-## [b]What the buffer actually has to cover.[/b] A render time R is drawn between two
-## snapshots only if the one after R has arrived, and that one is up to a snapshot
-## interval past R and arrives as late as its packet was. So the buffer needs the
-## interval, plus how late packets are, plus one more interval when one goes missing --
-## and sizing it from the spread of arrival gaps alone, as it was, measured about two
-## thirds of the way there: 37% of frames extrapolated through 30..80 ms with 5% loss at
-## 128 ticks (game-g2gfast `headless_feel`), and 12% at 64 (game-arena `headless_lossy`).
+## The buffer must cover the interval, plus how late packets are, plus one more interval when one goes missing; sizing from arrival gaps alone fell about a third short.
 func note_lateness(tick: int, received_tick: int) -> void:
 	_late_fed = true
 	var period := _snapshot_ticks()
@@ -275,9 +213,7 @@ func advance(elapsed_sec: float) -> void:
 
 ## Grows the buffer quickly and shrinks it slowly.
 ##
-## Asymmetric on purpose. Growing late means a visible stall; shrinking late means
-## slightly more latency than necessary. The first is much worse, so the buffer is
-## quick to add and reluctant to give back.
+## Asymmetric on purpose: growing late is a visible stall, shrinking late is slightly more latency.
 func _adapt() -> void:
 	# Lateness alone is enough to size it; the gap estimate needs two arrivals.
 	if _arrival_interval_ms <= 0.0 and _lateness.is_empty():
@@ -288,13 +224,9 @@ func _adapt() -> void:
 	# Cover the nominal interval plus two jitter deviations, expressed in snapshots.
 	var needed := 1.0 + (_arrival_jitter_ms * 2.0) / maxf(1.0, interval_ms)
 
-	# And, where the host reports it, what lateness says: one interval to the snapshot
-	# after the render time, how late recent ones came, and one more interval if any recent
-	# snapshot went missing. See [method note_lateness]. Not a tick more for the frame's
-	# fraction, which would be exact and cost every clean link a tick of delay to cover
-	# what the bounded extrapolation already draws within millimetres: measured at 64
-	# ticks, a steady link's buffer was 4.1 ticks with it and 3.0 without, against 2.5
-	# before any of this, with nothing extrapolated in any of them.
+	# And, where the host reports it, what lateness says (see [method note_lateness]): one
+	# interval to the next snapshot, how late recent ones came, one more if any went missing.
+	# Not a tick more for the frame's fraction: that costs every clean link a tick of delay.
 	if not _lateness.is_empty():
 		var period := maxf(1.0, _snapshot_ticks())
 		var ticks := period + _late_ticks()
@@ -314,16 +246,9 @@ func _adapt() -> void:
 	if not _frame_driven:
 		_delay_snapshots = _target_snapshots
 
-	# [b]Reported on whole snapshots crossed, not on every adjustment.[/b] This runs on
-	# every arrival and the shrink is a 1% lerp, so a line per change is a line twenty
-	# times a second that never says anything. A whole snapshot of buffer is the unit
-	# that matters: it is what the player pays in latency, and it is what lag
-	# compensation on the server has to rewind by.
-	#
-	# DEBUG, and a state transition rather than a fault -- the buffer growing is this
-	# class absorbing a connection's jitter, which is its whole job. It is also the
-	# answer to "everything remote feels delayed", which nothing else in the process
-	# reports.
+	# Reported on whole snapshots crossed, not on every adjustment: this runs on every arrival
+	# and a line per 1% lerp says nothing. A whole snapshot is what the player pays in latency.
+	# DEBUG: a state transition, and the answer to "everything remote feels delayed".
 	if floori(_delay_snapshots) != floori(before):
 		DotLog.debug(CHANNEL, "the interpolation buffer moved", {
 			"from": "%.2f snapshots" % before,
@@ -333,17 +258,9 @@ func _adapt() -> void:
 		})
 
 
-# --- Sampling --------------------------------------------------------------
-
 ## Interpolated values for an entity at the current render time.
 ##
-## Returns an empty dictionary when there is nothing to show yet — a newly-spawned
-## entity with one sample cannot be interpolated, and showing it at a guessed
-## position is worse than showing it at its only known one.
-## [param server_tick] is deliberately a float. A renderer runs between ticks and the
-## whole point of this class is to answer for the moment it is drawing, not for the
-## last whole tick that happened to have passed — see
-## [method DotNetManager.interpolate_frame], which is where the fraction comes from.
+## Empty when there is nothing to show yet (one sample cannot be interpolated). [param server_tick] is a float on purpose: a renderer runs between ticks (see [method DotNetManager.interpolate_frame]).
 func sample(net_id: int, server_tick: float) -> Dictionary:
 	if not _tracks.has(net_id):
 		return {}
@@ -482,10 +399,7 @@ static func _jumps_after(samples: Array, from: int, property: StringName, cut: f
 
 ## Continues past the newest sample, briefly.
 ##
-## Bounded by [member DotNetConfig.max_extrapolation_sec]. Past that the entity holds
-## position: a wrong guess that keeps moving ends up far from the truth and snaps
-## back hard when the stream resumes, which reads as teleporting. A stationary stale
-## entity reads as lag, which is what it is.
+## Bounded by [member DotNetConfig.max_extrapolation_sec]; past that the entity holds position, since a wrong guess that keeps moving snaps back hard when the stream resumes.
 func _extrapolate(track: Track, render_tick: float) -> Dictionary:
 	var newest: Dictionary = track.samples[track.samples.size() - 1]
 	var values: Dictionary = newest["values"]
@@ -504,10 +418,7 @@ func _extrapolate(track: Track, render_tick: float) -> Dictionary:
 	return _continue(newest, track.samples[track.samples.size() - 2], render_tick)
 
 
-## The straight line through [param previous] and [param newest], at [param render_tick]:
-## positions only, and none past `max_extrapolation_sec` (held at the newest). What
-## [method _extrapolate] draws, counted nowhere, so [method _ease_resume] can ask what an
-## extrapolation from two samples would have drawn now.
+## The straight line through [param previous] and [param newest], at [param render_tick]: positions only, none past `max_extrapolation_sec`. What [method _extrapolate] draws, uncounted, so [method _ease_resume] can ask what an extrapolation would have drawn now.
 func _continue(newest: Dictionary, previous: Dictionary, render_tick: float) -> Dictionary:
 	var values: Dictionary = newest["values"]
 	var ahead_ticks := render_tick - float(newest["tick"])
@@ -544,9 +455,7 @@ func _continue(newest: Dictionary, previous: Dictionary, render_tick: float) -> 
 
 ## Blends two value sets.
 ##
-## Only continuous types are interpolated. A bool, a string or an enum jumps at the
-## midpoint rather than being blended — interpolating a weapon index would produce
-## weapons that do not exist.
+## Only continuous types are blended; a bool, string or enum jumps at the midpoint (a blended weapon index is no weapon).
 func _blend(older: Dictionary, newer: Dictionary, alpha: float) -> Dictionary:
 	var out := {}
 
@@ -597,9 +506,7 @@ static func _blend_value(from_value: Variant, to_value: Variant, alpha: float) -
 
 ## Applies interpolated values to an entity's behaviours.
 ##
-## Only properties declared [member DotNetVar.interpolate] are written here; the rest
-## were applied directly when the snapshot arrived. Splitting them is what lets a
-## health bar slide while a weapon index snaps.
+## Only properties declared [member DotNetVar.interpolate] are written here; the rest were applied when the snapshot arrived.
 func apply(identity: DotNetIdentity, server_tick: float) -> void:
 	if identity == null or identity.is_predicted():
 		# A predicted entity is driven by prediction, not by interpolation. Writing
@@ -624,25 +531,16 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 			)
 			wrote = true
 
-		# Told, not left in the property. A game copies replicated state into a node or a
-		# simulation from a hook; if the only hook it has is the one a snapshot fires,
-		# every remote entity moves at the snapshot rate and everything computed here is
-		# thrown away — which looks exactly like an interpolator that does not work.
-		# Truncated for the hook, which is a tick number a game may index with; the
-		# fraction did its work above, inside the blend.
+		# Told, not left in the property: a game that copies replicated state from a hook needs
+		# this call, or every remote entity moves at the snapshot rate. Truncated for the hook,
+		# which is a tick number a game may index with.
 		if wrote:
 			behaviour._net_interpolated(int(server_tick))
 
 
-## Draws [param values] with what is left of any jump out of an extrapolation added, and
-## notes what this frame extrapolated from. Positions (Vector3, Vector2) only.
+## Draws [param values] with what is left of any jump out of an extrapolation added, and notes what this frame extrapolated from. Positions (Vector3, Vector2) only.
 ##
-## [b]The jump is measured exactly[/b]: what the extrapolation the last frame drew would draw
-## now, less what is drawn now. Between two samples the drawing is continuous on its own
-## (a straight line through each pair, meeting at every sample), and into an extrapolation
-## it is too (the line goes on); only leaving one, or the newest sample changing under it,
-## jumps. Off until a host drives frames ([method advance]), and for a jump the size of a
-## teleport.
+## The jump is measured exactly: what last frame's extrapolation would draw now, less what is drawn now. Off until a host drives frames ([method advance]), and for a jump the size of a teleport.
 func _ease_resume(track: Track, values: Dictionary, render_tick: float) -> Dictionary:
 	if track == null or _frame_elapsed <= 0.0:
 		return values
@@ -683,8 +581,6 @@ func _ease_resume(track: Track, values: Dictionary, render_tick: float) -> Dicti
 	return out
 
 
-# --- Housekeeping ----------------------------------------------------------
-
 func forget(net_id: int) -> void:
 	_tracks.erase(net_id)
 
@@ -714,10 +610,7 @@ func delay_snapshots() -> float:
 	return _delay_snapshots
 
 
-## The buffer in TICKS: how far behind its [code]server_tick[/code] [method sample] renders,
-## and the number [method DotNetHistory.client_view_tick] wants as its
-## [code]interpolation_delay_ticks[/code]. Until the unit was fixed this returned the
-## snapshot count under this name, and [method sample] subtracted it as though it were this.
+## The buffer in TICKS: how far behind its [code]server_tick[/code] [method sample] renders, and the number [method DotNetHistory.client_view_tick] wants as its [code]interpolation_delay_ticks[/code].
 func delay_ticks() -> float:
 	return _delay_snapshots * _snapshot_ticks()
 
@@ -728,10 +621,7 @@ func delay_ms() -> float:
 
 ## Ticks between two snapshots, as the server actually sends them.
 ##
-## [method DotNetConfig.ticks_per_snapshot], not tick_rate / snapshot_rate: the manager
-## sends every [code]ticks_per_snapshot()[/code] ticks and that is an integer division, so
-## at 128 ticks and 20 snapshots it sends every 6 ticks rather than every 6.4, and "two
-## snapshots of buffer" should be two of the snapshots that actually arrive.
+## [method DotNetConfig.ticks_per_snapshot] (an integer division), not tick_rate / snapshot_rate.
 func _snapshot_ticks() -> float:
 	return float(config.ticks_per_snapshot())
 

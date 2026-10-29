@@ -2,20 +2,9 @@ extends Node
 
 const Relay := preload("res://addons/dot_net/testing/dot_net_udp_relay.gd")
 
-## The lossy UDP relay, checked against real sockets before anything is measured through it.
-##
-## [codeblock]
-## godot --headless --path . res://examples/relay_demo.tscn
-## [/codeblock]
-##
-## A tool that measures loss has to be shown to inject what it says it injects, or every
-## number taken through it is a number about the tool. So: raw datagrams both ways, with the
-## loss, delay window, duplication and reordering each measured at the far end rather than
-## read off the relay's own counters; the seed shown to fix the fate of each datagram; and a
-## real ENet pair through it, which is the reason it exists. The last section is also the
-## family's only statement of fact about what ENet does with an unreliable packet in this
-## engine: it is UNSEQUENCED, so a newer one can arrive first, and nothing sent unreliable
-## may assume its order (see docs/wire.md, "Unreliable means unordered").
+## The lossy UDP relay, checked against real sockets before anything is measured through it. A tool
+## that measures loss has to be shown to inject what it says it injects, or every number taken through
+## it is a number about the tool.
 
 ## Every check this suite makes, the last one included. See docs/testing.md.
 const CHECKS := 34
@@ -51,8 +40,6 @@ func _run() -> void:
 	await get_tree().process_frame
 	get_tree().quit(1 if _failures > 0 else 0)
 
-
-# --- 1. Raw datagrams ----------------------------------------------------------
 
 ## What arrived at one end: unique sequence numbers, copies, inversions and delays.
 class Tally extends RefCounted:
@@ -193,8 +180,6 @@ func _section_datagrams() -> void:
 	_sections_finished += 1
 
 
-# --- 2. The seed ------------------------------------------------------------------
-
 ## The sequence numbers that survive 300 datagrams through a relay seeded [param seed],
 ## stepped by hand so every datagram reaches it before any is judged.
 func _survivors(seed: int) -> PackedInt32Array:
@@ -246,8 +231,6 @@ func _section_seed() -> void:
 	_line("")
 	_sections_finished += 1
 
-
-# --- 3. ENet through it -------------------------------------------------------------
 
 func _section_enet() -> void:
 	_sections_started += 1
@@ -386,17 +369,12 @@ func _section_enet() -> void:
 	_sections_finished += 1
 
 
-# --- 4. ENet's packet throttle -------------------------------------------------------
-
 ## Port for this section's server: ENet's port 0 is not every engine's "any port".
 const THROTTLE_PORT := 27393
 
-## [b]A steady path, a reliable burst and long frames: ENet's own throttle drops what the game
-## sends unreliably, at the sender.[/b] dot-core's DotTransportENet turns its deceleration to 0
-## (see its `packet_throttle_deceleration` for the mechanism); the stock pair beside it is the
-## control, built from the bare engine class. Measured 2026-10-12, three runs alike: the stock
-## server's throttle at 0 of 32 and 16 of 180 unreliable packets delivered; DotTransportENet at
-## 32 and all 180. mg-look-at-me's `headless_lossy` holds the same on a real game.
+## [b]A steady path, a reliable burst and long frames: ENet's own throttle drops what the game sends
+## unreliably, at the sender.[/b] dot-core's DotTransportENet turns its deceleration to 0 (see its
+## `packet_throttle_deceleration` for the mechanism); the stock pair beside it is the control.
 func _section_throttle() -> void:
 	_sections_started += 1
 	_line("4. ENet's packet throttle: a steady 60 ms, a reliable burst, 300 ms frames")
@@ -427,10 +405,9 @@ func _section_throttle() -> void:
 	_sections_finished += 1
 
 
-## One pair through a steady 60 ms relay: the server sends one unreliable packet a frame and,
-## for the first two seconds, twenty reliable kilobytes every sixth frame, while every
-## twentieth frame takes 300 ms (both ends, one process: a level being built). [param ours]
-## builds both ends with dot-core's DotTransportENet; otherwise the bare engine class.
+## One pair through a steady 60 ms relay: the server sends one unreliable packet a frame and, for the
+## first two seconds, twenty reliable kilobytes every sixth frame, while every twentieth frame takes
+## 300 ms (both ends, one process: a level being built).
 func _throttle_run(ours: bool) -> Dictionary:
 	var out := {"connected": false, "sent": 0, "got": 0, "lowest": 32, "far_deceleration": -1}
 	var server_peer: Object = null

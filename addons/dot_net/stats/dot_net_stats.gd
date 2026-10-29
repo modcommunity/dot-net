@@ -1,17 +1,9 @@
 class_name DotNetStats
 extends RefCounted
 
-## Counters for what the network is actually doing.
-##
-## [b]Netcode fails quietly.[/b] A game with a broken prediction model, a starving
-## bandwidth budget or a client whose clock never synced still runs — it just feels
-## bad, in ways players describe as "laggy" regardless of cause. These counters are
-## what turn that into a diagnosis: a high correction rate is a determinism problem, a
-## high starvation count is a bandwidth problem, a high late-input count is a clock
-## problem, and they need entirely different fixes.
-##
-## Cheap enough to leave on in a shipping build. A game that only measures this in
-## development finds out about the problem from its players.
+## Counters for what the network is actually doing. [b]Netcode fails quietly.[/b] A game with a broken
+## prediction model, a starving bandwidth budget or a client whose clock never synced still runs — it
+## just feels bad, in ways players describe as "laggy" regardless of cause.
 
 ## Rolling window for rates, in seconds.
 const WINDOW_SEC := 1.0
@@ -41,28 +33,16 @@ var out_of_order: int = 0
 ## Snapshots that never arrived, inferred from gaps in tick numbers.
 var snapshots_lost: int = 0
 
-## Snapshots that did arrive. The denominator [method loss_rate] needs.
-##
-## Separate from [member packets_received] because they do not count the same
-## thing: a packet carries inputs, commands and acks as well as snapshots, and on
-## a server it carries no snapshots at all. Dividing losses by packets therefore
-## gave a loss rate that fell as unrelated traffic rose.
+## Snapshots that did arrive. The denominator [method loss_rate] needs. Separate from [member
+## packets_received] because they do not count the same thing: a packet carries inputs, commands and
+## acks as well as snapshots, and on a server it carries no snapshots at all.
 var snapshots_received: int = 0
 
 var _last_snapshot_tick: int = -1
 
-## Ticks between two snapshots the sender meant to send, which is what a gap is measured
-## in. [DotNetManager] sets it from [method DotNetConfig.ticks_per_snapshot] before every
-## snapshot it notes.
-##
-## [b]A gap is in snapshots, not ticks.[/b] This counted every missing TICK as a lost
-## snapshot, which is right only when a server sends a snapshot every tick -- the one
-## configuration nothing in the family runs. At arena's 64 ticks and 32 snapshots every
-## arrival was two ticks after the last, so a clean link reported half its snapshots lost
-## and a link losing a fifth reported 0.6: measured through a real UDP relay on ENet, the
-## first time anything here saw real loss, 0.52 against 0.05 injected and 0.60 against
-## 0.20. A number that is wrong by a factor of ten is a diagnosis pointing at the network
-## when the network is fine.
+## Ticks between two snapshots the sender meant to send, which is what a gap is measured in.
+## [DotNetManager] sets it from [method DotNetConfig.ticks_per_snapshot] before every snapshot it
+## notes.
 var snapshot_interval_ticks: int = 1
 
 ## Rolling rates.
@@ -82,8 +62,6 @@ var _rtt_samples: Array[float] = []
 func _init() -> void:
 	_window_started_ms = Time.get_ticks_msec()
 
-
-# --- Recording -------------------------------------------------------------
 
 func note_sent(bytes: int, message_count: int = 1) -> void:
 	bytes_sent += bytes
@@ -127,12 +105,9 @@ func note_rtt(rtt_ms: float) -> void:
 		_rtt_samples.pop_front()
 
 
-## Tracks snapshot ordering and infers loss from tick gaps.
-##
-## Inferred rather than measured: an unreliable channel gives no delivery report, so
-## a gap between consecutive received ticks is the only evidence a packet went
-## missing. It undercounts a burst that loses the newest packets, which is acceptable
-## for a diagnostic.
+## Tracks snapshot ordering and infers loss from tick gaps. Inferred rather than measured: an
+## unreliable channel gives no delivery report, so a gap between consecutive received ticks is the only
+## evidence a packet went missing.
 func note_snapshot(tick: int) -> void:
 	snapshots_received += 1
 
@@ -143,12 +118,9 @@ func note_snapshot(tick: int) -> void:
 	if tick <= _last_snapshot_tick:
 		out_of_order += 1
 
-		# A tick *older* than the newest was already counted as lost when the
-		# gap it left was measured, and it has now turned up — reordered, not
-		# dropped. Without this, any path that reorders reports steady loss on a
-		# connection that is losing nothing, which is a diagnosis pointing at the
-		# wrong subsystem. A repeat of the newest tick is a duplicate, not a
-		# recovery, so it does not qualify.
+		# A tick *older* than the newest was already counted as lost when the gap it left was measured, and
+		# it has now turned up — reordered, not dropped. Without this, any path that reorders reports steady
+		# loss on a connection that is losing nothing, which is a diagnosis pointing at the wrong subsystem.
 		if tick < _last_snapshot_tick and snapshots_lost > 0:
 			snapshots_lost -= 1
 
@@ -164,13 +136,8 @@ func note_snapshot(tick: int) -> void:
 	_last_snapshot_tick = tick
 
 
-## Closes the rolling window if it is due, whether or not traffic arrived.
-##
-## [DotNetManager] calls this every physics frame. The rates used to be rolled
-## only from [method note_sent] and [method note_received], so a connection that
-## went silent kept reporting the rate it had when it stopped — the one moment a
-## rate is worth reading, and the one moment it was stale. A stalled peer showed
-## a healthy 40 KiB/s indefinitely.
+## Closes the rolling window if it is due, whether or not traffic arrived. [DotNetManager] calls this
+## every physics frame.
 func roll() -> void:
 	_maybe_roll()
 
@@ -194,13 +161,7 @@ func _maybe_roll() -> void:
 	_window_started_ms = now
 
 
-# --- Derived ---------------------------------------------------------------
-
-## Round-trip time at a percentile, in milliseconds.
-##
-## The 95th matters more than the mean. A connection whose mean is 40 ms and whose
-## 95th is 300 ms feels far worse than one at a steady 80 ms, and the mean alone
-## cannot tell them apart.
+## Round-trip time at a percentile, in milliseconds. The 95th matters more than the mean.
 func rtt_percentile(percentile: float = 0.5) -> float:
 	if _rtt_samples.is_empty():
 		return 0.0
@@ -217,13 +178,7 @@ func rtt_percentile(percentile: float = 0.5) -> float:
 	return sorted[index]
 
 
-## Estimated snapshot loss, 0..1.
-##
-## Losses over losses-plus-arrivals, both counted in snapshots. It used to divide
-## by [member packets_received], which counts every packet of any kind — so a
-## client sending plenty and receiving little reported a loss rate diluted by
-## traffic that had nothing to do with snapshots, and a server reported 0.0
-## because it receives no snapshots at all.
+## Estimated snapshot loss, 0..1. Losses over losses-plus-arrivals, both counted in snapshots.
 func loss_rate() -> float:
 	var expected := snapshots_lost + snapshots_received
 	if expected <= 0:
@@ -231,10 +186,9 @@ func loss_rate() -> float:
 	return float(snapshots_lost) / float(expected)
 
 
-## Average bytes per packet sent. The number that says whether batching is working.
-##
-## Well below the MTU means many small packets and wasted header overhead; at the MTU
-## means packets are full and something is probably being dropped by the budget.
+## Average bytes per packet sent. The number that says whether batching is working. Well below the MTU
+## means many small packets and wasted header overhead; at the MTU means packets are full and something
+## is probably being dropped by the budget.
 func average_packet_bytes() -> float:
 	if packets_sent == 0:
 		return 0.0

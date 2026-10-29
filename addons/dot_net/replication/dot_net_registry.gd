@@ -1,14 +1,8 @@
 class_name DotNetRegistry
 extends RefCounted
 
-## The net-id table: which entities exist, and how to find one.
-##
-## Ids are allocated by the authority and never reused within a session. **Reuse is
-## the trap here** — an id freed and immediately handed to a new entity means a
-## snapshot still in flight for the old one is applied to the new one, which presents
-## as an entity that briefly wears another's state. So allocation is monotonic, and
-## the id space is wide enough that a session cannot exhaust it: at 20 spawns a
-## second, 24 bits lasts nine days.
+## The net-id table: which entities exist, and how to find one. Ids are allocated by the authority and
+## never reused within a session.
 
 const CHANNEL := "net.registry"
 
@@ -55,8 +49,6 @@ func is_authority() -> bool:
 	return _is_authority
 
 
-# --- Allocation ------------------------------------------------------------
-
 ## Allocates the next id. Authority only.
 func allocate_id() -> DotResult:
 	if not _is_authority:
@@ -78,12 +70,7 @@ func allocate_id() -> DotResult:
 	return DotResult.success(id)
 
 
-# --- Registration ----------------------------------------------------------
-
-## Adds an entity to the table.
-##
-## [param net_id] of 0 allocates one, which is what the authority does. A client
-## passes the id the server sent.
+## Adds an entity to the table. [param net_id] of 0 allocates one, which is what the authority does.
 func register(
 	identity: DotNetIdentity,
 	net_id: int,
@@ -135,21 +122,15 @@ func register(
 	return DotResult.success(assigned)
 
 
-## Removes an entity from the table. Does not free the node.
-##
-## Freeing is the caller's decision: a despawn may mean "destroyed" or "left my
-## interest set", and only the caller knows which.
+## Removes an entity from the table. Does not free the node. Freeing is the caller's decision: a
+## despawn may mean "destroyed" or "left my interest set", and only the caller knows which.
 func unregister(net_id: int) -> DotResult:
 	if not _by_id.has(net_id):
 		return DotResult.fail(
 			DotError.CODE_INVALID, "No entity with id %d." % net_id
 		)
 
-	# [b]The node may already be gone.[/b] The registry holds identities it does not own, and
-	# a game change frees the old world's scene before the module that registered them
-	# stops its netcode: typing a freed object into `identity` is a script error per entity
-	# (171 of them on one `changelevel` away from mg-buses-from-hell). A freed entry is
-	# still taken out of every table; there is nothing left to notify.
+	# [b]The node may already be gone.[/b] The registry holds identities it does not own.
 	var stored: Variant = _by_id[net_id]
 
 	if not is_instance_valid(stored):
@@ -191,10 +172,8 @@ func _remember_removed(net_id: int) -> void:
 			_recently_removed.erase(oldest)
 
 
-## Whether an id was recently removed.
-##
-## Lets a receiver drop a late update for a despawned entity without logging it as
-## unknown — which would otherwise fire every tick until the sender notices.
+## Whether an id was recently removed. Lets a receiver drop a late update for a despawned entity
+## without logging it as unknown — which would otherwise fire every tick until the sender notices.
 func was_recently_removed(net_id: int) -> bool:
 	return _recently_removed.has(net_id)
 
@@ -221,8 +200,6 @@ func change_owner(net_id: int, new_peer_id: int) -> DotResult:
 	return DotResult.success(identity)
 
 
-# --- Lookup ----------------------------------------------------------------
-
 func get_identity(net_id: int) -> DotNetIdentity:
 	var identity: DotNetIdentity = _by_id.get(net_id)
 	# An identity whose node was freed without unregistering would be a dangling
@@ -238,19 +215,6 @@ func has(net_id: int) -> bool:
 
 
 ## Every identity still worth walking, and the freed ones dropped as they are found.
-##
-## [b]The validity test has to come BEFORE the typed assignment, and for a while it did
-## not.[/b] `var identity: DotNetIdentity = _by_id[net_id]` on a freed object is itself the
-## error — "Trying to assign invalid previously freed instance" — so the `is_instance_valid`
-## guard on the next line could never run and never protected anything. Every caller that
-## walks this got one error per stale entry per tick, for ever, and the guard that was meant
-## to make an entity freed without unregistering harmless instead made it very loud.
-##
-## The entry is also dropped rather than merely skipped. A registry that reports a stale id
-## every frame is a registry that will report it every frame until the process ends;
-## something has already gone wrong upstream, and the honest thing is to say so once and let
-## go. Games do free a replicated node without telling us — a round re-laying a map does it
-## by design — and dot-props' `is_alive()` makes the same distinction for the same reason.
 func all() -> Array[DotNetIdentity]:
 	var out: Array[DotNetIdentity] = []
 	var stale: Array[int] = []
@@ -312,10 +276,7 @@ func predicted() -> Array[DotNetIdentity]:
 	return out
 
 
-## Removes and returns every entity a peer owned.
-##
-## What a disconnect calls. Returned rather than freed so the caller decides whether
-## a disconnecting player's body vanishes or stays as a ragdoll.
+## Removes and returns every entity a peer owned. What a disconnect calls.
 func take_owned_by(peer_id: int) -> Array[DotNetIdentity]:
 	var taken := owned_by(peer_id)
 

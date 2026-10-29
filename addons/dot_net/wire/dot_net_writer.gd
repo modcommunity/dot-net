@@ -1,31 +1,8 @@
 class_name DotNetWriter
 extends RefCounted
 
-## Bit-level writer with quantisation. The bottom of the wire format.
-##
-## [b]Why bits rather than bytes.[/b] A player's state at 30 Hz for 64 players is
-## roughly 2000 messages a second. Sending a position as three 32-bit floats costs
-## 12 bytes; quantised to a 1 cm grid over a 4 km world it costs 6, and a health
-## value that ranges 0–100 costs 7 bits rather than 32. Over a full server that is
-## the difference between fitting in a home upload and not.
-##
-## [b]What this deliberately does not do.[/b] No compression, no encryption, no
-## framing — [DotNetMessage] handles framing and the transport handles the rest. This
-## is only "turn values into the fewest bits that still reconstruct them well
-## enough".
-##
-## [codeblock]
-## var w := DotNetWriter.new()
-## w.write_uint(entity_id, 16)
-## w.write_vector3_quantised(position, -2048.0, 2048.0, 0.01)
-## w.write_angle(rotation_deg, 9)          # ~0.7 degree resolution
-## var bytes := w.to_bytes()
-## [/codeblock]
-##
-## [b]On performance.[/b] Bit packing in GDScript costs roughly one loop iteration
-## per byte touched. That is fine for the tens of kilobytes a tick that a server
-## actually sends, and it is not fine for megabytes — if you are writing bulk data,
-## use [method write_bytes], which is byte-aligned and copies in one call.
+## Bit-level writer with quantisation. The bottom of the wire format. [b]Why bits rather than
+## bytes.[/b] A player's state at 30 Hz for 64 players is roughly 2000 messages a second.
 
 ## Ceiling on a single buffer, as a guard against a runaway loop producing a
 ## multi-gigabyte allocation before anything notices.
@@ -47,13 +24,8 @@ func _init(reserve_bytes: int = 256) -> void:
 		_bytes.resize(0)
 
 
-# --- Raw bits --------------------------------------------------------------
-
-## Writes the low [param bits] bits of [param value].
-##
-## Bits go least-significant-first into each byte, and bytes fill in order. The
-## reader mirrors it exactly; the ordering is arbitrary but must not change, because
-## it is the wire format.
+## Writes the low [param bits] bits of [param value]. Bits go least-significant-first into each byte,
+## and bytes fill in order.
 func write_bits(value: int, bits: int) -> void:
 	if bits <= 0 or bits > 64:
 		push_error("DotNetWriter.write_bits: bits must be 1..64, got %d" % bits)
@@ -104,13 +76,9 @@ func write_int(value: int, bits: int = 32) -> void:
 	write_bits(value & _mask(bits), bits)
 
 
-# --- Variable-length integers ---------------------------------------------
-
-## Writes an unsigned integer in 7-bit groups with a continuation bit.
-##
-## Small values cost one byte, which is what makes it worth using for anything whose
-## range is large but whose typical value is small — entity counts, string lengths,
-## tick deltas.
+## Writes an unsigned integer in 7-bit groups with a continuation bit. Small values cost one byte,
+## which is what makes it worth using for anything whose range is large but whose typical value is
+## small — entity counts, string lengths, tick deltas.
 func write_varint(value: int) -> void:
 	var v := value
 	if v < 0:
@@ -126,23 +94,13 @@ func write_varint(value: int) -> void:
 		write_bits(group | 0x80, 8)
 
 
-## Writes a signed integer as a zigzag-encoded varint.
-##
-## Zigzag maps small negatives to small positives (-1 → 1, 1 → 2, -2 → 3), so a
-## value near zero costs one byte regardless of sign. Two's complement would make
-## every negative number cost the full width.
+## Writes a signed integer as a zigzag-encoded varint. Zigzag maps small negatives to small positives
+## (-1 → 1, 1 → 2, -2 → 3), so a value near zero costs one byte regardless of sign.
 func write_svarint(value: int) -> void:
 	write_varint((value << 1) ^ (value >> 63))
 
 
-# --- Quantised reals -------------------------------------------------------
-
-## Writes a float mapped onto [param bits] steps across a known range.
-##
-## The workhorse. Resolution is [code](max - min) / (2^bits - 1)[/code], so a
-## position over ±2048 m at 16 bits resolves to about 6 cm and at 20 bits to about
-## 4 mm. Values outside the range are clamped, not wrapped — a clamped position is
-## visibly wrong at the edge of the world, whereas a wrapped one teleports across it.
+## Writes a float mapped onto [param bits] steps across a known range. The workhorse.
 func write_float_range(value: float, min_value: float, max_value: float, bits: int) -> void:
 	if max_value <= min_value:
 		push_error("DotNetWriter.write_float_range: max must exceed min")
@@ -154,11 +112,8 @@ func write_float_range(value: float, min_value: float, max_value: float, bits: i
 	write_bits(int(roundf(normalised * float(_mask(bits)))), bits)
 
 
-## Writes a float on a fixed grid, choosing the bit width from the range.
-##
-## Often what you actually want: "positions to the centimetre over this world" is a
-## clearer statement of intent than "17 bits". The width is derived and must match on
-## the reader, which it does because it derives it the same way.
+## Writes a float on a fixed grid, choosing the bit width from the range. Often what you actually want:
+## "positions to the centimetre over this world" is a clearer statement of intent than "17 bits".
 func write_float_step(
 	value: float,
 	min_value: float,
@@ -185,12 +140,9 @@ static func _bits_for_count(count: int) -> int:
 	return bits
 
 
-## Writes an angle in degrees, wrapped to 0–360.
-##
-## Wrapped rather than clamped, because angles are cyclic: 370° and 10° are the same
-## heading and clamping would turn a rotating object into one that sticks at 360.
-## 9 bits gives about 0.7°, which is below what a player can see on another
-## character.
+## Writes an angle in degrees, wrapped to 0–360. Wrapped rather than clamped, because angles are
+## cyclic: 370° and 10° are the same heading and clamping would turn a rotating object into one that
+## sticks at 360.
 func write_angle(degrees: float, bits: int = 9) -> void:
 	var wrapped := fposmod(degrees, 360.0)
 	write_bits(
@@ -198,10 +150,8 @@ func write_angle(degrees: float, bits: int = 9) -> void:
 	)
 
 
-## Writes a full 32-bit float with no quantisation.
-##
-## For values with no meaningful range — a timestamp, a damage number that could be
-## anything. Costs four bytes; prefer a quantised form when the range is known.
+## Writes a full 32-bit float with no quantisation. For values with no meaningful range — a timestamp,
+## a damage number that could be anything.
 func write_float32(value: float) -> void:
 	var buffer := PackedByteArray()
 	buffer.resize(4)
@@ -209,8 +159,6 @@ func write_float32(value: float) -> void:
 	for i in range(4):
 		write_bits(buffer[i], 8)
 
-
-# --- Vectors and rotations -------------------------------------------------
 
 func write_vector2_range(
 	value: Vector2,
@@ -243,11 +191,9 @@ func write_vector3_step(
 	write_vector3_range(value, min_value, max_value, bits)
 
 
-## Writes a unit-length direction using two angles.
-##
-## A normalised vector has two degrees of freedom, not three, so sending three
-## components wastes a third of the bits and still permits a denormalised result. At
-## the default 12 bits per angle the error is well under a degree.
+## Writes a unit-length direction using two angles. A normalised vector has two degrees of freedom, not
+## three, so sending three components wastes a third of the bits and still permits a denormalised
+## result.
 func write_direction(direction: Vector3, bits: int = 12) -> void:
 	var d := direction.normalized()
 	if not d.is_finite() or d.length_squared() < 0.5:
@@ -259,14 +205,8 @@ func write_direction(direction: Vector3, bits: int = 12) -> void:
 	write_float_range(atan2(d.z, d.x), -PI, PI, bits)
 
 
-## Writes a rotation using the smallest-three method.
-##
-## A unit quaternion has three degrees of freedom, and the largest component can be
-## reconstructed from the other three because the length is 1. So: two bits naming
-## which component was dropped, then three components each in
-## [code]±1/√2[/code] — the range the non-largest components are bounded by. At the
-## default 9 bits each that is 29 bits for a rotation accurate to well under a
-## degree, against 128 for four raw floats.
+## Writes a rotation using the smallest-three method. A unit quaternion has three degrees of freedom,
+## and the largest component can be reconstructed from the other three because the length is 1.
 func write_quaternion(rotation: Quaternion, bits: int = 9) -> void:
 	var q := rotation.normalized()
 
@@ -309,13 +249,8 @@ func write_transform(
 	write_quaternion(transform.basis.get_rotation_quaternion(), rotation_bits)
 
 
-# --- Bytes and strings -----------------------------------------------------
-
-## Writes raw bytes with a length prefix.
-##
-## Byte-aligns first, so the copy is a straight append rather than a per-bit shift.
-## The alignment padding costs at most 7 bits and buys an order of magnitude on
-## anything large.
+## Writes raw bytes with a length prefix. Byte-aligns first, so the copy is a straight append rather
+## than a per-bit shift.
 func write_bytes(data: PackedByteArray) -> void:
 	write_varint(data.size())
 	align()
@@ -328,10 +263,9 @@ func write_bytes(data: PackedByteArray) -> void:
 	_bit_pos = _bytes.size() << 3
 
 
-## Appends bytes with NO length prefix, byte-aligned first.
-##
-## For framing that carries its own length elsewhere -- a message body, whose length is
-## written in bits before it -- so the reader can bound itself exactly.
+## Appends bytes with NO length prefix, byte-aligned first. For framing that carries its own length
+## elsewhere -- a message body, whose length is written in bits before it -- so the reader can bound
+## itself exactly.
 func write_aligned_bytes(data: PackedByteArray) -> void:
 	align()
 
@@ -344,18 +278,6 @@ func write_aligned_bytes(data: PackedByteArray) -> void:
 
 
 ## Appends what another writer wrote from bit [param from_bit] to bit [param to_bit].
-##
-## For a snapshot that sends the same encoded state to many peers: encoded once into its
-## own writer, then laid into each peer's packet with this, which is the same bits on the
-## wire as encoding it again, field by field, for every one of them (the cost that made a
-## 32-player server's snapshots quadratic).
-##
-## [b][param from_bit] must sit at the same bit of its byte as this writer does[/b] -- the
-## source writer is started with that many zero bits. Not for speed, though it makes this a
-## byte copy: a string or a byte array is written byte-aligned, and where its padding falls
-## depends on where in a byte it starts, so state encoded at one offset and laid in at
-## another decodes as garbage from the first aligned field on (a weapon id read as
-## 'WV\u00ad5…', which game-playground's suite caught the first time this ran).
 func write_bit_run(data: PackedByteArray, from_bit: int, to_bit: int) -> void:
 	var bits := to_bit - from_bit
 
@@ -431,10 +353,8 @@ func write_shifted_run(data: PackedByteArray, bits: int) -> void:
 	_bytes.resize((_bit_pos + 7) >> 3)
 
 
-## Writes a UTF-8 string with a length prefix.
-##
-## [param max_bytes] truncates rather than refusing, and truncation happens on the
-## encoded bytes with a character-boundary check — cutting UTF-8 mid-sequence
+## Writes a UTF-8 string with a length prefix. [param max_bytes] truncates rather than refusing, and
+## truncation happens on the encoded bytes with a character-boundary check — cutting UTF-8 mid-sequence
 ## produces a string the reader cannot decode.
 func write_string(value: String, max_bytes: int = 1024) -> void:
 	var encoded := value.to_utf8_buffer()
@@ -447,8 +367,6 @@ func write_string(value: String, max_bytes: int = 1024) -> void:
 
 	write_bytes(encoded)
 
-
-# --- Framing ---------------------------------------------------------------
 
 ## Pads to the next byte boundary.
 func align() -> void:

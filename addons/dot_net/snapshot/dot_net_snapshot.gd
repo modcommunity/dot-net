@@ -1,26 +1,16 @@
 class_name DotNetSnapshot
 extends RefCounted
 
-## One tick's worth of world state.
-##
-## Used in three places, which is why it is a value object rather than a message:
-## the server keeps recent ones as delta baselines, the client buffers them for
+## One tick's worth of world state. Used in three places, which is why it is a value object rather than
+## a message: the server keeps recent ones as delta baselines, the client buffers them for
 ## interpolation, and lag compensation searches them to rewind.
-##
-## [b]On delta compression.[/b] A snapshot is normally sent as a difference against
-## the last one the client [i]acknowledged[/i] — not against the last one sent. The
-## distinction matters: an unreliable snapshot may be lost, and a delta against
-## something the client never received is undecodable. So the server keeps a window
-## of sent snapshots, the client acks the newest tick it has, and the server deltas
-## against that. When the ack is too old the server sends a full state instead.
 
 ## Tick this state belongs to.
 var tick: int = 0
 
-## Local time it was created or received, in milliseconds.
-##
-## Interpolation works in wall time rather than tick numbers, because a client's tick
-## estimate drifts and the arrival spacing is what actually needs smoothing.
+## Local time it was created or received, in milliseconds. Interpolation works in wall time rather than
+## tick numbers, because a client's tick estimate drifts and the arrival spacing is what actually needs
+## smoothing.
 var received_at_ms: int = 0
 
 ## net_id -> {property: value}
@@ -61,15 +51,7 @@ func entity_count() -> int:
 	return entities.size()
 
 
-## The ids in this snapshot, ascending.
-##
-## Sorted, not in insertion order. This is the public way to iterate a
-## snapshot's entities, and "iteration over an unordered collection whose order
-## differs" is on this addon's own list of things that break reconciliation —
-## two peers that inserted the same ids in a different order would walk them in
-## a different order and diverge, for no reason a reader could see. It also
-## keeps [method describe] stable between runs, which is what makes two bug
-## reports comparable.
+## The ids in this snapshot, ascending. Sorted, not in insertion order.
 func net_ids() -> PackedInt64Array:
 	var out := PackedInt64Array()
 	for net_id in entities:
@@ -78,10 +60,7 @@ func net_ids() -> PackedInt64Array:
 	return out
 
 
-## Properties in [param newer] that differ from this snapshot.
-##
-## The server's delta step. Only changed properties travel, which for a world where
-## most entities are still is most of the saving there is.
+## Properties in [param newer] that differ from this snapshot. The server's delta step.
 func delta_to(newer: DotNetSnapshot) -> Dictionary:
 	var out := {}
 
@@ -135,10 +114,9 @@ static func _same(a: Variant, b: Variant) -> bool:
 	return a == b
 
 
-## A copy that shares nothing with the original.
-##
-## Snapshots kept as baselines outlive the objects they were built from, so a shallow
-## copy would let a later tick mutate a baseline the server is still deltaing against.
+## A copy that shares nothing with the original. Snapshots kept as baselines outlive the objects they
+## were built from, so a shallow copy would let a later tick mutate a baseline the server is still
+## deltaing against.
 func duplicate_deep() -> DotNetSnapshot:
 	var copy := DotNetSnapshot.new(tick)
 	copy.received_at_ms = received_at_ms

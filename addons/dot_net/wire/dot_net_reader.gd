@@ -1,25 +1,15 @@
 class_name DotNetReader
 extends RefCounted
 
-## Reads what [DotNetWriter] wrote. Every method mirrors one there.
-##
-## [b]Reading is the untrusted side.[/b] Every buffer this touches came off the
-## network, so it must survive being truncated, padded, or filled with noise without
-## crashing or looping. It does that by never trusting a length it read: reads past
-## the end return zero and set [member exhausted], and length-prefixed reads are
-## bounded before they allocate.
-##
-## Callers check [member exhausted] once after decoding a message rather than after
-## every field. A message that ran off the end is malformed as a whole, and there is
-## nothing useful to salvage from its first half.
+## Reads what [DotNetWriter] wrote. Every method mirrors one there. [b]Reading is the untrusted
+## side.[/b] Every buffer this touches came off the network, so it must survive being truncated,
+## padded, or filled with noise without crashing or looping.
 
 var _bytes: PackedByteArray
 var _bit_pos: int = 0
 
-## Set when a read ran past the end of the buffer.
-##
-## Sticky: once true it stays true, so a single check after decoding covers every
-## field.
+## Set when a read ran past the end of the buffer. Sticky: once true it stays true, so a single check
+## after decoding covers every field.
 var exhausted: bool = false
 
 ## Where reading stops, in bits. The whole buffer unless [method limit_bits] set less.
@@ -30,13 +20,9 @@ func _init(data: PackedByteArray) -> void:
 	_bytes = data
 
 
-## Stops reading at [param bits], however much more the buffer holds.
-##
-## [b]A message body is framed in BITS, not bytes, and this is why.[/b] A body a newer
-## sender wrote can end mid-byte, and the padding to the byte boundary is zeroes that look
-## exactly like a one-bit field set to false. Bounding the reader at the body's exact bit
-## length is what lets [method has_more] say "the writer sent nothing further" and mean
-## it -- which is the whole of the append-only rule [DotNetMessage] documents.
+## Stops reading at [param bits], however much more the buffer holds. [b]A message body is framed in
+## BITS, not bytes, and this is why.[/b] A body a newer sender wrote can end mid-byte, and the padding
+## to the byte boundary is zeroes that look exactly like a one-bit field set to false.
 func limit_bits(bits: int) -> void:
 	_end_bits = clampi(bits, 0, _bytes.size() << 3)
 
@@ -45,18 +31,14 @@ func _end() -> int:
 	return (_bytes.size() << 3) if _end_bits < 0 else _end_bits
 
 
-# --- Raw bits --------------------------------------------------------------
-
 ## Reads [param bits] bits. Returns 0 and sets [member exhausted] past the end.
 func read_bits(bits: int) -> int:
 	if bits <= 0 or bits > 64:
 		push_error("DotNetReader.read_bits: bits must be 1..64, got %d" % bits)
 		return 0
 
-	# Once exhausted, every subsequent read returns zero rather than resuming from
-	# whatever bits happen to remain. A decoder that skips the ok() check would
-	# otherwise get a plausible-looking value for the field *after* the one that
-	# ran off the end, which is far harder to diagnose than a run of zeroes.
+	# Once exhausted, every subsequent read returns zero rather than resuming from whatever bits happen
+	# to remain.
 	if exhausted:
 		return 0
 
@@ -104,11 +86,7 @@ func read_int(bits: int = 32) -> int:
 	return raw
 
 
-# --- Variable-length integers ---------------------------------------------
-
-## Reads a varint.
-##
-## Bounded at ten groups — enough for any 64-bit value — so a buffer of 0xFF bytes
+## Reads a varint. Bounded at ten groups — enough for any 64-bit value — so a buffer of 0xFF bytes
 ## cannot spin this forever.
 func read_varint() -> int:
 	var result := 0
@@ -135,8 +113,6 @@ func read_svarint() -> int:
 	var raw := read_varint()
 	return (raw >> 1) ^ -(raw & 1)
 
-
-# --- Quantised reals -------------------------------------------------------
 
 func read_float_range(min_value: float, max_value: float, bits: int) -> float:
 	if max_value <= min_value:
@@ -174,8 +150,6 @@ func read_float32() -> float:
 		return 0.0
 	return buffer.decode_float(0)
 
-
-# --- Vectors and rotations -------------------------------------------------
 
 func read_vector2_range(
 	min_value: float,
@@ -219,12 +193,8 @@ func read_direction(bits: int = 12) -> Vector3:
 	)
 
 
-## Reads a smallest-three quaternion.
-##
-## The dropped component is recovered from the unit-length constraint. The
-## [method maxf] guard matters: quantisation can push the sum of squares slightly
-## past 1, and [method sqrt] of a small negative is NaN — which then propagates into
-## every transform derived from it.
+## Reads a smallest-three quaternion. The dropped component is recovered from the unit-length
+## constraint.
 func read_quaternion(bits: int = 9) -> Quaternion:
 	var largest := read_bits(2)
 
@@ -263,13 +233,8 @@ func read_transform(
 	return Transform3D(Basis(rotation), origin)
 
 
-# --- Bytes and strings -----------------------------------------------------
-
-## Reads a length-prefixed byte array.
-##
-## [param max_bytes] is checked against the prefix [b]before[/b] allocating. A
-## hostile sender writing a varint of 4 billion must not cause an allocation
-## attempt — that is a one-packet denial of service.
+## Reads a length-prefixed byte array. [param max_bytes] is checked against the prefix [b]before[/b]
+## allocating.
 func read_bytes(max_bytes: int = 1 << 20) -> PackedByteArray:
 	var length := read_varint()
 
@@ -299,8 +264,6 @@ func read_string(max_bytes: int = 1024) -> String:
 	return raw.get_string_from_utf8()
 
 
-# --- Framing ---------------------------------------------------------------
-
 func align() -> void:
 	var remainder := _bit_pos & 7
 	if remainder != 0:
@@ -319,12 +282,8 @@ func bytes_remaining() -> int:
 	return bits_remaining() >> 3
 
 
-## A reader over the next [param bits] bits, byte-aligned first, and this one moved past
-## them. Null, with [member exhausted] set, when fewer are there.
-##
-## How a framed message body is read: the returned reader ends where the body ends, so a
-## message cannot read into the next one, and the next one starts where it should whatever
-## the message read.
+## A reader over the next [param bits] bits, byte-aligned first, and this one moved past them. Null,
+## with [member exhausted] set, when fewer are there.
 func take_bits(bits: int) -> DotNetReader:
 	align()
 	if exhausted or bits < 0 or bits > bits_remaining():
@@ -338,12 +297,9 @@ func take_bits(bits: int) -> DotNetReader:
 	return sub
 
 
-## Whether the writer sent anything past this point.
-##
-## The guard for a field appended to a message after it first shipped: read it only
-## `if reader.has_more()`, and a message from a sender that predates the field keeps the
-## field's declared default instead of reading zero. On a reader bounded by
-## [method limit_bits] -- which every message body is -- this is exact to the bit.
+## Whether the writer sent anything past this point. The guard for a field appended to a message after
+## it first shipped: read it only `if reader.has_more()`, and a message from a sender that predates the
+## field keeps the field's declared default instead of reading zero.
 func has_more() -> bool:
 	return bits_remaining() > 0
 

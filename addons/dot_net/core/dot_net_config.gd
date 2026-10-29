@@ -2,74 +2,30 @@
 class_name DotNetConfig
 extends DotConfig
 
-## Everything configurable about netcode.
-##
-## Layered like every [DotConfig]: exported defaults, then a JSON file, then
-## [code]DOT_NET_*[/code] environment variables, then [code]--net-*[/code] arguments.
-##
-## [b]The defaults describe a 60 Hz shooter on a 4 km map.[/b] They are a starting
-## point, not a recommendation for your game — a turn-based game wants a fraction of
-## the tick rate, a racing game wants tighter position quantisation, a strategy game
-## wants interest management doing far more work. Every one of these is here because
-## a real game would need to change it.
+## Everything configurable about netcode. Layered like every [DotConfig]: exported defaults, then a
+## JSON file, then [code]DOT_NET_*[/code] environment variables, then [code]--net-*[/code] arguments.
 
 @export_group("Simulation")
 
-## Simulation ticks per second.
-##
-## The rate at which authoritative state advances. Higher means lower input latency
-## and better hit registration, and costs CPU and bandwidth linearly.
+## Simulation ticks per second. The rate at which authoritative state advances.
 @export_range(1, 240, 1) var tick_rate: int = 60
 
-## State broadcasts per second. Must divide into [member tick_rate].
-##
-## Usually lower than the tick rate: simulating at 60 and sending at 20 is standard,
-## because interpolation hides the difference and bandwidth is the scarce resource.
-## A value that does not divide evenly produces uneven send spacing, which shows up
-## as jitter no interpolator can smooth.
+## State broadcasts per second. Must divide into [member tick_rate]. Usually lower than the tick rate:
+## simulating at 60 and sending at 20 is standard, because interpolation hides the difference and
+## bandwidth is the scarce resource.
 @export_range(1, 240, 1) var snapshot_rate: int = 20
 
-## Spreads each snapshot's peers over the ticks between snapshots, instead of sending every
-## peer its snapshot on the same tick.
-##
-## [b]Off by default, and the reason to turn it on is a full server.[/b] At 128 ticks and
-## 32 snapshots a second, a snapshot goes out every fourth tick, and building one for every
-## peer at once is the whole cost of that tick: three cheap ticks and one that costs four
-## times their average (game-g2gfast `tools/load_probe`, 32 players: a 66 ms p99 on a 18 ms
-## mean). Staggered, peer [code]p[/code] is sent its snapshot on the ticks where
-## [code]p % ticks_per_snapshot() == tick % ticks_per_snapshot()[/code]: every peer still
-## hears from the server at exactly the same rate, a fixed number of ticks apart, and the
-## work is the same, spread flat. What it costs: lag-compensation history is recorded every
-## tick rather than every snapshot tick, since a peer's view can now sit on any tick, and
-## the per-snapshot sharing of encoded state ([DotNetBehaviour]) is among the peers of one
-## phase rather than all of them.
+## Spreads each snapshot's peers over the ticks between snapshots, instead of sending every peer its
+## snapshot on the same tick.
 @export var stagger_snapshots: bool = false
 
-## Whether peers in step share one dirty set per entity per snapshot
-## ([method DotNetBehaviour.collect_dirty]).
-##
-## A peer whose record of an entity is exactly that entity's state at an earlier snapshot
-## is owed exactly the properties that changed since, and so is every other peer whose
-## record is that same snapshot: the comparison is made once and the answer shared, rather
-## than once per peer. Same properties, same bytes. On by default; off only to measure
-## what the sharing saves (game-g2gfast [code]tools/load_probe[/code]).
+## Whether peers in step share one dirty set per entity per snapshot ([method
+## DotNetBehaviour.collect_dirty]).
 @export var share_dirty_sets: bool = true
 
-## Worker threads that build per-peer snapshots: 0 builds every peer's on the thread that
-## ticks (the default), -1 is the processor count less one (at most [constant
-## DotParallel.AUTO_MAX]), n is at most n. Environment [code]DOT_NET_SNAPSHOT_WORKERS[/code],
-## command line [code]--net-snapshot-workers[/code].
-##
-## The peers are cut into one contiguous run per worker, each built from a frozen copy of the
-## world (positions, every property read once, the clock read once) into new records, which
-## the thread that ticks then stores and sends in peer order: the bytes are the same with any
-## number of workers. Used only when [method DotParallel.available] (never in a browser) and
-## the interest strategy says [method DotNetInterest.is_thread_safe]; otherwise it is 0 and
-## [method DotNetManager.describe_lines] says why. Off by default because what a worker may
-## not touch includes a game's [method DotNetBehaviour._net_read_property] override (read
-## before the fork, so safe) and its custom codecs ([code]Type.CUSTOM[/code], called on the
-## worker), and a game turns it on knowing its codecs read nothing but their argument.
-## See game-dev docs/server-threading.md for the measurement and the design.
+## Worker threads that build per-peer snapshots: 0 builds every peer's on the thread that ticks (the
+## default), -1 is the processor count less one (at most [constant DotParallel.AUTO_MAX]), n is at most
+## n.
 @export_range(-1, 64) var snapshot_workers: int = 0
 
 ## Build server snapshots in the optional native library ([DotNetNative]): the same bytes, several
@@ -95,32 +51,22 @@ extends DotConfig
 ## Grow the input margin from measured jitter.
 @export var adaptive_input_margin: bool = true
 
-## Ticks early a client's commands should reach the server, once the server says how early
-## they do (a server and client that both read [code]FEATURE_INPUT_LEAD[/code]). Replaces the
-## two settings above from the first report on: the lead is then measured, not estimated
-## from the round trip. The least over the last second is held at this, so it is the margin
-## over the worst arrival seen, not over the average. See [DotNetClock].
+## Ticks early a client's commands should reach the server, once the server says how early they do (a
+## server and client that both read [code]FEATURE_INPUT_LEAD[/code]). Replaces the two settings above
+## from the first report on: the lead is then measured, not estimated from the round trip.
 @export_range(0, 20, 1) var input_lead_slack_ticks: int = 2
 
 @export_group("Interpolation")
 
-## Snapshots of delay before rendering — a count of SNAPSHOTS, not of ticks.
-##
-## The buffer that absorbs jitter and loss. One means a single dropped packet causes
-## a visible stall; two is the usual compromise. See [DotNetInterpolator], whose
-## [method DotNetInterpolator.delay_ticks] is the one place this becomes ticks — it was
-## once subtracted from a tick number as it stands, which at 128 ticks and 20 snapshots
-## rendered every remote entity past its newest snapshot.
+## Snapshots of delay before rendering — a count of SNAPSHOTS, not of ticks. The buffer that absorbs
+## jitter and loss.
 @export_range(0.0, 10.0, 0.5) var interpolation_buffer: float = 2.0
 
 ## Adjust the buffer from observed jitter and loss.
 @export var adaptive_interpolation: bool = true
 
-## Longest extrapolation when snapshots stop arriving, in seconds.
-##
-## Extrapolation is guessing, and it is wrong in a way that produces rubber-banding
-## when it is corrected. Past a fifth of a second it is better to stop the entity and
-## let it be visibly stale than to send it somewhere it never went.
+## Longest extrapolation when snapshots stop arriving, in seconds. Extrapolation is guessing, and it is
+## wrong in a way that produces rubber-banding when it is corrected.
 @export_range(0.0, 1.0, 0.05) var max_extrapolation_sec: float = 0.2
 
 @export_group("Prediction")
@@ -129,54 +75,17 @@ extends DotConfig
 ## trip of latency before anything moves, unplayable above about 50 ms.
 @export var enable_prediction: bool = true
 
-## Inputs kept for replay during reconciliation.
-##
-## Must exceed the worst round trip in ticks, or a correction arrives for an input
-## already discarded and the client cannot replay from it. 120 at 60 Hz covers a
-## 2-second round trip.
+## Inputs kept for replay during reconciliation. Must exceed the worst round trip in ticks, or a
+## correction arrives for an input already discarded and the client cannot replay from it.
 @export_range(8, 512, 8) var input_history_ticks: int = 120
 
-## Reconcile a predicted entity once a frame, against the newest snapshot, rather than
-## once per snapshot as each arrives.
-##
-## Every reconciliation rewinds and replays every unacknowledged input, so its cost is the
-## input lead in ticks times one simulation. Several snapshots read in one frame (a
-## WebSocket hands over everything that queued while a frame was long) each paid that in
-## full, and only the last answer was ever drawn: rewinding wholesale to snapshot N + 1
-## discards whatever N's replay produced. On a single-threaded browser that is a loop with
-## no way out -- a long frame queues snapshots, replaying them all makes the next frame
-## longer, the late inputs raise the lead, and a longer lead makes each replay longer.
-## game-arena's web client sat at 2 frames a second replaying 660 ticks a frame after one
-## 4-second stall (2026-10-15).
-##
-## Off by default because it changes WHEN a snapshot's correction lands: on
-## [method DotNetManager.flush_reconcile], which [method DotNetManager.client_tick] and
-## [method DotNetManager.interpolate_frame] call first. A host that reads a predicted
-## entity right after [method DotNetManager.receive_snapshot] and expects it rewound calls
-## [method DotNetManager.flush_reconcile] itself, or leaves this off.
+## Reconcile a predicted entity once a frame, against the newest snapshot, rather than once per
+## snapshot as each arrives. Every reconciliation rewinds and replays every unacknowledged input, so
+## its cost is the input lead in ticks times one simulation.
 @export var reconcile_once_per_frame: bool = false
 
-## Skip a reconciliation whose server state the client already predicted.
-##
-## The predictor keeps what each predicted tick produced. When a snapshot's state for tick
-## T matches what this client predicted for T (as nearly as the wire carries it; see
-## [method DotNetVar.matches]), rewinding to it and replaying the lead would recompute the
-## state the entity already has, so nothing is done. Most snapshots are like that: a
-## prediction is only wrong when something the client could not know happened.
-##
-## [b]This is what uncouples frame time from latency.[/b] A replay costs the lead in ticks
-## times one simulation, and the lead is a round trip of ticks, so without this every
-## frame paid in proportion to the ping: in a browser, where the simulation is several
-## times slower than native, a 100 ms ping was several milliseconds of every frame, and a
-## longer frame raises the measured ping again.
-##
-## Needs [member reconcile_once_per_frame]: a deferred reconcile is decided while the
-## properties still hold the prediction; an immediate one has already written the server's
-## older state over them, and only the replay gets back.
-##
-## Off by default because a state outside [member DotNetBehaviour.net_vars] that only a
-## replay re-derives (a cache rebuilt in [code]_net_simulate[/code] from the properties) is
-## left as the prediction had it; a game turns it on after its prediction suites pass.
+## Skip a reconciliation whose server state the client already predicted. The predictor keeps what each
+## predicted tick produced.
 @export var skip_matching_replays: bool = false
 
 ## Whether [method DotNetManager.predict_tick] rounds each input to the wire
@@ -184,34 +93,22 @@ extends DotConfig
 ## the command the server decodes. On by default; off only to measure what it costs not to.
 @export var predict_wire_input: bool = true
 
-## Position error before a predicted entity is corrected, in metres.
-##
-## Below this the prediction is treated as right, which stops floating-point noise
-## from producing constant micro-corrections. Above it the client rewinds and
-## replays.
+## Position error before a predicted entity is corrected, in metres. Below this the prediction is
+## treated as right, which stops floating-point noise from producing constant micro-corrections.
 @export_range(0.0, 1.0, 0.001) var reconcile_position_epsilon: float = 0.01
 
-## Smooth a correction over this many seconds instead of snapping.
-##
-## A snapped correction is a visible teleport. Smoothing hides small ones entirely;
-## large ones still need to be visible, which is what
-## [member reconcile_snap_distance] is for.
+## Smooth a correction over this many seconds instead of snapping. A snapped correction is a visible
+## teleport.
 @export_range(0.0, 1.0, 0.01) var reconcile_smooth_sec: float = 0.1
 
-## Error beyond which a correction snaps rather than smoothing.
-##
-## A large divergence means the prediction was wrong about something structural — a
-## collision the client missed, a teleport, a respawn — and smoothing across it drags
-## the entity through geometry.
+## Error beyond which a correction snaps rather than smoothing. A large divergence means the prediction
+## was wrong about something structural — a collision the client missed, a teleport, a respawn — and
+## smoothing across it drags the entity through geometry.
 @export_range(0.1, 100.0, 0.1) var reconcile_snap_distance: float = 2.0
 
-## Longest a client carries a remote entity along its replicated velocity when predicting
-## against it, in seconds ([method DotNetBehaviour.extrapolated_value]). 0, the default,
-## predicts against where it was last heard.
-##
-## About the input lead plus one snapshot interval: the age of the newest snapshot when none
-## is lost. Further only carries a remote on through its turns while snapshots are lost, which
-## makes the worst bump worse and the mean no better (docs/prediction.md#bumping-a-remote).
+## Longest a client carries a remote entity along its replicated velocity when predicting against it,
+## in seconds ([method DotNetBehaviour.extrapolated_value]). 0, the default, predicts against where it
+## was last heard.
 @export_range(0.0, 1.0, 0.01) var remote_extrapolation_sec: float = 0.0
 
 ## Seconds the server repeats a silent peer's last input before it applies that input
@@ -226,52 +123,33 @@ extends DotConfig
 
 @export_group("Lag compensation")
 
-## Rewind the world to a client's view when validating its actions.
-##
-## What makes hit registration feel right on a laggy connection. The cost is that a
-## victim can be hit after they think they reached cover — the standard trade, and
-## the reason [member max_rewind_sec] is bounded.
+## Rewind the world to a client's view when validating its actions. What makes hit registration feel
+## right on a laggy connection.
 @export var enable_lag_compensation: bool = true
 
-## Longest rewind permitted, in seconds.
-##
-## Also the ceiling on how far behind a client's claim may be. A client claiming a
-## hit 2 seconds in the past is either on a terrible connection or lying, and past
-## this the claim is refused rather than honoured.
-##
-## One second, so a 300-400 ms player (a round trip plus interpolation, about half a
-## second) is compensated in full with room for jitter. 0.5 clamped exactly those
-## players, and the clamp is silent: their hits simply stopped landing.
+## Longest rewind permitted, in seconds. Also the ceiling on how far behind a client's claim may be.
 @export_range(0.0, 2.0, 0.05) var max_rewind_sec: float = 1.0
 
-## Seconds of transform history kept per entity.
-##
-## Must exceed [member max_rewind_sec] plus the send interval, or a rewind lands
-## before the oldest sample.
+## Seconds of transform history kept per entity. Must exceed [member max_rewind_sec] plus the send
+## interval, or a rewind lands before the oldest sample.
 @export_range(0.1, 5.0, 0.1) var history_sec: float = 1.5
 
 @export_group("World bounds")
 
-## World extent used for position quantisation, in metres from the origin.
-##
-## [b]Positions outside this are clamped, not wrapped.[/b] Set it to comfortably
-## contain your playable space — too small silently pins entities at the boundary,
-## too large wastes bits. See [DotNetWriter.write_float_range].
+## World extent used for position quantisation, in metres from the origin. [b]Positions outside this
+## are clamped, not wrapped.[/b] Set it to comfortably contain your playable space — too small silently
+## pins entities at the boundary, too large wastes bits.
 @export var world_extent: float = 2048.0
 
-## Position resolution in metres.
-##
-## 1 cm is well below what a player can perceive on another character and costs
-## about 19 bits per axis over a 4 km world.
+## Position resolution in metres. 1 cm is well below what a player can perceive on another character
+## and costs about 19 bits per axis over a 4 km world.
 @export_range(0.0001, 1.0, 0.0001) var position_step: float = 0.01
 
 ## Bits per rotation component in the smallest-three encoding.
 @export_range(6, 16, 1) var rotation_bits: int = 9
 
-## Bits per velocity component.
-##
-## Velocity tolerates more error than position — it is integrated, and the next
-## snapshot corrects it — so it gets fewer bits.
+## Bits per velocity component. Velocity tolerates more error than position — it is integrated, and the
+## next snapshot corrects it — so it gets fewer bits.
 @export_range(6, 24, 1) var velocity_bits: int = 12
 
 ## Maximum representable speed, in metres per second.
@@ -279,34 +157,20 @@ extends DotConfig
 
 @export_group("Bandwidth")
 
-## The largest snapshot payload [DotNetManager] hands to [member DotNetManager.send_fn].
-##
-## A snapshot that would be bigger is sent as several parts, each a snapshot of its own
-## entities that applies without the others, so a lost part loses only what was in it
-## (docs/wire.md#snapshot-parts). Leave room for the host's own framing under the path's
-## real limit: Godot's ENet peer carries 1392 bytes in one unreliable packet and fragments
-## anything bigger, and an RPC adds about twenty bytes of its own. 1200 also stays under
-## IPv6's 1280. Messages are not cut by this: [DotNetPacket] has its own.
+## The largest snapshot payload [DotNetManager] hands to [member DotNetManager.send_fn]. A snapshot
+## that would be bigger is sent as several parts, each a snapshot of its own entities that applies
+## without the others, so a lost part loses only what was in it (docs/wire.md#snapshot-parts).
 @export_range(256, 8192, 64) var mtu: int = 1200
 
-## Bytes per second sent to one client. 0 is unlimited.
-##
-## The budget interest management and prioritisation work within. 64 kB/s is a
-## generous allowance for one player; multiply by your player count to size a server.
+## Bytes per second sent to one client. 0 is unlimited. The budget interest management and
+## prioritisation work within.
 @export var per_client_budget: int = 65536
 
 ## Packets per second to one client. 0 is unlimited.
 @export_range(0, 240, 1) var per_client_packet_rate: int = 60
 
-## Snapshots a send may stay unconfirmed before it is resolved without an
-## acknowledgement.
-##
-## The bound on how much unconfirmed state the server tracks per peer. It has to
-## exceed the worst round trip the game tolerates — at the default snapshot rate of
-## 20 Hz, 32 snapshots is 1.6 seconds — or a healthy client's acknowledgements
-## arrive after their sends have already been resolved, and every property is either
-## re-sent forever or confirmed without evidence, depending on
-## [method DotNetManager.peer_acks_wired].
+## Snapshots a send may stay unconfirmed before it is resolved without an acknowledgement. The bound on
+## how much unconfirmed state the server tracks per peer.
 @export_range(4, 256, 1) var ack_window_snapshots: int = 32
 
 @export_group("Interest management")
@@ -314,10 +178,8 @@ extends DotConfig
 ## Radius within which entities are always replicated, in metres.
 @export var interest_radius: float = 200.0
 
-## Cell size for the grid strategy, in metres.
-##
-## Should be near [member interest_radius]: much smaller and the query touches many
-## cells, much larger and it returns far more than it needs.
+## Cell size for the grid strategy, in metres. Should be near [member interest_radius]: much smaller
+## and the query touches many cells, much larger and it returns far more than it needs.
 @export var interest_cell_size: float = 128.0
 
 ## Entities past [member far_distance] from a peer are sent in one snapshot of this many. 1 is off.
@@ -328,36 +190,25 @@ extends DotConfig
 ## Metres beyond which an entity is far for [member far_every]. 0 is never far.
 @export var far_distance: float = 0.0
 
-## Entities replicated to one client per snapshot, at most. 0 is unlimited.
-##
-## The backstop when interest management is not enough — a thousand entities in one
-## room. Prioritisation decides which ones make the cut.
+## Entities replicated to one client per snapshot, at most. 0 is unlimited. The backstop when interest
+## management is not enough — a thousand entities in one room.
 @export_range(0, 4096, 16) var max_entities_per_snapshot: int = 256
 
-## Entities built into one peer's snapshot, at most, taken in the budget's accumulated-priority
-## order; the rest wait their turn, so each entity's update rate follows its score
-## ([member DotNetInterest.distance_falloff]). What the peer owns always goes. 0 is off. Saves
-## little, as peers cut at different points stop sharing encodings: prefer coherent far turns.
+## Entities built into one peer's snapshot, at most, taken in the budget's accumulated-priority order;
+## the rest wait their turn, so each entity's update rate follows its score ([member
+## DotNetInterest.distance_falloff]). What the peer owns always goes. 0 is off.
 @export_range(0, 4096, 1) var peer_send_budget: int = 0
 
 @export_group("Limits")
 
-## Messages one client may send per second before being throttled.
-##
-## Every client-to-server message costs the server work, so a client that sends a
-## thousand a second is either broken or hostile.
+## Messages one client may send per second before being throttled. Every client-to-server message costs
+## the server work, so a client that sends a thousand a second is either broken or hostile.
 @export_range(10, 10000, 10) var client_message_rate: int = 240
 
 ## Largest payload accepted from a client, in bytes.
 @export_range(256, 65536, 256) var max_client_payload: int = 4096
 
 ## Entities one client may be told about at once. 0 is unlimited.
-##
-## Distinct from [member max_entities_per_snapshot] in intent — what a client may
-## know about at all, rather than what fits in one packet — and applied through the
-## same [method DotNetInterest.prioritise], because that is what pins
-## [member DotNetIdentity.always_relevant] above everything else. See
-## [method entity_cap].
 @export_range(0, 65536, 64) var max_tracked_entities: int = 4096
 
 
@@ -413,11 +264,9 @@ func validate() -> DotResult:
 			"otherwise every correction snaps"
 		)
 
-	# Raised rather than warned about: the history is a derived quantity — twice
-	# the rewind, in ticks — and every host that raised the tick rate from the 60 the
-	# default was sized for got the warning and nothing else. A correction arriving
-	# for an input already discarded is a snap, and a snap is what the warning was
-	# failing to prevent.
+	# Raised rather than warned about: the history is a derived quantity — twice the rewind, in ticks —
+	# and every host that raised the tick rate from the 60 the default was sized for got the warning and
+	# nothing else.
 	var input_ticks_needed := mini(int(max_rewind_sec * float(tick_rate)) * 2, 512)
 	if input_history_ticks < input_ticks_needed:
 		DotLog.info(
@@ -440,11 +289,9 @@ func snapshot_interval() -> float:
 	return 1.0 / float(maxi(1, snapshot_rate))
 
 
-## Interpolation delay in seconds, from the buffer setting.
-##
-## Measured in the snapshots the manager actually sends — every [method ticks_per_snapshot]
-## ticks, an integer — so it agrees with [method DotNetInterpolator.delay_ms] when the
-## snapshot rate does not divide the tick rate.
+## Interpolation delay in seconds, from the buffer setting. Measured in the snapshots the manager
+## actually sends — every [method ticks_per_snapshot] ticks, an integer — so it agrees with [method
+## DotNetInterpolator.delay_ms] when the snapshot rate does not divide the tick rate.
 func interpolation_delay() -> float:
 	return interpolation_buffer * float(ticks_per_snapshot()) / float(maxi(1, tick_rate))
 
@@ -456,14 +303,8 @@ func position_bits() -> int:
 	)
 
 
-## Transform history samples kept per entity.
-##
-## Sized from [member tick_rate] rather than [member snapshot_rate] even though
-## history is normally recorded per snapshot. Over-allocating costs a few hundred
-## bytes per entity; under-allocating silently drops the oldest samples, so a rewind
-## lands on the boundary instead of where the client was looking and every laggy
-## player's shots quietly stop registering. One of those failure modes is visible in
-## a memory graph and the other is not.
+## Transform history samples kept per entity. Sized from [member tick_rate] rather than [member
+## snapshot_rate] even though history is normally recorded per snapshot.
 func history_samples() -> int:
 	return maxi(2, int(ceilf(history_sec * float(tick_rate))) + 2)
 
@@ -472,10 +313,9 @@ func max_rewind_ticks() -> int:
 	return int(max_rewind_sec * float(tick_rate))
 
 
-## A summary of what the settings cost, for a `net_status` command.
-##
-## The numbers most likely to be a surprise: how many bits a transform takes and what
-## that means per client per second at the configured rates.
+## A summary of what the settings cost, for a `net_status` command. The numbers most likely to be a
+## surprise: how many bits a transform takes and what that means per client per second at the
+## configured rates.
 func describe_budget() -> PackedStringArray:
 	var pos_bits := position_bits()
 	var transform_bits := pos_bits * 3 + rotation_bits * 3 + 2
@@ -508,15 +348,8 @@ func describe_budget() -> PackedStringArray:
 	return out
 
 
-## The most entities one snapshot may name: the tighter of
-## [member max_entities_per_snapshot] and [member max_tracked_entities], where 0
-## means "no limit" on either.
-##
-## [b]Both caps go through prioritisation rather than a slice.[/b] Sorting by score
-## and truncating looks equivalent and is not: `prioritise` scores an
-## `always_relevant` entity at 1e9 so the objective marker — and the observer's own
-## entity — survive a cut that a plain score sort drops. That is the same shape as
-## the interest cache that once dropped what the observer owned.
+## The most entities one snapshot may name: the tighter of [member max_entities_per_snapshot] and
+## [member max_tracked_entities], where 0 means "no limit" on either.
 func entity_cap() -> int:
 	if max_entities_per_snapshot <= 0:
 		return maxi(max_tracked_entities, 0)

@@ -1,23 +1,8 @@
 class_name DotNetBudget
 extends RefCounted
 
-## Per-client bandwidth budget with a priority accumulator.
-##
-## [b]The problem.[/b] Interest management decides [i]what[/i] a client could
-## receive. On a busy tick that is still more than its connection can carry. Something
-## must be dropped, and the naive answers are both bad: dropping whatever comes last
-## means the same entities are always starved, and sending everything means the
-## connection backs up until it collapses.
-##
-## [b]The accumulator.[/b] Every entity carries a score that grows each tick it is
-## [i]not[/i] sent, at a rate set by its priority and relevance. Sending resets it.
-## So an important entity is sent often, an unimportant one is sent eventually, and
-## nothing is starved forever — which is what makes a distant object update once a
-## second instead of never.
-##
-## This is the same idea as any engine's net priority, and it exists for the same
-## reason:
-## a fixed priority order starves the tail, and round-robin ignores importance.
+## Per-client bandwidth budget with a priority accumulator. [b]The problem.[/b] Interest management
+## decides [i]what[/i] a client could receive.
 
 const CHANNEL := "net.budget"
 
@@ -73,14 +58,8 @@ func forget_peer(peer_id: int) -> void:
 	_peers.erase(peer_id)
 
 
-# --- Accumulation ----------------------------------------------------------
-
-## Grows every candidate's accumulator, then returns them in send order.
-##
-## [param scores] maps net_id to this tick's relevance, from the interest strategy.
-## Entities absent from it are not candidates and their accumulators are left alone —
-## an entity that leaves interest and comes back should not have banked priority the
-## whole time it was invisible.
+## Grows every candidate's accumulator, then returns them in send order. [param scores] maps net_id to
+## this tick's relevance, from the interest strategy.
 func accumulate(
 	peer_id: int,
 	candidates: Array[DotNetIdentity],
@@ -135,16 +114,6 @@ func accumulate_record(
 
 
 ## [param candidates], highest accumulator first.
-##
-## [b]A native sort of integers, not [code]sort_custom[/code].[/b] A comparator is a GDScript
-## call and two dictionary lookups per comparison, about a hundred and sixty comparisons per
-## peer per snapshot at 32 players: 0.7 ms of a 128-tick server's tick (game-g2gfast
-## tools/load_probe). An accumulator is never negative (it starts at 0 and only grows by
-## non-negative amounts), and a non-negative double's IEEE bits order exactly as the double
-## does, so each key is those bits with the candidate's index in the lowest bits. Those bits
-## are the bottom of the mantissa: two accumulators within a few parts in 2^40 of each other
-## are taken as equal and kept in candidate order, which a comparator sort did not promise
-## for true ties either.
 static func _by_accumulator(
 	candidates: Array[DotNetIdentity], accumulators: Dictionary
 ) -> Array[DotNetIdentity]:
@@ -188,17 +157,9 @@ static func _order_values_into(candidates: Array, values: PackedFloat64Array, or
 		ordered[i] = candidates[keys[i] & low]
 
 
-## Extra priority for an entity that has waited too long.
-##
-## [b]The accumulator alone does not bound starvation tightly enough.[/b] It
-## guarantees everything is sent *eventually* — an entity gaining 0.1 a tick against
-## one gaining 10 does win, after a hundred ticks. At 20 Hz that is five seconds of
-## an object never updating, which players see as it being frozen.
-##
-## So once an entity has waited past the threshold, its priority grows superlinearly
-## with the wait. That turns "eventually" into a bound: nothing goes more than
-## roughly [member starvation_ticks] snapshots without being sent, whatever its
-## nominal priority.
+## Extra priority for an entity that has waited too long. [b]The accumulator alone does not bound
+## starvation tightly enough.[/b] It guarantees everything is sent *eventually* — an entity gaining 0.1
+## a tick against one gaining 10 does win, after a hundred ticks.
 func _starvation_boost(waited_ticks: int) -> float:
 	if waited_ticks <= starvation_ticks:
 		return 0.0
@@ -229,8 +190,6 @@ func note_starved(peer_id: int) -> void:
 	budget.starved_this_tick += 1
 	budget.total_starved += 1
 
-
-# --- Spending --------------------------------------------------------------
 
 ## Whether [param bytes] more may be sent to this peer this second.
 func can_spend(peer_id: int, bytes: int) -> bool:
@@ -275,11 +234,9 @@ func note_packet(peer_id: int, bytes: int) -> void:
 	budget.bytes_this_second += bytes
 
 
-## Rolls the one-second window when it expires.
-##
-## A hard window rather than a token bucket: bandwidth here is a fairness mechanism
-## between entities, not a shaping mechanism against a link, and a window is easier to
-## read in a report than a bucket level.
+## Rolls the one-second window when it expires. A hard window rather than a token bucket: bandwidth
+## here is a fairness mechanism between entities, not a shaping mechanism against a link, and a window
+## is easier to read in a report than a bucket level.
 func _roll_window(budget: PeerBudget) -> void:
 	var now := Time.get_ticks_msec()
 	var elapsed := now - budget.window_started_ms
@@ -297,19 +254,6 @@ func _roll_window(budget: PeerBudget) -> void:
 
 
 ## Clears the per-tick starvation counter. Call at the start of each snapshot.
-##
-## [b]And the only tick boundary this class has, which is why the log line is here.[/b]
-## A peer whose budget has run out is worth knowing about -- it is the difference
-## between "the server is fine" and "this player is seeing a world that updates in
-## lumps" -- but [method note_starved] is called once per entity per tick, so
-## reporting it there is twenty lines a second per peer. What is logged instead is the
-## EDGE: the tick a peer started starving, and the tick it stopped.
-##
-## DEBUG both ways, because neither is a fault. Interest management and this
-## accumulator exist precisely so that a connection too small for the scene degrades
-## into slower updates rather than into a backed-up socket, and starvation is that
-## design working. It is still the first thing to look for when somebody reports that
-## the other players are stuttering.
 func begin_tick(peer_id: int) -> void:
 	var budget := for_peer(peer_id)
 	var starving := budget.starved_this_tick > 0
@@ -331,8 +275,6 @@ func begin_tick(peer_id: int) -> void:
 
 	budget.starved_this_tick = 0
 
-
-# --- Reporting -------------------------------------------------------------
 
 func peer_ids() -> PackedInt64Array:
 	var out := PackedInt64Array()

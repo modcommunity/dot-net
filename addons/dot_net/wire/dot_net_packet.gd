@@ -1,39 +1,11 @@
 class_name DotNetPacket
 extends RefCounted
 
-## Batches messages into packets, and takes them apart again.
-##
-## [b]Why batch at all.[/b] Every packet carries per-packet overhead — IP, UDP or
-## TCP, the transport's own framing — somewhere between 28 and 60 bytes before a
-## single byte of yours. A server sending 12 small state updates to a peer as 12
-## packets spends more on headers than on state. Batched into one, it spends the
-## overhead once.
-##
-## The other reason is ordering: a batch is one unit of loss. Twelve separate
-## unreliable packets can arrive in any order and any subset; one batch either
-## arrives whole or not at all, which makes "these updates are from the same tick"
-## true without a sequence number on each.
-##
-## [b]Fragmentation.[/b] A batch that exceeds the MTU is split, and the pieces are
-## reassembled on the far side. This is only for reliable messages: fragmenting an
-## unreliable payload means losing one fragment discards the whole thing, so the loss
-## rate multiplies by the fragment count. Unreliable messages that do not fit are
-## refused rather than fragmented, and the sender is told to send less.
-##
-## [b]Nothing here logs, and it used to declare a channel promising that it would.[/b]
-## Every method on this class is static, takes bytes and returns bytes or a
-## [DotResult], and knows nothing about a peer, a connection or a tick. A codec that
-## decided on its own that a malformed packet was worth a line would write one per
-## hostile datagram from a context with nothing to name; the caller holds the peer and
-## the address and is the only one that can say anything useful about a refusal. The
-## constant was the leftover, not the silence.
+## Batches messages into packets, and takes them apart again. [b]Why batch at all.[/b] Every packet
+## carries per-packet overhead — IP, UDP or TCP, the transport's own framing — somewhere between 28 and
+## 60 bytes before a single byte of yours.
 
 ## Bytes of payload per packet before fragmenting.
-##
-## 1200 stays under the smallest MTU in practice (1280 for IPv6) with room for
-## headers, so a packet is never fragmented by the network itself — which matters
-## because network-level fragmentation loses the whole datagram if any fragment
-## drops, and does it invisibly.
 const DEFAULT_MTU := 1200
 
 ## Header: a tick stamp and a message count.
@@ -73,11 +45,7 @@ class Batch extends RefCounted:
 		return _estimated_bytes
 
 
-## Encodes a batch into one payload.
-##
-## Returns the bytes. Callers that need to respect an MTU should have used
-## [method Batch.would_overflow] while filling; this does not refuse an oversized
-## batch, it fragments on send.
+## Encodes a batch into one payload. Returns the bytes.
 static func encode_batch(
 	batch: Batch,
 	registry: DotNetMessageRegistry
@@ -106,13 +74,9 @@ static func encode_batch(
 	return DotResult.success(writer.to_bytes())
 
 
-## Decodes a payload into messages.
-##
-## [b]Every failure mode here is reachable from the network.[/b] A truncated buffer,
-## a count that does not match the body, an unknown message id — all are handled by
-## returning what decoded successfully plus an error, rather than by throwing away
-## the whole packet. A partially-readable batch usually means a schema mismatch, and
-## the messages that did decode are the ones that say so.
+## Decodes a payload into messages. [b]Every failure mode here is reachable from the network.[/b] A
+## truncated buffer, a count that does not match the body, an unknown message id — all are handled by
+## returning what decoded successfully plus an error, rather than by throwing away the whole packet.
 static func decode_batch(
 	payload: PackedByteArray,
 	registry: DotNetMessageRegistry,
@@ -163,12 +127,8 @@ static func decode_batch(
 	return DotResult.success({"tick": tick, "messages": messages})
 
 
-# --- Fragmentation ---------------------------------------------------------
-
-## Splits an oversized payload into MTU-sized fragments.
-##
-## Only for reliable delivery — see the class note. Returns one fragment when the
-## payload already fits, so callers do not branch.
+## Splits an oversized payload into MTU-sized fragments. Only for reliable delivery — see the class
+## note.
 static func fragment(
 	payload: PackedByteArray,
 	fragment_id: int,
@@ -222,11 +182,7 @@ static func _write_fragment(
 	return writer.to_bytes()
 
 
-## Reassembles fragments into whole payloads.
-##
-## Holds partial sets until they complete or expire. The expiry is what stops a
-## sender that drops one fragment of every message from growing this without bound —
-## which is otherwise a slow memory exhaustion any peer can cause.
+## Reassembles fragments into whole payloads. Holds partial sets until they complete or expire.
 class Reassembler extends RefCounted:
 	## Seconds a partial fragment set is held.
 	var timeout_sec: float = 5.0

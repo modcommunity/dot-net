@@ -4,32 +4,7 @@ extends "dot_net_manager_send.gd"
 
 ## Drives the netcode. One per network session; place it and it runs.
 ##
-## Owns the tick loop and wires the pieces together — clock, registry, spawner,
-## interest, budget, interpolator, predictor, history. Every one of them is reachable
-## and replaceable: a game that wants its own interest rule assigns
-## [member interest], one that wants a different spawner points
-## [member spawner_ref] elsewhere, and one that wants none of the tick loop can call
-## [method server_tick] and [method client_tick] itself.
-##
-## [codeblock]
-## var net := DotNetManager.new()
-## net.config = my_config
-## net.is_server = true
-## add_child(net)
-##
-## net.spawner.register_prefab(&"player", preload("res://player.tscn"))
-## net.interest = DotNetInterestGrid.new()
-##
-## net.messages.register(&"game.chat", ChatMessage)
-## net.messages.on(&"game.chat", _on_chat)
-##
-## net.start(multiplayer_peer)
-## [/codeblock]
-##
-## [b]Transport-agnostic.[/b] It sends through a [Callable] rather than owning a
-## socket, so it runs over dot-core's transports, over dot-server's existing
-## connection, over Godot's raw multiplayer, or over a loopback in a test. See
-## [member send_fn].
+## Owns the tick loop and wires the pieces together (clock, registry, spawner, interest, budget, interpolator, predictor, history), each reachable and replaceable. Sends through [member send_fn], so it is transport-agnostic. Usage: README.md.
 
 func _ready() -> void:
 	if Engine.is_editor_hint():
@@ -44,8 +19,6 @@ func _exit_tree() -> void:
 func _service_name() -> StringName:
 	return DotRegistry.scoped_name(SERVICE, service_scope)
 
-
-# --- Lifecycle -------------------------------------------------------------
 
 ## Prepares everything. Call before [method start], or let [method start] call it.
 func setup() -> DotResult:
@@ -167,19 +140,9 @@ func start() -> DotResult:
 	return DotResult.success(self)
 
 
-## Sends this end's message schema to a peer, through [member send_fn]. See
-## [method DotNetMessageRegistry.schema_payload].
+## Sends this end's message schema to a peer, through [member send_fn]. See [method DotNetMessageRegistry.schema_payload].
 ##
-## [b]Automatic, and callable again.[/b] A server announces to a peer in [method add_peer]
-## and a client to the server in [method start], both through [member send_fn] with
-## RELIABLE delivery, which every game in this family already routes to its event and
-## request calls. A host whose reliable route to a peer did not exist yet at that moment
-## -- a client scene built after the server added the peer -- calls this again once it
-## does. Adopting a table twice is harmless; the latest one counts.
-##
-## Nothing is lost if it never arrives: a message's wire id is derived from its type's
-## name, so decoding does not wait for the table. What waits for it is the check that
-## refuses a peer missing a REQUIRED type.
+## Automatic in [method add_peer] and [method start], over RELIABLE; call again once a late reliable route exists. Adopting twice is harmless. Decoding never waits for the table (wire ids derive from names); only the REQUIRED-type check does.
 func announce_schema(peer_id: int) -> bool:
 	if not send_fn.is_valid() or messages == null:
 		return false
@@ -231,8 +194,6 @@ func is_running() -> bool:
 	return _running
 
 
-# --- Peers -----------------------------------------------------------------
-
 ## Registers a connected peer. Server side.
 func add_peer(peer_id: int) -> void:
 	if _peers.has(peer_id):
@@ -276,10 +237,8 @@ func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
 	if _native != null:
 		_native.forget_peer(peer_id)
 
-	# Every behaviour that ever replicated to this peer holds a record of what it
-	# was believed to have. Nothing else will ever clear it, so a server churning
-	# through players would grow one per player per behaviour for as long as the
-	# entity lives.
+	# Every behaviour that ever replicated to this peer holds a record of what it was believed
+	# to have; nothing else clears it, so a server churning players would leak one per behaviour.
 	for identity in registry.all():
 		for behaviour in identity.behaviours:
 			behaviour.forget_peer(peer_id)
@@ -306,8 +265,6 @@ func input_buffer_for(peer_id: int) -> DotNetInput.Buffer:
 func local_inputs() -> DotNetInput.Buffer:
 	return _local_inputs
 
-
-# --- Tick loop -------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
 	if Engine.is_editor_hint() or not _running or not auto_tick:
@@ -337,12 +294,8 @@ func step(delta: float) -> void:
 
 ## One authoritative tick: consume input, simulate, record history, maybe send.
 func server_tick(tick: int) -> void:
-	# [b]The clock follows the tick it is driven at.[/b] A host that ticks this itself
-	# (`auto_tick = false`, which is every game in the family) never advanced the server's
-	# clock, so `clock.tick` read 0 for the life of the server — and every game's HELLO
-	# hands a joiner exactly that number to sync from. The joiner's first input timeline
-	# was millions of ticks in the past, every command it sent was discarded as late, and
-	# it stayed that way until the first snapshot snapped the clock.
+	# The clock follows the tick it is driven at: a host that ticks this itself never advanced
+	# the server's clock, and every joiner synced from tick 0 and had its commands discarded as late.
 	if is_server:
 		clock.tick = maxi(clock.tick, tick)
 
@@ -370,12 +323,9 @@ func server_tick(tick: int) -> void:
 	var started := Time.get_ticks_usec()
 	_perf_server_ticks += 1
 
-	# [b]The list was taken before anything ran, and a behaviour can change the world.[/b] A
-	# round that re-lays its map inside a player's `_net_simulate` unregisters the old map's
-	# entities and takes their nodes out of the tree; walking on simulated each of them once
-	# more, against a node with no transform (history.md 30: six `!is_inside_tree()` per
-	# round in mg-deathrun), and recorded and sent them in this tick's snapshot after a
-	# client may already have been told they were gone.
+	# The list was taken before anything ran and a behaviour can change the world: a round
+	# re-laying its map unregisters entities that this walk would then simulate and send
+	# after clients were told they were gone (history.md 30).
 	var changed := false
 	for identity in identities:
 		if registry.get_identity(identity.net_id) != identity:
@@ -450,17 +400,9 @@ func client_tick(tick: int) -> void:
 	_perf_client_ticks += 1
 
 
-## One predicted tick for a host that records its own command and simulates it, which is
-## what a game with its own [code]client_tick[/code] does (game-arena's bridge): the snapshots
-## read since the last tick are reconciled first ([method flush_reconcile]), then every
-## predicted entity is handed [param input] and simulated for [param tick].
+## One predicted tick for a host that records its own command and simulates it: the snapshots read since the last tick are reconciled first ([method flush_reconcile]), then every predicted entity is handed [param input] and simulated for [param tick].
 ##
-## [b]Through the predictor, not around it.[/b] A host that looped over
-## [method DotNetRegistry.predicted] and called [code]_net_simulate[/code] itself predicted
-## the same thing, but the predictor never saw those ticks: with
-## [member DotNetConfig.skip_matching_replays] nothing they produced was remembered, so a
-## snapshot for any tick a replay had not covered could never match and replayed the whole
-## lead, and [method perf_counters] said the forward prediction cost nothing. (API 10.)
+## Through the predictor, not around it: otherwise [member DotNetConfig.skip_matching_replays] has nothing to match and [method perf_counters] reports no predict time. (API 10.)
 func predict_tick(tick: int, input: DotNetInput = null) -> void:
 	if not clock.is_synced():
 		return
@@ -480,16 +422,9 @@ func predict_tick(tick: int, input: DotNetInput = null) -> void:
 	_perf_client_ticks += 1
 
 
-## Running totals of what a client spends on the network side of a frame, for a
-## frame-time readout (DotMenuNetStat) or a benchmark to difference between two reads.
-## Totals rather than per-frame figures because the reader decides the window: a graph
-## wants the last second, a benchmark the whole run, and neither can be rebuilt from a
-## value that was overwritten every frame. Microseconds of wall-clock time:
-## [code]snapshot_usec[/code] reading and applying snapshots (the reconcile included when
-## it is not deferred), [code]reconcile_usec[/code] rewinding and replaying the predicted
-## entities, [code]replayed_ticks[/code] how many ticks those replays re-simulated (the
-## cost that grows with latency: the lead is a round trip of ticks), and
-## [code]predict_usec[/code] / [code]client_ticks[/code] the forward prediction.
+## Running totals of what a client spends on the network side of a frame, in wall-clock microseconds, for a readout or a benchmark to difference between two reads.
+##
+## [code]snapshot_usec[/code], [code]reconcile_usec[/code], [code]replayed_ticks[/code] (grows with latency), [code]predict_usec[/code], [code]client_ticks[/code].
 func perf_counters() -> Dictionary:
 	return {
 		&"snapshots": _perf_snapshots,
@@ -512,32 +447,9 @@ func perf_counters() -> Dictionary:
 	}
 
 
-
-
 ## Applies interpolation. Call from [method Node._process], not the tick loop.
 ##
-## Rendering runs at frame rate and simulation at tick rate; interpolating on the
-## tick would quantise remote motion to the tick rate and undo the point of it.
-##
-## [b]Which is what it did, because the tick asked for was a whole one.[/b]
-## [method DotNetClock.server_tick] returns an int and only moves inside
-## [method DotNetClock.advance], which a host calls from its physics loop — so every
-## frame in the same physics step sampled the same instant, and consecutive steps
-## sampled instants a whole tick apart. The interpolator did all its work correctly
-## between two snapshots and was then asked for the answer at a quantised time, so
-## remote players stepped at the tick rate no matter how smoothly they were
-## interpolated. Calling this once a frame was necessary and never sufficient.
-##
-## [param alpha] is how far this frame sits into the current tick. Left negative it is
-## [method DotNetClock.render_alpha]: the engine's fraction of the physics frame, plus what
-## is left of the last slip. That needs the host to advance the clock once per physics
-## frame [b]with the engine's physics rate equal to the tick rate[/b] (a client puts itself
-## on the server's rate when it learns it; see `G2GNetBridge._adopt_tick_rate`), and it
-## stays right while the clock drifts, where the engine's fraction alone did not: after a
-## physics frame that ran no tick the render time went back a tick, and after one that ran
-## two forward two (see render_alpha).
-##
-## A suite that steps by hand and wants the old behaviour passes 0.0.
+## [param alpha] is how far this frame sits into the current tick; left negative it is [method DotNetClock.render_alpha], which needs the engine's physics rate equal to the tick rate. Interpolating on the tick would quantise remote motion to the tick rate. A suite that steps by hand passes 0.0.
 func interpolate_frame(alpha: float = -1.0) -> void:
 	if is_server or interpolator == null or not clock.is_synced():
 		return
@@ -554,24 +466,14 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 	_last_frame_usec = now_usec
 	interpolator.advance(minf(elapsed, 0.25))
 
-	# The RECEIVE timeline, not the server's tick: an interpolation delay is counted back
-	# from the newest snapshot this client holds. Counted from the server's tick it lost
-	# the flight time out of the buffer -- see `DotNetClock.render_tick`.
-	# -1 to 2, not 0 to 1: the clock's render alpha carries a slip (a physics frame that ran
-	# no tick or two) for a moment, and the render time has to keep it or it steps a tick
-	# back or forward (see DotNetClock.render_alpha). The receive timeline moved with the
-	# same ticks the slip counts.
-	# And what the receive timeline moved by re-anchoring that the drawing has not followed
-	# yet (DotNetClock.receive_slip): a whole tick at once otherwise.
+	# The RECEIVE timeline, not the server's tick: the delay is counted back from the newest
+	# snapshot held. Alpha is -1 to 2 because it carries a slip (see DotNetClock.render_alpha)
+	# plus what re-anchoring moved that the drawing has not followed yet (receive_slip).
 	var server_tick_now := float(clock.received_tick()) + clampf(alpha, -1.0, 2.0) \
 		+ clock.receive_slip()
 
 	for identity in registry.all():
 		interpolator.apply(identity, server_tick_now)
-
-
-# --- Snapshots -------------------------------------------------------------
-
 
 
 ## Applies a snapshot payload. Client side.
@@ -615,12 +517,9 @@ func _receive_snapshot(payload: PackedByteArray) -> DotResult:
 		stats.note_snapshot(tick)
 
 	if tick < _receiving_tick:
-		# Older than one already read. Snapshots carry state, not events, so a late one
-		# is not merely out of order — it is superseded, and applying it would write a
-		# stale value over a newer one for every property the interpolator does not own.
-		# The clock is not fed from it either: an arrival time attached to an old tick
-		# reads as a sudden lead. A late PART of an older tick is superseded the same way;
-		# what it carried is re-sent, because the tick it belongs to is never acknowledged.
+		# Older than one already read: superseded, so applying it would overwrite newer state,
+		# and the clock is not fed from it (an old tick's arrival time reads as a sudden lead).
+		# A late part of an older tick is dropped the same way; its tick is re-sent unacknowledged.
 		return DotResult.success(_applied_snapshot_tick)
 
 	if tick == _receiving_tick and _applied_snapshot_tick == tick:
@@ -664,10 +563,8 @@ func _receive_snapshot(payload: PackedByteArray) -> DotResult:
 			stats.note_decode_failure()
 			return applied
 
-	# Which part this was, and whether it lists unchanged entities. Only a split snapshot, or
-	# one with an unchanged list, has anything after its entities (see [method _send_to_peer]):
-	# what is left of any other is under a byte of padding, a bare trailer is 8 bits more, and
-	# a tail is the mark, the runs and a trailer, at least UNCHANGED_TAIL_MIN_BITS.
+	# Which part this was, and whether it lists unchanged entities. Only a split snapshot or one
+	# with an unchanged list has anything after its entities (see [method _send_to_peer]).
 	var part := 0
 	var total := 1
 	if reader.bits_remaining() >= UNCHANGED_TAIL_MIN_BITS:
@@ -704,15 +601,9 @@ func _receive_snapshot(payload: PackedByteArray) -> DotResult:
 	_receiving_total = total
 	_receiving_mask |= 1 << part
 
-	# Only here, and deliberately not on any early return above, and only once every part
-	# of the tick is in. An acknowledgement tells the server it may stop re-sending
-	# everything in this snapshot, so it has to mean the whole snapshot was applied. The
-	# unknown-entity path abandons the rest of the packet — it cannot skip a
-	# variable-length body — and acknowledging that would strand every entity after it at
-	# a value this peer never received. A tick with a part missing is never acknowledged,
-	# so on the next acknowledgement the server re-sends what that part carried (and what
-	# the parts that did arrive carried: the ack is one tick, not a list, and the redundant
-	# re-send is the price of keeping it four bytes in every game's input packet).
+	# Only here, and not on any early return, and only once every part of the tick is in: an ack
+	# means the whole snapshot was applied. The unknown-entity path abandons the rest of the
+	# packet, and a tick with a part missing is never acknowledged, so the server re-sends it.
 	if _receiving_mask == (1 << total) - 1:
 		_applied_snapshot_tick = tick
 
@@ -720,11 +611,9 @@ func _receive_snapshot(payload: PackedByteArray) -> DotResult:
 	return DotResult.success(tick)
 
 
-## One entity of a snapshot, client side: its body read from [param reader], or, with a null
-## reader, an entity the snapshot listed as unchanged, applied exactly as an empty body would
-## be ([method DotNetBehaviour.apply_unchanged]). Either way the predictor or the interpolator
-## hears about it at this tick, which is what keeps a still entity's rewind and its
-## interpolation samples the same whether the server wrote it out or listed it.
+## One entity of a snapshot, client side: its body read from [param reader], or, with a null reader, an entity listed as unchanged and applied as an empty body would be ([method DotNetBehaviour.apply_unchanged]).
+##
+## Either way the predictor or interpolator hears of it at this tick, so a still entity's rewind and interpolation samples match.
 func _apply_entity(
 	identity: DotNetIdentity, tick: int, reader: DotNetReader, behaviour_count: int
 ) -> DotResult:
@@ -741,20 +630,8 @@ func _apply_entity(
 
 		var behaviour := identity.behaviours[b]
 
-		# A predicted entity's state goes to reconciliation rather than being
-		# applied: applying it directly would undo everything predicted since.
-		#
-		# [b]And what goes is the server's whole state, not the properties.[/b] A
-		# snapshot carries only what changed, and on the owning client the properties
-		# hold its own prediction between snapshots — so reading them back here, which
-		# is what this did, made "the server has nothing new to say" into "the server
-		# agrees with you", and the replay then ran the lead a second time on top of
-		# it. A client the server held still — a server-only freeze, a wall only the
-		# server has, any refusal that changes nothing replicated — walked away at
-		# twice its speed and was never pulled back: 113 units in game-hungario's
-		# naive admin control, 530 in the lobby's. `rewind` puts what the snapshot
-		# left out back to what the server last sent, before the game's
-		# `_net_state_applied` copies the properties into its simulation.
+		# A predicted entity's state goes to reconciliation rather than being applied: applying it would
+		# undo everything predicted since.
 		if identity.is_predicted():
 			# Deferred, the prediction stays in the properties until the flush: reading
 			# writes the server's (older) state into them, and anything drawn or ticked
@@ -782,17 +659,9 @@ func _apply_entity(
 			if not applied2.ok:
 				return applied2
 
-			# [b]What the server last SENT, not what the property holds.[/b] Between
-			# snapshots an interpolated property holds the interpolator's own output —
-			# `apply` writes the blend into it every frame — so reading it back here
-			# handed the interpolator its own half-way value as the server's word for
-			# every property this snapshot did not carry. Anything interpolated that
-			# changed once and then stood still froze part of the way there: a remote
-			# player who turned to 90 degrees was drawn at 82.5 for ever, and one who
-			# stopped was drawn short of where they stopped. The same shape as #17 on
-			# the other path. It hid while the render delay was in the wrong unit
-			# (#18), because a render time past the newest snapshot answers with the
-			# newest values and never a blend.
+			# What the server last SENT, not what the property holds: an interpolated property
+			# holds the interpolator's own blend, which would be handed back as the server's word
+			# and freeze the entity part of the way (history.md #17, #18).
 			var received := behaviour.received_values()
 			for declaration in behaviour.net_vars:
 				if declaration.interpolate and received.has(declaration.property):
@@ -816,10 +685,7 @@ func _apply_entity(
 	return DotResult.success(tick)
 
 
-## The unchanged list in a snapshot part's tail (see [method _write_unchanged_tail]): every id
-## in it applied as an entity whose body was empty. An id this client does not hold is
-## skipped, which, unlike a body, it can be: there is nothing to step over. Leaves the reader
-## at the part trailer.
+## The unchanged list in a snapshot part's tail (see [method _write_unchanged_tail]): every id in it applied as an entity with an empty body. An id this client does not hold is skipped; there is nothing to step over. Leaves the reader at the part trailer.
 func _apply_unchanged_tail(reader: DotNetReader, tick: int) -> DotResult:
 	var mark := reader.read_uint(8)
 	if not reader.ok() or mark != UNCHANGED_TAIL_MARK:
@@ -855,57 +721,25 @@ func _apply_unchanged_tail(reader: DotNetReader, tick: int) -> DotResult:
 	return DotResult.success(ids.size())
 
 
-# --- Acknowledgements ------------------------------------------------------
-
 ## The newest snapshot tick this client has applied in full. Client side.
 ##
-## Zero until one has been. Send it to the server — see [method encode_ack] — and
-## hand it to [method receive_ack] there.
+## Zero until one has been. Send it with [method encode_ack]; hand it to [method receive_ack] there.
 func ack_tick() -> int:
 	return _applied_snapshot_tick
 
 
 ## The current acknowledgement as a payload. Client side.
 ##
-## [b]This addon does not send it for you[/b], for the same reason it does not send
-## inputs: it owns no client-to-server channel, and inventing one would either need a
-## second socket or make every payload ambiguous with a message. A host already ships
-## an input packet every tick, and the cheapest place for four bytes is inside it.
-##
-## [codeblock]
-## # client, once per tick, alongside the inputs it already sends
-## socket.send(my_input_packet + net.encode_ack())
-##
-## # server, on receipt
-## net.receive_ack_payload(peer_id, ack_bytes)
-## [/codeblock]
-##
-## Wiring it is optional and additive. Without it the server assumes an unconfirmed
-## snapshot arrived once it ages out, which is what it did before this existed; with
-## it, a property lost to a dropped packet is re-sent instead of being stranded at a
-## stale value until it happens to change again. See [method receive_ack].
+## Not sent for you: this addon owns no client-to-server channel, so append it to the input packet you already send (four bytes) and give it to [method receive_ack_payload] on the server. Optional; without it an unconfirmed snapshot is assumed to have arrived once it ages out, and a dropped property is stranded until it changes. See [method receive_ack].
 func encode_ack() -> PackedByteArray:
 	var writer := DotNetWriter.new()
 	writer.write_uint(_applied_snapshot_tick, 32)
 	return writer.to_bytes()
 
 
-## Records that a peer has applied every snapshot up to [param tick]. Server side.
-##
-## [b]What this buys.[/b] Snapshots go out unreliably and carry only what changed.
-## Without acknowledgements the server has to assume every one arrived, so a property
-## written into a packet that was dropped is never sent again — it stays at whatever
-## the client last received until it happens to change. For a position that moves
-## every tick nothing is visible; for health, a team, a weapon or a name, the client
-## is simply wrong, indefinitely. With acknowledgements the server knows which sends
-## landed, and re-sends the rest in the next snapshot it was sending anyway.
-##
-## [b][param tick] is untrusted.[/b] It comes from a client, and one naming a tick
-## the server has not built yet would confirm state that was never sent — which
-## costs that client its own updates, but is still a claim the server should not
-## take. It is refused past [member _last_snapshot_tick], and going backwards is
-## ignored rather than refused, because reordering makes a stale acknowledgement
-## ordinary rather than hostile.
+## Records that a peer has applied every snapshot up to [param tick]. Server side. Snapshots are
+## unreliable and carry only what changed; acknowledgements let the server re-send what a dropped
+## packet lost.
 func receive_ack(peer_id: int, tick: int) -> DotResult:
 	if not is_server:
 		return DotResult.fail(
@@ -963,7 +797,6 @@ func peer_acks_wired(peer_id: int) -> bool:
 	return bool(_ack_wired.get(peer_id, false))
 
 
-
 func _reconcile(identity: DotNetIdentity, tick: int, values: Dictionary) -> void:
 	var started := Time.get_ticks_usec()
 	predictor.reconcile(
@@ -976,10 +809,7 @@ func _reconcile(identity: DotNetIdentity, tick: int, values: Dictionary) -> void
 	_perf_replayed_ticks += predictor._last_replay_ticks
 
 
-## Reconciles every predicted entity against the newest snapshot read for it since the
-## last flush. Nothing to do unless [member DotNetConfig.reconcile_once_per_frame] is on;
-## [method client_tick] and [method interpolate_frame] call it, so a host only does when it
-## predicts without either and must see the correction first.
+## Reconciles every predicted entity against the newest snapshot read for it since the last flush. Needed only with [member DotNetConfig.reconcile_once_per_frame]; [method client_tick] and [method interpolate_frame] call it.
 func flush_reconcile() -> void:
 	if _pending_reconcile.is_empty():
 		return
@@ -1004,8 +834,6 @@ func _forget_entity(net_id: int) -> void:
 		history.forget(net_id)
 
 
-# --- Messages --------------------------------------------------------------
-
 ## Sends a message to a peer, or to everyone when [param peer_id] is 0.
 func send(message: DotNetMessage, peer_id: int = 0) -> DotResult:
 	if not send_fn.is_valid():
@@ -1028,8 +856,7 @@ func send(message: DotNetMessage, peer_id: int = 0) -> DotResult:
 
 ## Decodes and dispatches an incoming message payload.
 ##
-## Rate-limited per peer on the server: every client-to-server message costs work,
-## and a client sending thousands a second is broken or hostile.
+## Rate-limited per peer on the server: every client message costs work.
 func receive(payload: PackedByteArray, from_peer_id: int) -> DotResult:
 	stats.note_received(payload.size())
 
@@ -1071,8 +898,6 @@ func receive(payload: PackedByteArray, from_peer_id: int) -> DotResult:
 	messages.dispatch(decoded.value)
 	return DotResult.success(true)
 
-
-# --- Reporting -------------------------------------------------------------
 
 func describe() -> Dictionary:
 	var d := {

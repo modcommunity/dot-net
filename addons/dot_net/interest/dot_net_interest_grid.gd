@@ -3,20 +3,7 @@ class_name DotNetInterestGrid
 extends DotNetInterest
 
 ## Spatial-hash interest, for worlds with too many entities to scan per observer.
-##
-## [DotNetInterestDistance] is O(observers × entities). At 100 players and 5000
-## entities that is half a million distance checks per evaluation. This bins entities
-## into cells once per snapshot and each observer only visits the cells its radius
-## touches — O(entities + observers × cells).
-##
-## [b]Cell size is the whole tuning story.[/b] Too small and an observer visits many
-## cells and the rebuild dominates; too large and each cell returns far more entities
-## than are actually in range. A cell roughly equal to the radius means an observer
-## touches nine cells in 2D or so, which is the sweet spot.
-##
-## [b]Rebuilt every evaluation, not maintained incrementally.[/b] Entities move every
-## tick, so an incremental index would be updating most of itself anyway, and a full
-## rebuild is a linear pass with no bookkeeping to get wrong.
+## [DotNetInterestDistance] is O(observers × entities).
 
 ## Cell edge length in metres.
 @export var cell_size: float = 128.0
@@ -27,10 +14,8 @@ extends DotNetInterest
 ## Entities with any of these tags are always replicated.
 @export var always_tags: PackedStringArray = PackedStringArray()
 
-## Bin on the horizontal plane only.
-##
-## Right for almost every game: worlds are much wider than they are tall, and a third
-## axis multiplies the cell count for a dimension that rarely separates anything.
+## Bin on the horizontal plane only. Right for almost every game: worlds are much wider than they are
+## tall, and a third axis multiplies the cell count for a dimension that rarely separates anything.
 @export var ignore_vertical: bool = true
 
 ## cell key -> Array[DotNetIdentity]
@@ -138,11 +123,8 @@ func _cell_key(position: Vector3) -> int:
 	)
 
 
-## Packs three cell coordinates into one integer key.
-##
-## Dictionary lookups on an int are much cheaper than on a Vector3i or a string, and
-## this runs once per entity per rebuild. 21 bits per axis covers ±1,048,576 cells,
-## which at a 128 m cell is a world far larger than anything that would fit in memory.
+## Packs three cell coordinates into one integer key. Dictionary lookups on an int are much cheaper
+## than on a Vector3i or a string, and this runs once per entity per rebuild.
 static func _key(x: int, y: int, z: int) -> int:
 	return ((x & 0x1FFFFF) << 42) | ((y & 0x1FFFFF) << 21) | (z & 0x1FFFFF)
 

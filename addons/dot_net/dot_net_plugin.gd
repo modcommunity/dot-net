@@ -1,11 +1,9 @@
 @tool
 extends EditorPlugin
 
-## Editor entry point for dot-net. Registers inspector types only.
-##
-## No autoloads: a project may run a server and a client in one process, and a
-## singleton would make that impossible — which is exactly the configuration the
-## netcode demo uses to test itself.
+## Editor entry point for dot-net. Registers inspector types only. No autoloads: a project may run a
+## server and a client in one process, and a singleton would make that impossible — which is exactly
+## the configuration the netcode demo uses to test itself.
 
 const _ICON := "res://addons/dot_net/icon_placeholder.svg"
 

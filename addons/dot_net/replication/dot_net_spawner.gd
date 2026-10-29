@@ -2,24 +2,8 @@
 class_name DotNetSpawner
 extends Node
 
-## Creates networked entities from a prefab table, on every peer.
-##
-## [b]The prefab table is an allow-list, and that is the point.[/b] A spawn message
-## names a prefab id, never a scene path. A client that could name a path could ask
-## every other client to load any scene in the build — including editor tooling and
-## anything with an [code]_init[/code] that does something. Ids are looked up in a
-## table the game registers at startup, and an unknown id is refused.
-##
-## [codeblock]
-## spawner.register_prefab(&"player", preload("res://game/player.tscn"))
-## spawner.register_prefab(&"rocket", preload("res://game/rocket.tscn"))
-##
-## # Server only:
-## var res := spawner.spawn(&"player", peer_id, Transform3D(Basis(), spawn_point))
-## [/codeblock]
-##
-## Custom construction — object pooling, per-prefab setup, entities that are not
-## scenes at all — goes through [method register_factory] instead.
+## Creates networked entities from a prefab table, on every peer. [b]The prefab table is an allow-list,
+## and that is the point.[/b] A spawn message names a prefab id, never a scene path.
 
 const CHANNEL := "net.spawn"
 
@@ -31,24 +15,17 @@ signal despawned(net_id: int)
 
 @export_group("Wiring")
 
-## Where spawned entities are added. Defaults to a child of this node.
-##
-## Point it at the game's own container so networked entities land where the game
-## expects them rather than under an addon node.
+## Where spawned entities are added. Defaults to a child of this node. Point it at the game's own
+## container so networked entities land where the game expects them rather than under an addon node.
 @export var container_ref: DotNodeRef = null
 
-## Free the node when an entity despawns.
-##
-## Off lets a game keep the node — for a death animation, a ragdoll, a pooled
-## instance. The entity leaves the network either way.
+## Free the node when an entity despawns. Off lets a game keep the node — for a death animation, a
+## ragdoll, a pooled instance.
 @export var free_on_despawn: bool = true
 
 @export_group("Prefabs")
 
 ## Prefabs declared in the inspector, as [code]id -> PackedScene[/code].
-##
-## Equivalent to calling [method register_prefab] for each. Convenient for a fixed
-## set; a game with prefabs from downloaded content registers them in code.
 @export var prefabs: Dictionary = {}
 
 var registry: DotNetRegistry = null
@@ -82,12 +59,8 @@ func _ready() -> void:
 			)
 			continue
 
-		# register_prefab's contract is that a prefab with no identity is a
-		# startup error rather than a spawn that silently produces a
-		# non-networked object. Discarding the result here made that guarantee
-		# hold only for games that register in code: the inspector path failed
-		# silently and the id was simply absent, which surfaces much later, on
-		# the first spawn, as "unknown prefab".
+		# register_prefab's contract is that a prefab with no identity is a startup error rather than a
+		# spawn that silently produces a non-networked object.
 		var registered := register_prefab(StringName(str(id)), scene as PackedScene)
 		if not registered.ok:
 			DotLog.error(
@@ -102,13 +75,9 @@ func setup(p_registry: DotNetRegistry, p_config: DotNetConfig) -> void:
 	config = p_config
 
 
-# --- Prefab table ----------------------------------------------------------
-
-## Adds a prefab.
-##
-## The scene must contain a [DotNetIdentity] somewhere in it; that is checked at
-## registration rather than at spawn time, so a mistake is a startup error rather
-## than a spawn that silently produces a non-networked object.
+## Adds a prefab. The scene must contain a [DotNetIdentity] somewhere in it; that is checked at
+## registration rather than at spawn time, so a mistake is a startup error rather than a spawn that
+## silently produces a non-networked object.
 func register_prefab(id: StringName, scene: PackedScene) -> DotResult:
 	if id == &"":
 		return DotResult.fail(DotError.CODE_INVALID, "A prefab needs an id.")
@@ -137,10 +106,9 @@ func register_prefab(id: StringName, scene: PackedScene) -> DotResult:
 	return DotResult.success(id)
 
 
-## Checks a packed scene for a [DotNetIdentity] without instantiating it.
-##
-## Reading the scene state rather than instantiating avoids paying for every prefab
-## at startup, which matters when there are hundreds.
+## Checks a packed scene for a [DotNetIdentity] without instantiating it. Reading the scene state
+## rather than instantiating avoids paying for every prefab at startup, which matters when there are
+## hundreds.
 static func _state_has_identity(state: SceneState) -> bool:
 	for i in range(state.get_node_count()):
 		var type := state.get_node_type(i)
@@ -160,11 +128,7 @@ static func _state_has_identity(state: SceneState) -> bool:
 	return false
 
 
-## Registers a factory instead of a scene.
-##
-## Signature: [code]func(context: Dictionary) -> Node[/code]. The returned node must
-## contain a [DotNetIdentity]. For pooling, for procedural entities, and for anything
-## whose construction needs arguments.
+## Registers a factory instead of a scene. Signature: [code]func(context: Dictionary) -> Node[/code].
 func register_factory(id: StringName, factory: Callable) -> DotResult:
 	if _prefabs.has(id) or _factories.has(id):
 		return DotResult.fail(
@@ -191,12 +155,8 @@ func prefab_ids() -> PackedStringArray:
 	return out
 
 
-# --- Spawning --------------------------------------------------------------
-
-## Creates an entity and registers it. Authority only.
-##
-## [param context] is passed to a factory and is otherwise ignored, so a game can
-## thread construction arguments through without a side channel.
+## Creates an entity and registers it. Authority only. [param context] is passed to a factory and is
+## otherwise ignored, so a game can thread construction arguments through without a side channel.
 func spawn(
 	prefab_id: StringName,
 	owner_peer_id: int,
@@ -217,10 +177,8 @@ func spawn(
 	return _instantiate(prefab_id, 0, owner_peer_id, transform, tick, context)
 
 
-## Creates an entity the authority told us about. Clients only.
-##
-## The id comes from the server and is used as given. A client that allocated its own
-## would collide the moment the server spawned anything.
+## Creates an entity the authority told us about. Clients only. The id comes from the server and is
+## used as given.
 func spawn_remote(
 	prefab_id: StringName,
 	net_id: int,
@@ -293,17 +251,8 @@ func _instantiate(
 			DotError.CODE_STATE, "The spawner has no container node."
 		)
 
-	# A factory is allowed to hand back a node it already owns — that is what
-	# pooling is, and what free_on_despawn exists to make possible. So the node
-	# may arrive already parented: to the container, if the spawner parked it
-	# there on the last despawn, or to the game's own pool node, which is where
-	# an idle instance actually belongs.
-	#
-	# add_child() on a parented node does not fail the call. It pushes an engine
-	# error and returns, leaving the entity registered, live, and still under the
-	# pool — outside the container the spawner promises to put it in, with
-	# _apply_transform below then setting a global transform through the wrong
-	# parent. Nothing in the returned DotResult says any of that happened.
+	# A factory is allowed to hand back a node it already owns — that is what pooling is, and what
+	# free_on_despawn exists to make possible.
 	var previous := node.get_parent()
 	if previous == null:
 		_container.add_child(node)
