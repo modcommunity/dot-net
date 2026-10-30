@@ -122,7 +122,17 @@ var history: DotNetHistory = null
 ## How a payload reaches a peer: [code]func(peer_id: int, payload: PackedByteArray, delivery: DotNetMessage.Delivery)[/code].
 ## A peer id of 0 means broadcast. Set by the host; without it the manager simulates but sends
 ## nothing, which is what a single-player or replay session wants.
-var send_fn: Callable = Callable()
+var send_fn: Callable = Callable():
+	get:
+		return _send_fn if not latency.delaying() else _delayed_send
+	set(value):
+		if value != _delayed_send:
+			_send_fn = value
+
+## Artificial client latency (`cl_latency_baseline`), both directions. Idle unless [member DotNetLatency.requested] is set.
+var latency := DotNetLatency.new()
+
+var _send_fn: Callable = Callable()
 
 ## peer_id -> DotNetInput.Buffer, on the server.
 var _input_buffers: Dictionary = {}
@@ -262,3 +272,8 @@ func _observer_for(peer_id: int) -> DotNetIdentity:
 	var owned := registry.owned_by(peer_id)
 	return owned[0] if not owned.is_empty() else null
 
+
+func _delayed_send(peer_id: int, payload: PackedByteArray, delivery: DotNetMessage.Delivery) -> void:
+	latency.hold(func() -> void:
+		if _send_fn.is_valid():
+			_send_fn.call(peer_id, payload, delivery))

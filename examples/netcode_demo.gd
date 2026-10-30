@@ -1,4 +1,4 @@
-extends "selftest/netcode_sections_7.gd"
+extends "selftest/netcode_sections_8.gd"
 
 ## Runs a server and a client in one process over a loopback that can delay, reorder and drop packets, and checks the netcode works.
 ##
@@ -6,7 +6,7 @@ extends "selftest/netcode_sections_7.gd"
 
 
 ## Every check this suite makes, the last one included. The section counter cannot see a check that never ran inside a section that had announced itself, so the total is compared with this. Raise it with every check added.
-const CHECKS := 522
+const CHECKS := 538
 
 
 func _ready() -> void:
@@ -63,6 +63,7 @@ func _run() -> void:
 	await _test_dropped_time_live()
 	await _test_integration()
 	_test_late_mirror_observer_vars()
+	_test_latency_baseline()
 
 	print("")
 	_check(

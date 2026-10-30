@@ -32,6 +32,10 @@ Recent checks are **armed**: the section states what it measured with the fix re
 
 `addons/dot_net/testing/dot_net_udp_relay.gd` listens on a port, forwards every client it hears to a target, and drops, delays (`delay_ms` ± `jitter_ms`, so a spread wider than the gap between packets reorders them as a real path does), holds back (`reorder`, `reorder_ms`) and duplicates each datagram, each direction on its own seeded generator. It runs on its own thread so a hitch in the game being measured is not a burst in the network measuring it (`threaded = false` and `poll()` to step it by hand). No `class_name`: it ships inside the addon so a game linking `dot_net` can preload it by path, and a test tool should not reserve a global name in every project. The kernel's queueing discipline would do the same but needs root; ENet's own simulated loss is an engine compile flag. game-arena's `headless_lossy` uses it on a real game.
 
+## Artificial client latency
+
+`DotNetManager.latency` (`DotNetLatency`) holds a client's packets for `cl_latency_baseline` seconds on top of the real latency, to test lag: outgoing through `send_fn` (the manager hands the host a wrapper while it is on, so the host's own `send_fn` is untouched) and incoming through `receive` and `receive_snapshot`; the held queue is drained from `step()`. At 0 nothing is wrapped or queued, one float compare per packet. The server's `sv_allow_client_latency` (default 1) at 0 forces the effective value to 0 and releases whatever is held, in order; the client's own request is kept. The host registers the cvars (dot-net has no console): `latency.bind_client_cvar(add)` on a client, `latency.bind_server_cvar(add, replicate_flag)` on a server, `latency.follow_cvars(link)` on a client so the server's switch arrives through `replicated_cvar`. Not yet wired into dot-game's client or any game; `netcode_demo` section `[client latency baseline]` covers the behaviour. It delays what the manager sees, not the transport: a game's own raw channel traffic is untouched.
+
 ## GDScript traps
 
 The family's are in [gdscript-hazards.md](../../../docs/gdscript-hazards.md). Two hit here:

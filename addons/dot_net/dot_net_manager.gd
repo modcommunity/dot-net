@@ -281,6 +281,9 @@ func _physics_process(delta: float) -> void:
 
 ## Advances by a frame's worth of time, running as many ticks as are due.
 func step(delta: float) -> void:
+	if latency.busy():
+		latency.advance(delta)
+
 	var ticks := clock.advance(delta)
 
 	for _i in range(ticks):
@@ -478,6 +481,13 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 
 ## Applies a snapshot payload. Client side.
 func receive_snapshot(payload: PackedByteArray) -> DotResult:
+	if latency.delaying():
+		latency.hold(_apply_snapshot.bind(payload))
+		return DotResult.success(true)
+	return _apply_snapshot(payload)
+
+
+func _apply_snapshot(payload: PackedByteArray) -> DotResult:
 	var started := Time.get_ticks_usec()
 	var result := _receive_snapshot(payload)
 	if result.ok:
@@ -860,6 +870,13 @@ func send(message: DotNetMessage, peer_id: int = 0) -> DotResult:
 ##
 ## Rate-limited per peer on the server: every client message costs work.
 func receive(payload: PackedByteArray, from_peer_id: int) -> DotResult:
+	if latency.delaying():
+		latency.hold(_receive_now.bind(payload, from_peer_id))
+		return DotResult.success(true)
+	return _receive_now(payload, from_peer_id)
+
+
+func _receive_now(payload: PackedByteArray, from_peer_id: int) -> DotResult:
 	stats.note_received(payload.size())
 
 	if is_server:
