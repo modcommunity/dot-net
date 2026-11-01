@@ -67,7 +67,13 @@ extends DotConfig
 
 ## Longest extrapolation when snapshots stop arriving, in seconds. Extrapolation is guessing, and it is
 ## wrong in a way that produces rubber-banding when it is corrected.
-@export_range(0.0, 1.0, 0.05) var max_extrapolation_sec: float = 0.2
+@export_range(0.0, 1.0, 0.05) var max_extrapolation_sec: float = 0.25
+
+## Time constant, in seconds, of the ease out of an extrapolation when the stream resumes (a snapshot burst after a stalled TCP segment). 0.06 is the old, near-instant ease.
+@export_range(0.01, 1.0, 0.01) var resume_ease_sec: float = 0.12
+
+## A jump out of an extrapolation larger than this, in metres, is a teleport and is drawn at once. 1.5 is the old limit.
+@export_range(0.0, 50.0, 0.1) var resume_ease_max: float = 6.0
 
 @export_group("Prediction")
 
@@ -105,6 +111,12 @@ extends DotConfig
 ## was wrong about something structural — a collision the client missed, a teleport, a respawn — and
 ## smoothing across it drags the entity through geometry.
 @export_range(0.1, 100.0, 0.1) var reconcile_snap_distance: float = 2.0
+
+## A correction between [member reconcile_snap_distance] and [member reconcile_large_snap_distance] is eased over this many seconds instead of snapped (a late burst after a stalled TCP segment mispredicts by metres). 0 snaps above the snap distance as before.
+@export_range(0.0, 2.0, 0.01) var reconcile_large_ease_sec: float = 0.4
+
+## Error beyond which even [member reconcile_large_ease_sec] snaps, in metres.
+@export_range(0.1, 100.0, 0.1) var reconcile_large_snap_distance: float = 5.0
 
 ## Longest a client carries a remote entity along its replicated velocity when predicting against it,
 ## in seconds ([method DotNetBehaviour.extrapolated_value]). 0, the default, predicts against where it

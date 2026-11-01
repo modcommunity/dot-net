@@ -105,14 +105,6 @@ const GROW_RATE := 0.2
 ## a host drives frames, which leaves the easing off.
 var _frame_elapsed: float = 0.0
 
-## How long a jump out of an extrapolation takes to ease away, in seconds (an exponential time constant).
-##
-## Without it a resumed stream snaps to wherever the next snapshot says.
-const RESUME_EASE_SEC := 0.06
-
-## A jump larger than this, in metres, is a teleport and is drawn at once.
-const RESUME_EASE_MAX := 1.5
-
 ## Whether [method advance] has ever been called. Until a host drives the buffer per
 ## frame it follows its target at once, as it always did, so a host that samples by hand
 ## and never calls [method advance] is not left on the initial buffer for ever.
@@ -556,7 +548,7 @@ func _ease_resume(track: Track, values: Dictionary, render_tick: float) -> Dicti
 			if (now is Vector3 and then is Vector3) or (now is Vector2 and then is Vector2):
 				var jump: Variant = then - now
 				var total: Variant = track.offsets.get(property, now * 0.0) + jump
-				if total.length() <= RESUME_EASE_MAX:
+				if total.length() <= config.resume_ease_max:
 					track.offsets[property] = total
 				else:
 					track.offsets.erase(property)
@@ -569,7 +561,7 @@ func _ease_resume(track: Track, values: Dictionary, render_tick: float) -> Dicti
 	if track.offsets.is_empty():
 		return values
 
-	var keep := exp(-_frame_elapsed / RESUME_EASE_SEC)
+	var keep := exp(-_frame_elapsed / config.resume_ease_sec)
 	var out := values.duplicate()
 	for property in track.offsets.keys():
 		var offset: Variant = track.offsets[property] * keep

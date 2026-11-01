@@ -17,6 +17,7 @@ var _corrections: Dictionary = {}
 var _replays: int = 0
 var _corrections_applied: int = 0
 var _snaps: int = 0
+var _worst_snap: float = 0.0
 var _last_replay_ticks: int = 0
 var _worst_error: float = 0.0
 var _skipped: int = 0
@@ -265,6 +266,20 @@ func reconcile(
 	return DotResult.success(replayed)
 
 
+## The error above which a correction snaps: the large limit while large errors are eased.
+func _snap_limit() -> float:
+	if config.reconcile_large_ease_sec > 0.0:
+		return maxf(config.reconcile_snap_distance, config.reconcile_large_snap_distance)
+	return config.reconcile_snap_distance
+
+
+## Seconds to ease an offset of [param size] metres: the long ease only above the old snap distance.
+func _ease_sec(size: float) -> float:
+	if size > config.reconcile_snap_distance and config.reconcile_large_ease_sec > 0.0:
+		return config.reconcile_large_ease_sec
+	return config.reconcile_smooth_sec
+
+
 ## Records the offset to ease out, or snaps when it is too large.
 func _begin_correction(
 	identity: DotNetIdentity,
@@ -272,11 +287,13 @@ func _begin_correction(
 	after: Dictionary,
 	error: float
 ) -> void:
-	if error > config.reconcile_snap_distance:
+	var limit := _snap_limit()
+	if error > limit:
 		# Too far to hide. A correction this size means the prediction was wrong
 		# about something structural — a teleport, a respawn, a collision the client
 		# never saw — and easing across it drags the entity through geometry.
 		_snaps += 1
+		_worst_snap = maxf(_worst_snap, error)
 		_corrections.erase(identity.net_id)
 
 		DotLog.debug(
@@ -294,7 +311,7 @@ func _begin_correction(
 	# whatever was left of it, which is the very jump this exists to hide.
 	var offset := visual_offset(identity.net_id) + (position_before - position_after)
 
-	if offset.length() > config.reconcile_snap_distance:
+	if offset.length() > limit:
 		_corrections.erase(identity.net_id)
 		return
 
@@ -304,6 +321,7 @@ func _begin_correction(
 		# stays authoritative while the visuals catch up.
 		"offset": offset,
 		"at_ms": Time.get_ticks_msec(),
+		"sec": _ease_sec(offset.length()),
 	}
 
 
@@ -316,11 +334,12 @@ func visual_offset(net_id: int) -> Vector3:
 	var correction: Dictionary = _corrections[net_id]
 	var elapsed := float(Time.get_ticks_msec() - int(correction["at_ms"])) / 1000.0
 
-	if config.reconcile_smooth_sec <= 0.0 or elapsed >= config.reconcile_smooth_sec:
+	var sec: float = correction.get("sec", config.reconcile_smooth_sec)
+	if sec <= 0.0 or elapsed >= sec:
 		_corrections.erase(net_id)
 		return Vector3.ZERO
 
-	var remaining := 1.0 - (elapsed / config.reconcile_smooth_sec)
+	var remaining := 1.0 - (elapsed / sec)
 
 	# Eased rather than linear: a linear decay has a visible corner at the end,
 	# where the correction stops moving all at once.
@@ -379,6 +398,7 @@ func describe() -> Dictionary:
 		"last_replay_ticks": _last_replay_ticks,
 		"corrections": _corrections_applied,
 		"snaps": _snaps,
+		"worst_snap": "%.2f m" % _worst_snap,
 		"correction_rate": "%.1f%%" % (correction_rate() * 100.0),
 		"worst_error": "%.3f m" % _worst_error,
 		"pending": _corrections.size(),
