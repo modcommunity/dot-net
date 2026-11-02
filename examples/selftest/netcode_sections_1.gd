@@ -4,60 +4,7 @@ extends "netcode_tests.gd"
 
 
 
-func _test_messages() -> void:
-	print("")
-	print("[messages]")
-
-	var registry := DotNetMessageRegistry.new()
-
-	_check(
-		"register",
-		registry.register(&"demo.chat", ChatMessage).ok
-	)
-	_check(
-		"register second",
-		registry.register(
-			&"demo.notice", ServerNotice,
-			DotNetMessage.Delivery.RELIABLE,
-			DotNetMessage.Direction.TO_CLIENT
-		).ok
-	)
-	_check(
-		"duplicate refused",
-		not registry.register(&"demo.chat", ChatMessage).ok
-	)
-
-	registry.seal()
-	_check("sealed", registry.is_sealed())
-	_check(
-		"register after seal refused",
-		not registry.register(&"demo.late", ChatMessage).ok
-	)
-
-	# Ids come from sorted names, so two peers agree without negotiating.
-	var other := DotNetMessageRegistry.new()
-	other.register(&"demo.notice", ServerNotice, DotNetMessage.Delivery.RELIABLE,
-		DotNetMessage.Direction.TO_CLIENT)
-	other.register(&"demo.chat", ChatMessage)
-	other.seal()
-
-	_check(
-		"ids agree regardless of registration order",
-		registry.id_of(&"demo.chat") == other.id_of(&"demo.chat")
-	)
-	_check(
-		"schema hashes match",
-		registry.schema_hash() == other.schema_hash()
-	)
-
-	var third := DotNetMessageRegistry.new()
-	third.register(&"demo.chat", ChatMessage)
-	third.seal()
-	_check(
-		"different schema hashes differ",
-		registry.schema_hash() != third.schema_hash()
-	)
-
+func _messages_round_trip(registry: DotNetMessageRegistry) -> void:
 	# Round trip.
 	var message := ChatMessage.new()
 	message.text = "hello from the client"
@@ -132,6 +79,193 @@ func _test_messages() -> void:
 	_check("dispatched to the handler", received.size() == 1)
 
 
+func _test_messages() -> void:
+	print("")
+	print("[messages]")
+
+	var registry := DotNetMessageRegistry.new()
+
+	_check(
+		"register",
+		registry.register(&"demo.chat", ChatMessage).ok
+	)
+	_check(
+		"register second",
+		registry.register(
+			&"demo.notice", ServerNotice,
+			DotNetMessage.Delivery.RELIABLE,
+			DotNetMessage.Direction.TO_CLIENT
+		).ok
+	)
+	_check(
+		"duplicate refused",
+		not registry.register(&"demo.chat", ChatMessage).ok
+	)
+
+	registry.seal()
+	_check("sealed", registry.is_sealed())
+	_check(
+		"register after seal refused",
+		not registry.register(&"demo.late", ChatMessage).ok
+	)
+
+	# Ids come from sorted names, so two peers agree without negotiating.
+	var other := DotNetMessageRegistry.new()
+	other.register(&"demo.notice", ServerNotice, DotNetMessage.Delivery.RELIABLE,
+		DotNetMessage.Direction.TO_CLIENT)
+	other.register(&"demo.chat", ChatMessage)
+	other.seal()
+
+	_check(
+		"ids agree regardless of registration order",
+		registry.id_of(&"demo.chat") == other.id_of(&"demo.chat")
+	)
+	_check(
+		"schema hashes match",
+		registry.schema_hash() == other.schema_hash()
+	)
+
+	var third := DotNetMessageRegistry.new()
+	third.register(&"demo.chat", ChatMessage)
+	third.seal()
+	_check(
+		"different schema hashes differ",
+		registry.schema_hash() != third.schema_hash()
+	)
+
+	_messages_round_trip(registry)
+
+
+func _mismatched_required(old: DotNetMessageRegistry) -> void:
+	# A REQUIRED type one end lacks. The old client meets a server that requires
+	# demo.vital, in both of the places the check runs.
+	var strict := DotNetMessageRegistry.new()
+	strict.register(&"demo.chat", ChatMessageV2)
+	strict.register(&"demo.vital", VitalMessage)
+	strict.seal()
+
+	_check(
+		"a REQUIRED type changes the schema hash",
+		strict.schema_hash() != old.schema_hash()
+	)
+
+	var refusals: Array = []
+	strict.peer_refused.connect(func(peer: int, err: DotError) -> void: refusals.append([peer, err]))
+
+	var at_server := strict.adopt_peer_schema(5, _schema_body(old.schema_payload()), true)
+	_check(
+		"the server refuses a client missing a type it requires",
+		not at_server.ok and at_server.code() == DotError.CODE_VERSION
+	)
+	_check(
+		"with a sentence a player can act on (%s)" % (at_server.error.message if not at_server.ok else ""),
+		not at_server.ok and at_server.error.message == "This server's game needs a newer game client."
+	)
+	_check(
+		"and the type named where an operator reads it",
+		not at_server.ok and at_server.error.detail.contains("demo.vital")
+	)
+	_check("it says so on its signal", refusals.size() == 1 and int(refusals[0][0]) == 5)
+
+	var at_client := old.adopt_peer_schema(1, _schema_body(strict.schema_payload()), false)
+	_check(
+		"and the client refuses it too, from its side (%s)" % (at_client.error.message if not at_client.ok else ""),
+		not at_client.ok and at_client.error.message == "This server's game needs a newer game client."
+	)
+
+	# Nothing from a refused peer is handed to a game.
+	var cw := DotNetWriter.new()
+	var after := ChatMessageV2.new()
+	after.text = "ignored"
+	strict.encode(after, cw)
+	var from_refused := old.decode(cw.to_reader(), 1, false)
+	_check(
+		"and nothing a refused peer sends is decoded",
+		from_refused.ok and from_refused.value == null
+	)
+
+	# Forgetting the peer clears the refusal, so a reconnect is judged afresh.
+	old.forget_peer(1)
+	_check("forgetting a peer forgets its refusal", not old.is_refused(1) and not old.knows_peer(1))
+
+
+func _mismatched_manager() -> void:
+	# The manager: a server announces as it adds a peer, the client as it starts, and a
+	# refusal reaches the host on the manager's own signal.
+	var s := DotNetManager.new()
+	s.is_server = true
+	s.auto_tick = false
+	s.config_file = ""
+	s.service_scope = &"schema_server"
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 3
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = &"schema_client"
+	add_child(s)
+	add_child(c)
+	s.setup()
+	c.setup()
+	s.messages.register(&"demo.chat", ChatMessageV2)
+	s.messages.register(&"demo.vital", VitalMessage)
+	c.messages.register(&"demo.chat", ChatMessage)
+
+	var wire: Array = []
+	s.send_fn = func(peer: int, payload: PackedByteArray, _d: int) -> void: wire.append([1, peer, payload])
+	c.send_fn = func(peer: int, payload: PackedByteArray, _d: int) -> void: wire.append([3, peer, payload])
+
+	var manager_refusals: Array = []
+	s.peer_schema_refused.connect(func(peer: int, err: DotError) -> void: manager_refusals.append([peer, err.message]))
+
+	s.start()
+	c.start()
+	s.add_peer(3)
+
+	_check("both ends announced a table (%d payloads)" % wire.size(), wire.size() == 2)
+
+	for w in wire:
+		if int(w[0]) == 1:
+			c.receive(w[2], 1)
+		else:
+			s.receive(w[2], 3)
+
+	_check(
+		"the server's manager reports the client it cannot play with",
+		manager_refusals.size() == 1 and int(manager_refusals[0][0]) == 3
+	)
+	_check(
+		"and a refused schema is not counted as a decode failure",
+		s.stats.decode_failures == 0
+	)
+
+	s.stop()
+	c.stop()
+	remove_child(s)
+	remove_child(c)
+	s.free()
+	c.free()
+
+
+func _mismatched_newer_reader(old: DotNetMessageRegistry, new: DotNetMessageRegistry) -> void:
+	# And the other way: an old chat into a new reader, whose appended field keeps its
+	# default because the older sender never wrote it.
+	var old_line := ChatMessage.new()
+	old_line.text = "from the past"
+	var ow := DotNetWriter.new()
+	old.encode(old_line, ow)
+	var into_new := new.decode(ow.to_reader(), 5, true)
+	_check(
+		"a newer reader gets the old fields",
+		into_new.ok and (into_new.value as ChatMessageV2).text == "from the past"
+	)
+	_check(
+		"and keeps its default for the field the old sender did not write (%s)"
+			% (str((into_new.value as ChatMessageV2).colour) if into_new.ok else "-"),
+		into_new.ok and (into_new.value as ChatMessageV2).colour == 7
+	)
+
+
 ## Two ends built from different sources (ids derive from names): "old" registers less than
 ## "new". Old must skip what it lacks, mid-batch included, a field appended to a shared type
 ## must cross both ways, and a REQUIRED type one end lacks is refused with a sentence.
@@ -197,180 +331,15 @@ func _test_mismatched_schemas() -> void:
 		got.size() == 1 and (got[0] as ChatMessage).text == "still here"
 	)
 
-	# And the other way: an old chat into a new reader, whose appended field keeps its
-	# default because the older sender never wrote it.
-	var old_line := ChatMessage.new()
-	old_line.text = "from the past"
-	var ow := DotNetWriter.new()
-	old.encode(old_line, ow)
-	var into_new := new.decode(ow.to_reader(), 5, true)
-	_check(
-		"a newer reader gets the old fields",
-		into_new.ok and (into_new.value as ChatMessageV2).text == "from the past"
-	)
-	_check(
-		"and keeps its default for the field the old sender did not write (%s)"
-			% (str((into_new.value as ChatMessageV2).colour) if into_new.ok else "-"),
-		into_new.ok and (into_new.value as ChatMessageV2).colour == 7
-	)
+	_mismatched_newer_reader(old, new)
 
-	# A REQUIRED type one end lacks. The old client meets a server that requires
-	# demo.vital, in both of the places the check runs.
-	var strict := DotNetMessageRegistry.new()
-	strict.register(&"demo.chat", ChatMessageV2)
-	strict.register(&"demo.vital", VitalMessage)
-	strict.seal()
+	_mismatched_required(old)
 
-	_check(
-		"a REQUIRED type changes the schema hash",
-		strict.schema_hash() != old.schema_hash()
-	)
-
-	var refusals: Array = []
-	strict.peer_refused.connect(func(peer: int, err: DotError) -> void: refusals.append([peer, err]))
-
-	var at_server := strict.adopt_peer_schema(5, _schema_body(old.schema_payload()), true)
-	_check(
-		"the server refuses a client missing a type it requires",
-		not at_server.ok and at_server.code() == DotError.CODE_VERSION
-	)
-	_check(
-		"with a sentence a player can act on (%s)" % (at_server.error.message if not at_server.ok else ""),
-		not at_server.ok and at_server.error.message == "This server's game needs a newer game client."
-	)
-	_check(
-		"and the type named where an operator reads it",
-		not at_server.ok and at_server.error.detail.contains("demo.vital")
-	)
-	_check("it says so on its signal", refusals.size() == 1 and int(refusals[0][0]) == 5)
-
-	var at_client := old.adopt_peer_schema(1, _schema_body(strict.schema_payload()), false)
-	_check(
-		"and the client refuses it too, from its side (%s)" % (at_client.error.message if not at_client.ok else ""),
-		not at_client.ok and at_client.error.message == "This server's game needs a newer game client."
-	)
-
-	# Nothing from a refused peer is handed to a game.
-	var cw := DotNetWriter.new()
-	var after := ChatMessageV2.new()
-	after.text = "ignored"
-	strict.encode(after, cw)
-	var from_refused := old.decode(cw.to_reader(), 1, false)
-	_check(
-		"and nothing a refused peer sends is decoded",
-		from_refused.ok and from_refused.value == null
-	)
-
-	# Forgetting the peer clears the refusal, so a reconnect is judged afresh.
-	old.forget_peer(1)
-	_check("forgetting a peer forgets its refusal", not old.is_refused(1) and not old.knows_peer(1))
-
-	# The manager: a server announces as it adds a peer, the client as it starts, and a
-	# refusal reaches the host on the manager's own signal.
-	var s := DotNetManager.new()
-	s.is_server = true
-	s.auto_tick = false
-	s.config_file = ""
-	s.service_scope = &"schema_server"
-	var c := DotNetManager.new()
-	c.is_server = false
-	c.local_peer_id = 3
-	c.auto_tick = false
-	c.config_file = ""
-	c.service_scope = &"schema_client"
-	add_child(s)
-	add_child(c)
-	s.setup()
-	c.setup()
-	s.messages.register(&"demo.chat", ChatMessageV2)
-	s.messages.register(&"demo.vital", VitalMessage)
-	c.messages.register(&"demo.chat", ChatMessage)
-
-	var wire: Array = []
-	s.send_fn = func(peer: int, payload: PackedByteArray, _d: int) -> void: wire.append([1, peer, payload])
-	c.send_fn = func(peer: int, payload: PackedByteArray, _d: int) -> void: wire.append([3, peer, payload])
-
-	var manager_refusals: Array = []
-	s.peer_schema_refused.connect(func(peer: int, err: DotError) -> void: manager_refusals.append([peer, err.message]))
-
-	s.start()
-	c.start()
-	s.add_peer(3)
-
-	_check("both ends announced a table (%d payloads)" % wire.size(), wire.size() == 2)
-
-	for w in wire:
-		if int(w[0]) == 1:
-			c.receive(w[2], 1)
-		else:
-			s.receive(w[2], 3)
-
-	_check(
-		"the server's manager reports the client it cannot play with",
-		manager_refusals.size() == 1 and int(manager_refusals[0][0]) == 3
-	)
-	_check(
-		"and a refused schema is not counted as a decode failure",
-		s.stats.decode_failures == 0
-	)
-
-	s.stop()
-	c.stop()
-	remove_child(s)
-	remove_child(c)
-	s.free()
-	c.free()
+	_mismatched_manager()
 
 
 
-func _test_clock() -> void:
-	print("")
-	print("[clock]")
-
-	var authority := DotNetClock.new(60, true)
-	var ticks := authority.advance(1.0 / 60.0 * 3.0)
-	_check("advances by whole ticks", ticks == 3)
-	_check("tick advanced", authority.tick == 3)
-
-	# A long stall must not produce an unbounded catch-up burst.
-	var stalled := DotNetClock.new(60, true)
-	var burst := stalled.advance(2.0, 8)
-	_check("catch-up is bounded", burst == 8)
-
-	var follower := DotNetClock.new(60, false)
-	_check("starts unsynced", not follower.is_synced())
-
-	# First sample adopts outright.
-	follower.sync_from_server(1000, 100.0)
-	_check("syncs on the first sample", follower.is_synced())
-
-	# The client must run AHEAD of the server, or every input arrives late.
-	_check(
-		"input timeline leads the server (%d vs %d)"
-			% [follower.tick, follower.server_tick()],
-		follower.tick > follower.server_tick()
-	)
-
-	# Half of a 100 ms round trip at 60 Hz is 3 ticks.
-	_check(
-		"server estimate accounts for one-way latency",
-		follower.server_tick() >= 1002 and follower.server_tick() <= 1004
-	)
-
-	# Render must be behind the server, or there is nothing to interpolate between.
-	_check("render tick lags the server", follower.render_tick(4) < follower.server_tick())
-
-	# Small drift corrects by changing tick length, not by jumping. One tick behind is
-	# inside the margin: a command still lands in time, so nothing is lost by smoothing.
-	var before := follower.tick
-	follower.sync_from_server(1001, 100.0)
-	_check("small drift does not snap", absi(follower.tick - before) < 5)
-	_check("drift correction applied", absf(follower.drift_percent()) > 0.0)
-
-	# A huge error is not drift; it must snap.
-	follower.sync_from_server(50000, 100.0)
-	_check("large error snaps", follower.tick > 49000)
-
+func _clock_snap_threshold() -> void:
 	# [b]The threshold is a DURATION, not a tick count.[/b] 60 ticks is one second at 60 Hz but
 	# 0.47 s at 128, so a 128-tick server snapped on any half-second hitch (a map change, a
 	# stalled frame) and a snap discards everything predicted.
@@ -421,6 +390,57 @@ func _test_clock() -> void:
 		"the threshold is one second whatever the rate",
 		fast.snap_threshold_ticks() == 128 and slow.snap_threshold_ticks() == 60
 	)
+
+
+func _test_clock() -> void:
+	print("")
+	print("[clock]")
+
+	var authority := DotNetClock.new(60, true)
+	var ticks := authority.advance(1.0 / 60.0 * 3.0)
+	_check("advances by whole ticks", ticks == 3)
+	_check("tick advanced", authority.tick == 3)
+
+	# A long stall must not produce an unbounded catch-up burst.
+	var stalled := DotNetClock.new(60, true)
+	var burst := stalled.advance(2.0, 8)
+	_check("catch-up is bounded", burst == 8)
+
+	var follower := DotNetClock.new(60, false)
+	_check("starts unsynced", not follower.is_synced())
+
+	# First sample adopts outright.
+	follower.sync_from_server(1000, 100.0)
+	_check("syncs on the first sample", follower.is_synced())
+
+	# The client must run AHEAD of the server, or every input arrives late.
+	_check(
+		"input timeline leads the server (%d vs %d)"
+			% [follower.tick, follower.server_tick()],
+		follower.tick > follower.server_tick()
+	)
+
+	# Half of a 100 ms round trip at 60 Hz is 3 ticks.
+	_check(
+		"server estimate accounts for one-way latency",
+		follower.server_tick() >= 1002 and follower.server_tick() <= 1004
+	)
+
+	# Render must be behind the server, or there is nothing to interpolate between.
+	_check("render tick lags the server", follower.render_tick(4) < follower.server_tick())
+
+	# Small drift corrects by changing tick length, not by jumping. One tick behind is
+	# inside the margin: a command still lands in time, so nothing is lost by smoothing.
+	var before := follower.tick
+	follower.sync_from_server(1001, 100.0)
+	_check("small drift does not snap", absi(follower.tick - before) < 5)
+	_check("drift correction applied", absf(follower.drift_percent()) > 0.0)
+
+	# A huge error is not drift; it must snap.
+	follower.sync_from_server(50000, 100.0)
+	_check("large error snaps", follower.tick > 49000)
+
+	_clock_snap_threshold()
 
 	# Jitter must widen the margin, or a jittery connection loses inputs.
 	var jittery := DotNetClock.new(60, false)

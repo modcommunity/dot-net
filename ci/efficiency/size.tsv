@@ -4,10 +4,7 @@ addons/dot_net/core/dot_net_clock.gd	853
 addons/dot_net/dot_net_manager.gd	1027
 addons/dot_net/dot_net_manager.gd::_receive_snapshot	127
 addons/dot_net/replication/dot_net_behaviour.gd	1267
-examples/selftest/netcode_sections_1.gd::_test_clock	104
 examples/selftest/netcode_sections_1.gd::_test_interest	167
-examples/selftest/netcode_sections_1.gd::_test_messages	131
-examples/selftest/netcode_sections_1.gd::_test_mismatched_schemas	185
 examples/selftest/netcode_sections_2.gd::_test_interpolation	149
 examples/selftest/netcode_sections_2.gd::_test_prediction	184
 examples/selftest/netcode_sections_2.gd::_test_render_delay	194
