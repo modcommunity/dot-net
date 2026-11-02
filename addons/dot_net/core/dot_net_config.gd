@@ -40,9 +40,9 @@ extends DotConfig
 @export var native_path: String = ""
 
 ## With [member native], also run [DotNetInterestDistance]'s selection and the budget's ordering in
-## the library: the same bytes. Ignored for any other strategy. Environment
-## [code]DOT_NET_NATIVE_INTEREST[/code], command line [code]--net-native-interest[/code].
-@export var native_interest: bool = false
+## the library: the same bytes, a third of the tick at 100 clients. Ignored for any other strategy.
+## Environment [code]DOT_NET_NATIVE_INTEREST=0[/code] or [code]--net-native-interest=false[/code] turns it off.
+@export var native_interest: bool = true
 
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
