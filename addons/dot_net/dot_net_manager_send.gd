@@ -151,7 +151,7 @@ func _native_for_snapshot() -> Object:
 			DotLog.info(CHANNEL, "snapshots are built natively", DotNetNative.describe())
 		else:
 			_native_note = "asked, GDScript in use: %s" % res.error.message
-			DotLog.warn(CHANNEL, "native snapshots asked for but unavailable; GDScript in use",
+			DotLog.info(CHANNEL, "native snapshots unavailable; GDScript in use",
 				{"reason": res.error.message})
 	return _native
 
