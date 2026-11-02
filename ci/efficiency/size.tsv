@@ -9,7 +9,6 @@ examples/selftest/netcode_sections_2.gd::_test_render_delay	194
 examples/selftest/netcode_sections_3.gd::_standing_still_run	158
 examples/selftest/netcode_sections_3.gd::_test_shared_dirty_sets	150
 examples/selftest/netcode_sections_5.gd::_test_snapshot_parts	200
-examples/selftest/netcode_sections_5.gd::_test_unchanged_entities	193
 examples/selftest/netcode_sections_6.gd::_first_visit	137
 examples/selftest/netcode_sections_6.gd::_test_input_lead	184
 examples/selftest/netcode_sections_7.gd::_test_spawning	168
