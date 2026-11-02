@@ -112,11 +112,7 @@ func _section_datagrams() -> void:
 			reply_port = server.get_packet_port()
 			at_server.take(bytes)
 
-	var deadline := Time.get_ticks_msec() + 400
-	while Time.get_ticks_msec() < deadline:
-		await get_tree().process_frame
-		while server.get_available_packet_count() > 0:
-			at_server.take(server.get_packet())
+	await _settle(server, at_server, 400)
 
 	# And back down, to whatever address the relay forwards from -- which is the only one
 	# the server ever learns, exactly as a real server behind a real relay would.
@@ -130,48 +126,9 @@ func _section_datagrams() -> void:
 		while client.get_available_packet_count() > 0:
 			at_client.take(client.get_packet())
 
-	deadline = Time.get_ticks_msec() + 300
-	while Time.get_ticks_msec() < deadline:
-		await get_tree().process_frame
-		while client.get_available_packet_count() > 0:
-			at_client.take(client.get_packet())
+	await _settle(client, at_client, 300)
 
-	var up_arrived := float(at_server.seen.size()) / float(COUNT)
-	var down_arrived := float(at_client.seen.size()) / float(COUNT)
-
-	_line("    up:   %d of %d arrived (%.1f%%), %d copies, %d reordered, delay %.1f..%.1f ms" % [
-		at_server.seen.size(), COUNT, up_arrived * 100.0, at_server.copies,
-		at_server.inversions, at_server.min_ms, at_server.max_ms])
-	_line("    down: %d of %d arrived (%.1f%%), %d copies, %d reordered, delay %.1f..%.1f ms" % [
-		at_client.seen.size(), COUNT, down_arrived * 100.0, at_client.copies,
-		at_client.inversions, at_client.min_ms, at_client.max_ms])
-
-	_check("up: about 80% arrive at 20% loss", up_arrived > 0.76 and up_arrived < 0.84,
-		"%.3f" % up_arrived)
-	_check("down: about 95% arrive at 5% loss", down_arrived > 0.93 and down_arrived < 0.975,
-		"%.3f" % down_arrived)
-	_check("up: about 5% of survivors arrive twice",
-		at_server.copies > 20 and at_server.copies < 70, "%d" % at_server.copies)
-	_check("down: none arrive twice when duplication is off", at_client.copies == 0,
-		"%d" % at_client.copies)
-	_check("a 50 ms jitter reorders datagrams sent 20 a frame", at_server.inversions > 50,
-		"%d" % at_server.inversions)
-	# 25 ms is the floor of the window; the ceiling has the poll interval and a frame of
-	# the reader's own latency on top of 75.
-	_check("up: no datagram beats the delay window", at_server.min_ms >= 24.5,
-		"%.2f ms" % at_server.min_ms)
-	_check("up: none is held far past it", at_server.max_ms < 75.0 + 40.0,
-		"%.2f ms" % at_server.max_ms)
-	_check("down: the window is its own", at_client.min_ms >= 19.5 and at_client.max_ms < 40.0 + 40.0,
-		"%.1f..%.1f ms" % [at_client.min_ms, at_client.max_ms])
-
-	var said := relay.describe()
-	_check("the relay's own count agrees with the far end's",
-		int(said["up"]["delivered"]) == at_server.total
-			and int(said["down"]["delivered"]) == at_client.total,
-		"up %s vs %d, down %s vs %d" % [said["up"]["delivered"], at_server.total,
-			said["down"]["delivered"], at_client.total])
-	_check("one client is one flow", relay.flow_count() == 1, "%d" % relay.flow_count())
+	_datagram_checks(relay, at_server, at_client)
 
 	relay.stop()
 	client.close()
@@ -266,15 +223,7 @@ func _section_enet() -> void:
 	err = client_peer.call("create_client", "127.0.0.1", relay.port())
 	_check("an ENet client is pointed at the relay", err == OK, error_string(err))
 
-	var connected := false
-	var deadline := Time.get_ticks_msec() + 8000
-	while Time.get_ticks_msec() < deadline:
-		server_peer.call("poll")
-		client_peer.call("poll")
-		if int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED:
-			connected = true
-			break
-		await get_tree().process_frame
+	var connected := await _enet_connected(server_peer, client_peer)
 
 	_check("and connects through the loss", connected)
 
@@ -286,81 +235,14 @@ func _section_enet() -> void:
 		return
 
 	# Let the server see the peer.
-	var client_id := 0
-	deadline = Time.get_ticks_msec() + 3000
-	while client_id == 0 and Time.get_ticks_msec() < deadline:
-		server_peer.call("poll")
-		client_peer.call("poll")
-		while int(server_peer.call("get_available_packet_count")) > 0:
-			server_peer.call("get_packet")
-		var peers: Variant = (server_peer.call("get_host") as Object).call("get_peers")
-		if peers is Array and not (peers as Array).is_empty():
-			client_id = 2
-		await get_tree().process_frame
+	var client_id := await _enet_peer_seen(server_peer, client_peer)
 
 	var reliable_got: Array[int] = []
 	var unreliable_got: Array[int] = []
-	var sent := 0
 	const SEND := 300
+	await _enet_exchange(server_peer, client_peer, reliable_got, unreliable_got, SEND)
 
-	while sent < SEND:
-		for i in range(6):
-			for reliable in [true, false]:
-				var bytes := PackedByteArray([1 if reliable else 0, 0, 0, 0, 0])
-				bytes.encode_u32(1, sent)
-				server_peer.set("transfer_mode",
-					MultiplayerPeer.TRANSFER_MODE_RELIABLE if reliable
-					else MultiplayerPeer.TRANSFER_MODE_UNRELIABLE)
-				server_peer.call("set_target_peer", 0)
-				server_peer.call("put_packet", bytes)
-			sent += 1
-		server_peer.call("poll")
-		client_peer.call("poll")
-		_drain(client_peer, reliable_got, unreliable_got)
-		await get_tree().process_frame
-
-	deadline = Time.get_ticks_msec() + 5000
-	while reliable_got.size() < SEND and Time.get_ticks_msec() < deadline:
-		server_peer.call("poll")
-		client_peer.call("poll")
-		_drain(client_peer, reliable_got, unreliable_got)
-		await get_tree().process_frame
-
-	var in_order := true
-	for i in range(reliable_got.size()):
-		if reliable_got[i] != i:
-			in_order = false
-			break
-
-	var unreliable_inversions := 0
-	var newest := -1
-	var unique := {}
-	for seq in unreliable_got:
-		if seq < newest:
-			unreliable_inversions += 1
-		newest = maxi(newest, seq)
-		unique[seq] = true
-
-	var said := relay.describe()
-	_line("    relay: up %s, down %s" % [said["up"]["measured_loss"], said["down"]["measured_loss"]])
-	_line("    reliable %d of %d, unreliable %d of %d, %d unreliable behind a newer one" % [
-		reliable_got.size(), SEND, unique.size(), SEND, unreliable_inversions])
-
-	_check("the relay really lost about a fifth each way",
-		float(said["up"]["measured_loss"]) > 0.12 and float(said["down"]["measured_loss"]) > 0.12)
-	_check("every reliable packet arrived", reliable_got.size() == SEND,
-		"%d of %d" % [reliable_got.size(), SEND])
-	_check("exactly once, and in the order sent", in_order)
-	var arrived := float(unique.size()) / float(SEND)
-	_check("about 80% of the unreliable ones arrived", arrived > 0.7 and arrived < 0.9,
-		"%.3f" % arrived)
-	_check("no unreliable packet arrived twice", unique.size() == unreliable_got.size(),
-		"%d unique of %d" % [unique.size(), unreliable_got.size()])
-	_check("and some arrived behind a newer one: Godot's ENet unreliable is UNSEQUENCED",
-		unreliable_inversions > 0, "%d" % unreliable_inversions)
-	_check("the client is still connected",
-		int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED)
-	_check("so is the server's end of it", client_id != 0)
+	_enet_results(relay, client_peer, client_id, reliable_got, unreliable_got, SEND)
 
 	client_peer.call("close")
 	server_peer.call("close")
@@ -416,34 +298,16 @@ func _throttle_run(ours: bool) -> Dictionary:
 	relay.up.configure(0.0, 60.0, 0.0)
 	relay.down.configure(0.0, 60.0, 0.0)
 
-	if ours:
-		var made: DotResult = DotTransportENet.new().create_server(THROTTLE_PORT, "127.0.0.1")
-		server_peer = made.value if made.ok else null
-	else:
-		server_peer = ClassDB.instantiate("ENetMultiplayerPeer")
-		if int(server_peer.call("create_server", THROTTLE_PORT, 4)) != OK:
-			server_peer = null
+	server_peer = _throttle_server(ours)
 
 	if server_peer == null:
 		return out
 
 	relay.start(0, "127.0.0.1", THROTTLE_PORT)
 
-	if ours:
-		var made: DotResult = DotTransportENet.new().create_client("127.0.0.1", relay.port())
-		client_peer = made.value if made.ok else null
-	else:
-		client_peer = ClassDB.instantiate("ENetMultiplayerPeer")
-		client_peer.call("create_client", "127.0.0.1", relay.port())
+	client_peer = _throttle_client(ours, relay.port())
 
-	var deadline := Time.get_ticks_msec() + 5000
-	while client_peer != null and Time.get_ticks_msec() < deadline:
-		server_peer.call("poll")
-		client_peer.call("poll")
-		if int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED:
-			out["connected"] = true
-			break
-		await get_tree().process_frame
+	out["connected"] = client_peer != null and await _throttle_connected(server_peer, client_peer)
 
 	if not out["connected"]:
 		relay.stop()
@@ -451,12 +315,7 @@ func _throttle_run(ours: bool) -> Dictionary:
 		return out
 
 	# A few quiet frames: ENet's first round-trip samples, and the throttle settings across.
-	for i in range(20):
-		server_peer.call("poll")
-		client_peer.call("poll")
-		while int(client_peer.call("get_available_packet_count")) > 0:
-			client_peer.call("get_packet")
-		OS.delay_msec(10)
+	_throttle_quiet(server_peer, client_peer)
 
 	var throttle_stat := ClassDB.class_get_integer_constant(&"ENetPacketPeer", &"PEER_PACKET_THROTTLE")
 	var deceleration_stat := ClassDB.class_get_integer_constant(&"ENetPacketPeer", &"PEER_PACKET_THROTTLE_DECELERATION")
@@ -483,30 +342,210 @@ func _throttle_run(ours: bool) -> Dictionary:
 			for i in range(20):
 				server_peer.call("put_packet", burst)
 
-		server_peer.call("poll")
-		client_peer.call("poll")
-		while int(client_peer.call("get_available_packet_count")) > 0:
-			var got: PackedByteArray = client_peer.call("get_packet")
-			if got.size() == state.size():
-				out["got"] = int(out["got"]) + 1
+		_throttle_pump(server_peer, client_peer, out, state.size())
 
 		out["lowest"] = mini(int(out["lowest"]), int(to_client.call("get_statistic", throttle_stat)))
 		OS.delay_msec(300 if frame % 20 == 10 and frame <= 120 else 16)
 
 	# What was still in flight at the end.
 	for i in range(20):
-		server_peer.call("poll")
-		client_peer.call("poll")
-		while int(client_peer.call("get_available_packet_count")) > 0:
-			var got: PackedByteArray = client_peer.call("get_packet")
-			if got.size() == state.size():
-				out["got"] = int(out["got"]) + 1
+		_throttle_pump(server_peer, client_peer, out, state.size())
 		OS.delay_msec(10)
 
 	client_peer.call("close")
 	server_peer.call("close")
 	relay.stop()
 	return out
+
+
+func _throttle_server(ours: bool) -> Object:
+	if ours:
+		var made: DotResult = DotTransportENet.new().create_server(THROTTLE_PORT, "127.0.0.1")
+		return made.value if made.ok else null
+	var peer: Object = ClassDB.instantiate("ENetMultiplayerPeer")
+	if int(peer.call("create_server", THROTTLE_PORT, 4)) != OK:
+		return null
+	return peer
+
+
+func _throttle_client(ours: bool, port: int) -> Object:
+	if ours:
+		var made: DotResult = DotTransportENet.new().create_client("127.0.0.1", port)
+		return made.value if made.ok else null
+	var peer: Object = ClassDB.instantiate("ENetMultiplayerPeer")
+	peer.call("create_client", "127.0.0.1", port)
+	return peer
+
+
+func _throttle_connected(server_peer: Object, client_peer: Object) -> bool:
+	var deadline := Time.get_ticks_msec() + 5000
+	while Time.get_ticks_msec() < deadline:
+		server_peer.call("poll")
+		client_peer.call("poll")
+		if int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED:
+			return true
+		await get_tree().process_frame
+	return false
+
+
+func _throttle_quiet(server_peer: Object, client_peer: Object) -> void:
+	for i in range(20):
+		server_peer.call("poll")
+		client_peer.call("poll")
+		while int(client_peer.call("get_available_packet_count")) > 0:
+			client_peer.call("get_packet")
+		OS.delay_msec(10)
+
+
+## Polls both ends and counts the unreliable state packets the client received.
+func _throttle_pump(server_peer: Object, client_peer: Object, out: Dictionary, state_size: int) -> void:
+	server_peer.call("poll")
+	client_peer.call("poll")
+	while int(client_peer.call("get_available_packet_count")) > 0:
+		var got: PackedByteArray = client_peer.call("get_packet")
+		if got.size() == state_size:
+			out["got"] = int(out["got"]) + 1
+
+
+
+func _enet_results(relay: Object, client_peer: Object, client_id: int, reliable_got: Array[int],
+		unreliable_got: Array[int], send: int) -> void:
+	var in_order := true
+	for i in range(reliable_got.size()):
+		if reliable_got[i] != i:
+			in_order = false
+			break
+
+	var unreliable_inversions := 0
+	var newest := -1
+	var unique := {}
+	for seq in unreliable_got:
+		if seq < newest:
+			unreliable_inversions += 1
+		newest = maxi(newest, seq)
+		unique[seq] = true
+
+	var said: Dictionary = relay.describe()
+	_line("    relay: up %s, down %s" % [said["up"]["measured_loss"], said["down"]["measured_loss"]])
+	_line("    reliable %d of %d, unreliable %d of %d, %d unreliable behind a newer one" % [
+		reliable_got.size(), send, unique.size(), send, unreliable_inversions])
+
+	_check("the relay really lost about a fifth each way",
+		float(said["up"]["measured_loss"]) > 0.12 and float(said["down"]["measured_loss"]) > 0.12)
+	_check("every reliable packet arrived", reliable_got.size() == send,
+		"%d of %d" % [reliable_got.size(), send])
+	_check("exactly once, and in the order sent", in_order)
+	var arrived := float(unique.size()) / float(send)
+	_check("about 80% of the unreliable ones arrived", arrived > 0.7 and arrived < 0.9,
+		"%.3f" % arrived)
+	_check("no unreliable packet arrived twice", unique.size() == unreliable_got.size(),
+		"%d unique of %d" % [unique.size(), unreliable_got.size()])
+	_check("and some arrived behind a newer one: Godot's ENet unreliable is UNSEQUENCED",
+		unreliable_inversions > 0, "%d" % unreliable_inversions)
+	_check("the client is still connected",
+		int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED)
+	_check("so is the server's end of it", client_id != 0)
+
+
+func _enet_exchange(server_peer: Object, client_peer: Object, reliable_got: Array[int],
+		unreliable_got: Array[int], send: int) -> void:
+	var sent := 0
+
+	while sent < send:
+		for i in range(6):
+			for reliable in [true, false]:
+				var bytes := PackedByteArray([1 if reliable else 0, 0, 0, 0, 0])
+				bytes.encode_u32(1, sent)
+				server_peer.set("transfer_mode",
+					MultiplayerPeer.TRANSFER_MODE_RELIABLE if reliable
+					else MultiplayerPeer.TRANSFER_MODE_UNRELIABLE)
+				server_peer.call("set_target_peer", 0)
+				server_peer.call("put_packet", bytes)
+			sent += 1
+		server_peer.call("poll")
+		client_peer.call("poll")
+		_drain(client_peer, reliable_got, unreliable_got)
+		await get_tree().process_frame
+
+	var deadline := Time.get_ticks_msec() + 5000
+	while reliable_got.size() < send and Time.get_ticks_msec() < deadline:
+		server_peer.call("poll")
+		client_peer.call("poll")
+		_drain(client_peer, reliable_got, unreliable_got)
+		await get_tree().process_frame
+
+
+func _enet_peer_seen(server_peer: Object, client_peer: Object) -> int:
+	var client_id := 0
+	var deadline := Time.get_ticks_msec() + 3000
+	while client_id == 0 and Time.get_ticks_msec() < deadline:
+		server_peer.call("poll")
+		client_peer.call("poll")
+		while int(server_peer.call("get_available_packet_count")) > 0:
+			server_peer.call("get_packet")
+		var peers: Variant = (server_peer.call("get_host") as Object).call("get_peers")
+		if peers is Array and not (peers as Array).is_empty():
+			client_id = 2
+		await get_tree().process_frame
+	return client_id
+
+
+func _enet_connected(server_peer: Object, client_peer: Object) -> bool:
+	var deadline := Time.get_ticks_msec() + 8000
+	while Time.get_ticks_msec() < deadline:
+		server_peer.call("poll")
+		client_peer.call("poll")
+		if int(client_peer.call("get_connection_status")) == MultiplayerPeer.CONNECTION_CONNECTED:
+			return true
+		await get_tree().process_frame
+	return false
+
+
+func _datagram_checks(relay: Object, at_server: Tally, at_client: Tally) -> void:
+	var up_arrived := float(at_server.seen.size()) / float(COUNT)
+	var down_arrived := float(at_client.seen.size()) / float(COUNT)
+
+	_line("    up:   %d of %d arrived (%.1f%%), %d copies, %d reordered, delay %.1f..%.1f ms" % [
+		at_server.seen.size(), COUNT, up_arrived * 100.0, at_server.copies,
+		at_server.inversions, at_server.min_ms, at_server.max_ms])
+	_line("    down: %d of %d arrived (%.1f%%), %d copies, %d reordered, delay %.1f..%.1f ms" % [
+		at_client.seen.size(), COUNT, down_arrived * 100.0, at_client.copies,
+		at_client.inversions, at_client.min_ms, at_client.max_ms])
+
+	_check("up: about 80% arrive at 20% loss", up_arrived > 0.76 and up_arrived < 0.84,
+		"%.3f" % up_arrived)
+	_check("down: about 95% arrive at 5% loss", down_arrived > 0.93 and down_arrived < 0.975,
+		"%.3f" % down_arrived)
+	_check("up: about 5% of survivors arrive twice",
+		at_server.copies > 20 and at_server.copies < 70, "%d" % at_server.copies)
+	_check("down: none arrive twice when duplication is off", at_client.copies == 0,
+		"%d" % at_client.copies)
+	_check("a 50 ms jitter reorders datagrams sent 20 a frame", at_server.inversions > 50,
+		"%d" % at_server.inversions)
+	# 25 ms is the floor of the window; the ceiling has the poll interval and a frame of
+	# the reader's own latency on top of 75.
+	_check("up: no datagram beats the delay window", at_server.min_ms >= 24.5,
+		"%.2f ms" % at_server.min_ms)
+	_check("up: none is held far past it", at_server.max_ms < 75.0 + 40.0,
+		"%.2f ms" % at_server.max_ms)
+	_check("down: the window is its own", at_client.min_ms >= 19.5 and at_client.max_ms < 40.0 + 40.0,
+		"%.1f..%.1f ms" % [at_client.min_ms, at_client.max_ms])
+
+	var said: Dictionary = relay.describe()
+	_check("the relay's own count agrees with the far end's",
+		int(said["up"]["delivered"]) == at_server.total
+			and int(said["down"]["delivered"]) == at_client.total,
+		"up %s vs %d, down %s vs %d" % [said["up"]["delivered"], at_server.total,
+			said["down"]["delivered"], at_client.total])
+	_check("one client is one flow", relay.flow_count() == 1, "%d" % relay.flow_count())
+
+
+func _settle(peer: PacketPeerUDP, tally: Tally, ms: int) -> void:
+	var deadline := Time.get_ticks_msec() + ms
+	while Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+		while peer.get_available_packet_count() > 0:
+			tally.take(peer.get_packet())
 
 
 func _drain(peer: Object, reliable: Array[int], unreliable: Array[int]) -> void:
