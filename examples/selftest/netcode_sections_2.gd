@@ -594,93 +594,7 @@ func _test_drawing_through_slips() -> void:
 		eased * 1000.0, snapped * 1000.0], eased < snapped / 3.0 and snapped > 0.03)
 
 
-func _test_interpolation() -> void:
-	_sections_entered += 1
-	print("")
-	print("[interpolation]")
-
-	var config := DotNetConfig.new()
-	config.adaptive_interpolation = false
-	config.interpolation_buffer = 2.0
-
-	var interpolator := DotNetInterpolator.new(config)
-
-	interpolator.push(1, 100, {"position": Vector3(0, 0, 0)})
-	interpolator.push(1, 110, {"position": Vector3(10, 0, 0)})
-
-	# The buffer is 2 snapshots, and at 60 ticks / 20 snapshots a snapshot is 3 ticks, so this
-	# renders 6 ticks behind: tick 101, a tenth of the way from 100 to 110. (x=7 is between the
-	# two snapshots either way, so the check alone would not tell 2 ticks from 6.)
-	var midpoint := interpolator.sample(1, 107)
-	var sampled: Vector3 = midpoint.get("position", Vector3.ZERO)
-	_check(
-		"interpolates between snapshots (x=%.1f)" % sampled.x,
-		sampled.x > 0.1 and sampled.x < 9.9
-	)
-	_check(
-		"six ticks behind at 60/20, not two (x=%.2f)" % sampled.x,
-		absf(sampled.x - 1.0) < 0.01
-	)
-
-	# Out-of-order arrivals must still be usable.
-	interpolator.push(1, 105, {"position": Vector3(5, 0, 0)})
-	var reordered := interpolator.sample(1, 104)
-	_check("out-of-order sample used", reordered.has("position"))
-
-	# value_at: the drawn value at an absolute render tick, counting nothing, never extrapolating.
-	var counted := interpolator.sample_count()
-	var at: Variant = interpolator.value_at(1, &"position", 102.5)
-	var again: Variant = interpolator.value_at(1, &"position", 102.5)
-	_check("value_at blends at a render tick (x=%s)" % [at], at is Vector3 and absf((at as Vector3).x - 2.5) < 0.001 and at == again)
-	_check("value_at holds the newest past the end", interpolator.value_at(1, &"position", 130.0) == Vector3(10, 0, 0))
-	_check("value_at counts no samples", interpolator.sample_count() == counted)
-	_check("value_at of an unknown entity is null", interpolator.value_at(99, &"position", 100.0) == null)
-	_check("value_at before the oldest sample is null, as a server's rewind past its history", interpolator.value_at(1, &"position", 99.0) == null)
-	interpolator.push(4, 100, {"position": Vector3.ZERO})
-	interpolator.push(4, 102, {"position": Vector3(0.5, 0, 0)})
-	interpolator.push(4, 104, {"position": Vector3(40, 0, 0)})
-	interpolator.push(4, 106, {"position": Vector3(40.5, 0, 0)})
-	_check("value_at with a cut is null before a teleport", interpolator.value_at(4, &"position", 101.0, 10.0) == null)
-	_check("and blends after it", interpolator.value_at(4, &"position", 105.0, 10.0) == Vector3(40.25, 0, 0))
-	_check("and without one blends across it", interpolator.value_at(4, &"position", 101.0) == Vector3(0.25, 0, 0))
-	# bracket_at / value_between: the snapshot ticks a view tick was drawn between, and the
-	# blend between exactly those two, so both ends rewind between the same samples (API 15).
-	_check("bracket_at names the two snapshot ticks around a view tick", interpolator.bracket_at(101.0) == Vector2i(100, 102))
-	_check("and one tick when the view tick is a snapshot's", interpolator.bracket_at(104.0) == Vector2i(104, 104))
-	_check("and (-1, -1) before the oldest", interpolator.bracket_at(50.0) == Vector2i(-1, -1))
-	_check("value_between blends the two samples named (a gap kept as a gap)", interpolator.value_between(4, &"position", 104, 106, 105.5) == Vector3(40.375, 0, 0))
-	_check("and is null for a sample the track does not have", interpolator.value_between(4, &"position", 103, 106, 105.0) == null)
-	var wire_spec := DotNetVar.make(&"position", DotNetVar.Type.VECTOR3_POSITION)
-	var on_wire: Vector3 = wire_spec.wire_value(Vector3(1.2345, -0.004, 7.0))
-	var round_trip := DotNetWriter.new()
-	wire_spec.write(round_trip, Vector3(1.2345, -0.004, 7.0))
-	_check("wire_value is the value a receiver reads, to the bit", on_wire == wire_spec.read(DotNetReader.new(round_trip.to_bytes())) and on_wire != Vector3(1.2345, -0.004, 7.0))
-
-	# Discrete values must not be blended into states that never existed.
-	interpolator.push(2, 100, {"weapon": 1})
-	interpolator.push(2, 110, {"weapon": 5})
-	var weapon: Variant = interpolator.sample(2, 103).get("weapon", 0)
-	_check("discrete values are not blended", weapon == 1 or weapon == 5)
-
-	# Quaternions must slerp, not lerp — a lerp of two rotations is not a rotation.
-	var a := Quaternion(Vector3.UP, 0.0)
-	var b := Quaternion(Vector3.UP, PI * 0.5)
-	interpolator.push(3, 100, {"rotation": a})
-	interpolator.push(3, 110, {"rotation": b})
-	var blended: Variant = interpolator.sample(3, 105).get("rotation", Quaternion.IDENTITY)
-	_check(
-		"rotation stays unit length",
-		absf((blended as Quaternion).length() - 1.0) < 0.001
-	)
-
-	# Extrapolation must be bounded, or a stalled stream sends entities to infinity.
-	var far_future := interpolator.sample(1, 100000)
-	var extrapolated: Vector3 = far_future.get("position", Vector3.ZERO)
-	_check(
-		"extrapolation is bounded",
-		extrapolated.length() < 1000.0
-	)
-
+func _interpolation_notifies() -> void:
 	# Everything above checks that a smooth value is computed; this checks that anything is told
 	# about it. Without the notification a game copies state only on a snapshot, so a remote
 	# moves in 20 Hz steps and the interpolator's output is discarded.
@@ -731,6 +645,100 @@ func _test_interpolation() -> void:
 		"a predicted entity is not interpolated over",
 		watcher.notifications == before_predicted
 	)
+
+
+func _interpolation_value_at(interpolator: DotNetInterpolator) -> void:
+	# value_at: the drawn value at an absolute render tick, counting nothing, never extrapolating.
+	var counted := interpolator.sample_count()
+	var at: Variant = interpolator.value_at(1, &"position", 102.5)
+	var again: Variant = interpolator.value_at(1, &"position", 102.5)
+	_check("value_at blends at a render tick (x=%s)" % [at], at is Vector3 and absf((at as Vector3).x - 2.5) < 0.001 and at == again)
+	_check("value_at holds the newest past the end", interpolator.value_at(1, &"position", 130.0) == Vector3(10, 0, 0))
+	_check("value_at counts no samples", interpolator.sample_count() == counted)
+	_check("value_at of an unknown entity is null", interpolator.value_at(99, &"position", 100.0) == null)
+	_check("value_at before the oldest sample is null, as a server's rewind past its history", interpolator.value_at(1, &"position", 99.0) == null)
+	interpolator.push(4, 100, {"position": Vector3.ZERO})
+	interpolator.push(4, 102, {"position": Vector3(0.5, 0, 0)})
+	interpolator.push(4, 104, {"position": Vector3(40, 0, 0)})
+	interpolator.push(4, 106, {"position": Vector3(40.5, 0, 0)})
+	_check("value_at with a cut is null before a teleport", interpolator.value_at(4, &"position", 101.0, 10.0) == null)
+	_check("and blends after it", interpolator.value_at(4, &"position", 105.0, 10.0) == Vector3(40.25, 0, 0))
+	_check("and without one blends across it", interpolator.value_at(4, &"position", 101.0) == Vector3(0.25, 0, 0))
+	# bracket_at / value_between: the snapshot ticks a view tick was drawn between, and the
+	# blend between exactly those two, so both ends rewind between the same samples (API 15).
+	_check("bracket_at names the two snapshot ticks around a view tick", interpolator.bracket_at(101.0) == Vector2i(100, 102))
+	_check("and one tick when the view tick is a snapshot's", interpolator.bracket_at(104.0) == Vector2i(104, 104))
+	_check("and (-1, -1) before the oldest", interpolator.bracket_at(50.0) == Vector2i(-1, -1))
+	_check("value_between blends the two samples named (a gap kept as a gap)", interpolator.value_between(4, &"position", 104, 106, 105.5) == Vector3(40.375, 0, 0))
+	_check("and is null for a sample the track does not have", interpolator.value_between(4, &"position", 103, 106, 105.0) == null)
+	var wire_spec := DotNetVar.make(&"position", DotNetVar.Type.VECTOR3_POSITION)
+	var on_wire: Vector3 = wire_spec.wire_value(Vector3(1.2345, -0.004, 7.0))
+	var round_trip := DotNetWriter.new()
+	wire_spec.write(round_trip, Vector3(1.2345, -0.004, 7.0))
+	_check("wire_value is the value a receiver reads, to the bit", on_wire == wire_spec.read(DotNetReader.new(round_trip.to_bytes())) and on_wire != Vector3(1.2345, -0.004, 7.0))
+
+
+func _test_interpolation() -> void:
+	_sections_entered += 1
+	print("")
+	print("[interpolation]")
+
+	var config := DotNetConfig.new()
+	config.adaptive_interpolation = false
+	config.interpolation_buffer = 2.0
+
+	var interpolator := DotNetInterpolator.new(config)
+
+	interpolator.push(1, 100, {"position": Vector3(0, 0, 0)})
+	interpolator.push(1, 110, {"position": Vector3(10, 0, 0)})
+
+	# The buffer is 2 snapshots, and at 60 ticks / 20 snapshots a snapshot is 3 ticks, so this
+	# renders 6 ticks behind: tick 101, a tenth of the way from 100 to 110. (x=7 is between the
+	# two snapshots either way, so the check alone would not tell 2 ticks from 6.)
+	var midpoint := interpolator.sample(1, 107)
+	var sampled: Vector3 = midpoint.get("position", Vector3.ZERO)
+	_check(
+		"interpolates between snapshots (x=%.1f)" % sampled.x,
+		sampled.x > 0.1 and sampled.x < 9.9
+	)
+	_check(
+		"six ticks behind at 60/20, not two (x=%.2f)" % sampled.x,
+		absf(sampled.x - 1.0) < 0.01
+	)
+
+	# Out-of-order arrivals must still be usable.
+	interpolator.push(1, 105, {"position": Vector3(5, 0, 0)})
+	var reordered := interpolator.sample(1, 104)
+	_check("out-of-order sample used", reordered.has("position"))
+
+	_interpolation_value_at(interpolator)
+
+	# Discrete values must not be blended into states that never existed.
+	interpolator.push(2, 100, {"weapon": 1})
+	interpolator.push(2, 110, {"weapon": 5})
+	var weapon: Variant = interpolator.sample(2, 103).get("weapon", 0)
+	_check("discrete values are not blended", weapon == 1 or weapon == 5)
+
+	# Quaternions must slerp, not lerp — a lerp of two rotations is not a rotation.
+	var a := Quaternion(Vector3.UP, 0.0)
+	var b := Quaternion(Vector3.UP, PI * 0.5)
+	interpolator.push(3, 100, {"rotation": a})
+	interpolator.push(3, 110, {"rotation": b})
+	var blended: Variant = interpolator.sample(3, 105).get("rotation", Quaternion.IDENTITY)
+	_check(
+		"rotation stays unit length",
+		absf((blended as Quaternion).length() - 1.0) < 0.001
+	)
+
+	# Extrapolation must be bounded, or a stalled stream sends entities to infinity.
+	var far_future := interpolator.sample(1, 100000)
+	var extrapolated: Vector3 = far_future.get("position", Vector3.ZERO)
+	_check(
+		"extrapolation is bounded",
+		extrapolated.length() < 1000.0
+	)
+
+	_interpolation_notifies()
 
 	_check_render_timeline()
 

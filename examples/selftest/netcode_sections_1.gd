@@ -605,6 +605,120 @@ func _check_render_timeline() -> void:
 	_check_render_timeline_jitter()
 
 
+func _interest_caps_and_all(distance: DotNetInterestDistance, beacon: DotNetIdentity, observer: DotNetIdentity, all: Array[DotNetIdentity], context: Dictionary) -> void:
+	# The reason the cap goes through prioritise: a cut that drops what the
+	# observer owns is the bug this family has already shipped once.
+	var crowd: Array[DotNetIdentity] = [beacon]
+	for i in range(20):
+		crowd.append(_make_entity(&"prop", 0))
+	var kept: Array[DotNetIdentity] = distance.prioritise(observer, crowd, 3, context)
+	var kept_ids := {}
+	for identity in kept:
+		kept_ids[identity.net_id] = true
+	_check("a tight cap keeps always_relevant", kept.size() == 3 and kept_ids.has(beacon.net_id))
+
+	# "All" includes everything, which is what makes it the wrong default for a
+	# competitive game.
+	var everything := DotNetInterestAll.new()
+	_check(
+		"all strategy includes the far entity",
+		everything.relevant_for(observer, all, 1, context).size() == 4
+	)
+
+	# Prioritisation must keep always_relevant when the cap bites.
+	var capped := distance.prioritise(observer, all, 2, context)
+	var capped_ids := {}
+	for identity in capped:
+		capped_ids[identity.net_id] = true
+	_check("cap applied", capped.size() == 2)
+	_check("always_relevant survives the cap", capped_ids.has(4))
+
+
+func _interest_cache(near: DotNetIdentity, far: DotNetIdentity, beacon: DotNetIdentity, observer: DotNetIdentity, all: Array[DotNetIdentity], context: Dictionary) -> void:
+	# The cache holds the entities relevant at one instant, so an entity spawned since is in
+	# nobody's set (not even its owner's) until it expires. On a host ticking faster than the
+	# wall clock the age never reaches the interval, and the entity is never sent at all.
+	var cached := DotNetInterestDistance.new()
+	cached.radius = 100.0
+	cached.evaluation_interval_sec = 5.0
+
+	# Populate the cache with the world as it is now.
+	cached.relevant_for(observer, all, 1, context)
+
+	var newborn := _make_entity(&"player", 1)
+	add_child(newborn.get_parent())
+	(newborn.entity as Node3D).global_position = Vector3(4000, 0, 0)
+	newborn.net_id = 5
+
+	var newborn_beacon := _make_entity(&"objective", 0)
+	add_child(newborn_beacon.get_parent())
+	(newborn_beacon.entity as Node3D).global_position = Vector3(8000, 0, 0)
+	newborn_beacon.always_relevant = true
+	newborn_beacon.net_id = 6
+
+	var grown: Array[DotNetIdentity] = [
+		observer, near, far, beacon, newborn, newborn_beacon
+	]
+
+	var after := cached.relevant_for(observer, grown, 1, context)
+	var after_ids := {}
+	for identity in after:
+		after_ids[identity.net_id] = true
+
+	_check("a cached answer still includes what the observer owns", after_ids.has(5))
+	_check("and anything always relevant", after_ids.has(6))
+	_check("without losing what it already had", after_ids.has(2))
+	_check("or gaining what it should not", not after_ids.has(3))
+
+	# Pinning must not grow the cache: an entry added to it would survive the expiry
+	# that is supposed to re-evaluate it.
+	(newborn.entity as Node3D).global_position = Vector3(4000, 0, 0)
+	newborn.owner_peer_id = 99
+	var repinned := cached.relevant_for(observer, grown, 1, context)
+	var repinned_ids := {}
+	for identity in repinned:
+		repinned_ids[identity.net_id] = true
+	_check(
+		"and a pin is not remembered as if it had been evaluated",
+		not repinned_ids.has(5)
+	)
+
+
+func _interest_grid(observer: DotNetIdentity, all: Array[DotNetIdentity], context: Dictionary) -> void:
+	# The grid must agree with the brute-force answer — that is the whole
+	# correctness requirement for a spatial index.
+	var grid := DotNetInterestGrid.new()
+	grid.radius = 100.0
+	grid.cell_size = 64.0
+	grid.evaluation_interval_sec = 0.0
+	grid._prepare(all, context)
+
+	var grid_relevant := grid.relevant_for(observer, all, 1, context)
+	var grid_ids := {}
+	for identity in grid_relevant:
+		grid_ids[identity.net_id] = true
+
+	_check("grid agrees with distance", grid_ids.has(2) and not grid_ids.has(3))
+	_check("grid keeps always_relevant", grid_ids.has(4))
+
+	# The config's cell size reaches a grid the host assigned — a knob documented
+	# from the first version and applied by nothing.
+	var sized := DotNetManager.new()
+	sized.name = "Sized"
+	sized.is_server = true
+	sized.auto_tick = false
+	sized.config_file = ""
+	var sized_config := DotNetConfig.new()
+	sized_config.interest_cell_size = 48.0
+	sized.config = sized_config
+	var sized_grid := DotNetInterestGrid.new()
+	sized.interest = sized_grid
+	add_child(sized)
+	sized.setup()
+	_check("interest_cell_size reaches an assigned grid", sized_grid.cell_size == 48.0)
+	sized.queue_free()
+
+
 func _test_interest() -> void:
 	print("")
 	print("[interest]")
@@ -655,115 +769,13 @@ func _test_interest() -> void:
 
 	_check_interest_thinning(config, observer, all)
 
-	# The grid must agree with the brute-force answer — that is the whole
-	# correctness requirement for a spatial index.
-	var grid := DotNetInterestGrid.new()
-	grid.radius = 100.0
-	grid.cell_size = 64.0
-	grid.evaluation_interval_sec = 0.0
-	grid._prepare(all, context)
-
-	var grid_relevant := grid.relevant_for(observer, all, 1, context)
-	var grid_ids := {}
-	for identity in grid_relevant:
-		grid_ids[identity.net_id] = true
-
-	_check("grid agrees with distance", grid_ids.has(2) and not grid_ids.has(3))
-	_check("grid keeps always_relevant", grid_ids.has(4))
-
-	# The config's cell size reaches a grid the host assigned — a knob documented
-	# from the first version and applied by nothing.
-	var sized := DotNetManager.new()
-	sized.name = "Sized"
-	sized.is_server = true
-	sized.auto_tick = false
-	sized.config_file = ""
-	var sized_config := DotNetConfig.new()
-	sized_config.interest_cell_size = 48.0
-	sized.config = sized_config
-	var sized_grid := DotNetInterestGrid.new()
-	sized.interest = sized_grid
-	add_child(sized)
-	sized.setup()
-	_check("interest_cell_size reaches an assigned grid", sized_grid.cell_size == 48.0)
-	sized.queue_free()
+	_interest_grid(observer, all, context)
 
 	_check_entity_caps()
 
-	# The reason the cap goes through prioritise: a cut that drops what the
-	# observer owns is the bug this family has already shipped once.
-	var crowd: Array[DotNetIdentity] = [beacon]
-	for i in range(20):
-		crowd.append(_make_entity(&"prop", 0))
-	var kept: Array[DotNetIdentity] = distance.prioritise(observer, crowd, 3, context)
-	var kept_ids := {}
-	for identity in kept:
-		kept_ids[identity.net_id] = true
-	_check("a tight cap keeps always_relevant", kept.size() == 3 and kept_ids.has(beacon.net_id))
+	_interest_caps_and_all(distance, beacon, observer, all, context)
 
-	# "All" includes everything, which is what makes it the wrong default for a
-	# competitive game.
-	var everything := DotNetInterestAll.new()
-	_check(
-		"all strategy includes the far entity",
-		everything.relevant_for(observer, all, 1, context).size() == 4
-	)
-
-	# Prioritisation must keep always_relevant when the cap bites.
-	var capped := distance.prioritise(observer, all, 2, context)
-	var capped_ids := {}
-	for identity in capped:
-		capped_ids[identity.net_id] = true
-	_check("cap applied", capped.size() == 2)
-	_check("always_relevant survives the cap", capped_ids.has(4))
-
-	# The cache holds the entities relevant at one instant, so an entity spawned since is in
-	# nobody's set (not even its owner's) until it expires. On a host ticking faster than the
-	# wall clock the age never reaches the interval, and the entity is never sent at all.
-	var cached := DotNetInterestDistance.new()
-	cached.radius = 100.0
-	cached.evaluation_interval_sec = 5.0
-
-	# Populate the cache with the world as it is now.
-	cached.relevant_for(observer, all, 1, context)
-
-	var newborn := _make_entity(&"player", 1)
-	add_child(newborn.get_parent())
-	(newborn.entity as Node3D).global_position = Vector3(4000, 0, 0)
-	newborn.net_id = 5
-
-	var newborn_beacon := _make_entity(&"objective", 0)
-	add_child(newborn_beacon.get_parent())
-	(newborn_beacon.entity as Node3D).global_position = Vector3(8000, 0, 0)
-	newborn_beacon.always_relevant = true
-	newborn_beacon.net_id = 6
-
-	var grown: Array[DotNetIdentity] = [
-		observer, near, far, beacon, newborn, newborn_beacon
-	]
-
-	var after := cached.relevant_for(observer, grown, 1, context)
-	var after_ids := {}
-	for identity in after:
-		after_ids[identity.net_id] = true
-
-	_check("a cached answer still includes what the observer owns", after_ids.has(5))
-	_check("and anything always relevant", after_ids.has(6))
-	_check("without losing what it already had", after_ids.has(2))
-	_check("or gaining what it should not", not after_ids.has(3))
-
-	# Pinning must not grow the cache: an entry added to it would survive the expiry
-	# that is supposed to re-evaluate it.
-	(newborn.entity as Node3D).global_position = Vector3(4000, 0, 0)
-	newborn.owner_peer_id = 99
-	var repinned := cached.relevant_for(observer, grown, 1, context)
-	var repinned_ids := {}
-	for identity in repinned:
-		repinned_ids[identity.net_id] = true
-	_check(
-		"and a pin is not remembered as if it had been evaluated",
-		not repinned_ids.has(5)
-	)
+	_interest_cache(near, far, beacon, observer, all, context)
 
 	# A custom strategy is a subclass and nothing else — the extensibility claim.
 	var custom := TagInterest.new()
