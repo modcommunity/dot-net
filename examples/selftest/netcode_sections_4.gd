@@ -579,7 +579,7 @@ func _test_reordered_and_repeated() -> void:
 	_sections_completed += 1
 
 
-func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:
+func _parts_manager(label: String, server: bool, mtu: int, native: bool = false) -> DotNetManager:
 	var manager := DotNetManager.new()
 	manager.name = label
 	manager.is_server = server
@@ -594,7 +594,7 @@ func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:
 	manager.config.mtu = mtu
 	manager.config.per_client_budget = 0
 	# These sections read the GDScript path's counters; [native] covers the library.
-	manager.config.native = false
+	manager.config.native = native
 	add_child(manager)
 	var _s := manager.setup()
 	# Every entity spawned is relevant at once, not after the interest cache expires.

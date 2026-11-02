@@ -1,11 +1,7 @@
 extends Node
 
-## dot-net's wire constants against every transport's default buffers: the worst-case snapshot
-## (every fragment of one message) and a 100-peer burst must fit, or a send is dropped by the engine.
-##
-## [codeblock]
-## godot --headless --path . res://examples/transport_fit_selftest.tscn
-## [/codeblock]
+## dot-net's wire constants against every transport's default buffers: the worst-case snapshot (every fragment of one message) and a 100-peer burst must fit, or the engine drops a send.
+## Run: [code]godot --headless --path . res://examples/transport_fit_selftest.tscn[/code]
 
 const SECTIONS := 3
 const CHECKS := 13

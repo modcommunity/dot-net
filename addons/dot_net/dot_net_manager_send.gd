@@ -151,8 +151,13 @@ func _native_for_snapshot() -> Object:
 			DotLog.info(CHANNEL, "snapshots are built natively", DotNetNative.describe())
 		else:
 			_native_note = "asked, GDScript in use: %s" % res.error.message
-			DotLog.info(CHANNEL, "native snapshots unavailable; GDScript in use",
-				{"reason": res.error.message})
+			# A missing, mismatched or broken library on a desktop is a deployment fault; only a
+			# platform that cannot load one (web, mobile) falls back quietly.
+			var detail := {"reason": res.error.message}
+			if DotPlatform.is_desktop():
+				DotLog.warn(CHANNEL, "native snapshots unavailable; GDScript in use", detail)
+			else:
+				DotLog.info(CHANNEL, "native snapshots unavailable; GDScript in use", detail)
 	return _native
 
 

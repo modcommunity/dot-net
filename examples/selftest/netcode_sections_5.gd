@@ -272,6 +272,54 @@ func _test_snapshot_thousand() -> void:
 	remove_child(watcher)
 	host.free()
 	watcher.free()
+	_thousand_native_matches(ENTITIES, MTU)
+
+
+## The same thousand-entity world built by the native core and by GDScript: every part byte for byte.
+func _thousand_native_matches(count: int, mtu: int) -> void:
+	if not DotNetNative.load_library().ok:
+		print("  native library not loaded; thousand-entity native comparison skipped")
+		return
+	var runs: Array = []
+	for native in [false, true]:
+		var host := _parts_manager("ThousandNativeServer%s" % native, true, mtu, native)
+		var watcher := _parts_manager("ThousandNativeClient%s" % native, false, mtu)
+		var sent: Array[PackedByteArray] = []
+		host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+			if peer_id == 2 and d == DotNetMessage.Delivery.UNRELIABLE:
+				sent.append(payload)
+			elif peer_id == 2:
+				var _schema := watcher.receive(payload, 1)
+		host.start()
+		watcher.start()
+		host.add_peer(2)
+		host.spawner.register_factory(&"player", _build_player)
+		watcher.spawner.register_factory(&"player", _build_player)
+		var on_server: Array[Movement] = []
+		var on_client: Array[Movement] = []
+		_spawn_mirrored(host, watcher, count, on_server, on_client)
+		var all: Array = []
+		var tick := 3
+		for _round in 3:
+			host.server_tick(tick)
+			tick += 1
+			for payload in sent:
+				all.append(payload)
+				var _r := watcher.receive_snapshot(payload)
+				var _a := host.receive_ack_payload(2, watcher.encode_ack())
+			sent.clear()
+		runs.append({"payloads": all, "native_used": host._native != null})
+		host.stop()
+		watcher.stop()
+		remove_child(host)
+		remove_child(watcher)
+		host.free()
+		watcher.free()
+	_check("native: the thousand-entity world is built natively at MTU %d" % mtu, bool(runs[1]["native_used"]))
+	_check("native: %d parts of a thousand entities equal GDScript's byte for byte %s" % [
+			(runs[0]["payloads"] as Array).size(), _first_difference(runs[0]["payloads"], runs[1]["payloads"])],
+		(runs[0]["payloads"] as Array).size() > 3
+			and _first_difference(runs[0]["payloads"], runs[1]["payloads"]) == "")
 
 
 ## Spawns [param count] players on [param host], mirrored on [param watcher], each at x = 1 + index.
