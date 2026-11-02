@@ -1,6 +1,6 @@
 # The native snapshot core
 
-An optional C++ library (a GDExtension built with godot-cpp) that does the per-peer half of a server's snapshot send: what each peer is believed to hold, what is dirty for it, the encoding, and its snapshot parts. Off by default; the GDScript path is always there and is what runs whenever the library is not asked for or cannot load. It changes no byte on the wire, so clients, browsers included, are unaffected and never load it.
+An optional C++ library (a GDExtension built with godot-cpp) that does the per-peer half of a server's snapshot send: what each peer is believed to hold, what is dirty for it, the encoding, and its snapshot parts. On by default since v0.1.23 (`DotNetConfig.native`; `DOT_NET_NATIVE=0` or `--net-native=false` turns it off); the GDScript path is always there and is what runs whenever the library is off or cannot load. It changes no byte on the wire, so clients, browsers included, are unaffected and never load it.
 
 ## Why
 
@@ -52,4 +52,4 @@ The snapshot send drops about fourfold; the rest of that tick (bots, brains, pla
 
 Interest in the library (`--native-interest`), same bench (100 peers, 213 NPCs, mean of 60 snapshots, same digest in every row): GDScript 125.1 ms, native 27.7, native with interest 12.1, native with interest and 4 workers 6.4 (native with 4 workers and GDScript interest: 22.2).
 
-Profile of the playground load server, 100 swarm clients (ms per snapshot call, staging, native on, 127 entities): interest 35.0, submit 8.9, apply 5.1, begin 1.2, join 0.3, so GDScript interest was 70% of a 52 ms send; with native interest on, send 19 ms and tick 68.6 -> 33.8 ms avg (p99 76.9 -> 37.5), with 4 workers as well send 15.7 and tick 30.7. Encoding itself is not redundant: the library keeps per-peer baselines and encodes only what is dirty for each peer.
+Profile of the playground load server, 100 swarm clients (ms per snapshot call, staging, native on, 127 entities): interest 35.0, submit 8.9, apply 5.1, begin 1.2, join 0.3, so GDScript interest was 70% of a 52 ms send; with native interest on, send 19 ms and tick 66.2 -> 33.8 ms avg (p99 76.9 -> 37.5), with 4 workers as well send 15.7 and tick 30.7. A server now defaults to tickrate 66 with the snapshot rate derived per game (`G2GGame.snapshot_rate_for`), so these ticks are 66 Hz ticks. Encoding itself is not redundant: the library keeps per-peer baselines and encodes only what is dirty for each peer.
