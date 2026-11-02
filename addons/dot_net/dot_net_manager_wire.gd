@@ -40,6 +40,8 @@ class SnapshotBuild extends RefCounted:
 	var input_leads_sent: int = 0
 	## The first oversized entity's fields, for the one warning; empty when none was.
 	var oversize: Dictionary = {}
+	## Entities in the view when the snapshot ran out of parts; 0 if it did not.
+	var parts_exhausted: int = 0
 
 
 ## The per-peer half of [method _send_snapshots] for a caller that has already filtered and
@@ -143,6 +145,7 @@ func _send_to_peer(
 			if parts.size() >= MAX_SNAPSHOT_PARTS:
 				# Out of parts: what does not fit waits, exactly as the budget makes it wait,
 				# and the accumulator puts it at the front next time.
+				_warn_parts_exhausted(peer_id, relevant.size())
 				budget.note_starved(peer_id)
 				continue
 			writer = _begin_snapshot_part(tick)
@@ -397,6 +400,7 @@ func _build_peer(
 			if parts.size() >= MAX_SNAPSHOT_PARTS:
 				# Out of parts: what does not fit waits, exactly as the budget makes it wait,
 				# and the accumulator puts it at the front next time.
+				build.parts_exhausted = relevant.size()
 				starved += 1
 				continue
 			writer = _begin_snapshot_part(tick)
@@ -505,6 +509,16 @@ func _build_peer(
 	return build
 
 
+## Logs once that a snapshot filled all its parts, so the rest of the view waits for later ticks.
+func _warn_parts_exhausted(peer_id: int, view_size: int) -> void:
+	if _warned_parts:
+		return
+	_warned_parts = true
+	DotLog.warn(CHANNEL, "a snapshot filled all its parts; the rest of the view waits for later ticks", {
+		"peer": peer_id, "view": view_size, "parts": MAX_SNAPSHOT_PARTS, "mtu": config.mtu,
+	})
+
+
 ## Makes [param build]'s shared changes and sends its parts. The manager's thread, in peer order.
 func _apply_build(build: SnapshotBuild, context: Dictionary) -> void:
 	var peer_id := build.peer_id
@@ -516,6 +530,9 @@ func _apply_build(build: SnapshotBuild, context: Dictionary) -> void:
 		_warned_oversize = true
 		DotLog.warn(CHANNEL, "an entity's state alone is bigger than the snapshot MTU; it is sent oversized",
 			build.oversize)
+
+	if build.parts_exhausted > 0:
+		_warn_parts_exhausted(peer_id, build.parts_exhausted)
 
 	if build.split:
 		snapshots_split += 1

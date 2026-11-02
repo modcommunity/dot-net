@@ -218,6 +218,9 @@ var input_leads_sent: int = 0
 ## a moment, and a warning per snapshot would be twenty a second.
 var _warned_oversize: bool = false
 
+## Whether the one warning about a snapshot that filled every part has been logged.
+var _warned_parts: bool = false
+
 ## Connected peers, on the server.
 var _peers: Array[int] = []
 

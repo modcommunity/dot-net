@@ -205,6 +205,90 @@ func _test_snapshot_parts() -> void:
 	watcher.free()
 
 
+## A thousand-entity world under the default entity cap reaches a client whole, within the parts limit.
+func _test_snapshot_thousand() -> void:
+	print("")
+	print("[snapshot of a thousand entities]")
+
+	const ENTITIES := 1000
+	const OVERFLOW := 3000
+	const MTU := 1200
+
+	_check("the default per-snapshot cap covers a thousand entities (%d)" % DotNetConfig.new().entity_cap(),
+		DotNetConfig.new().entity_cap() >= ENTITIES)
+
+	var host := _parts_manager("ThousandServer", true, MTU)
+	var watcher := _parts_manager("ThousandClient", false, MTU)
+	var sent: Array[PackedByteArray] = []
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if peer_id != 2:
+			return
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := watcher.receive(payload, 1)
+			return
+		sent.append(payload)
+	host.start()
+	watcher.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	watcher.spawner.register_factory(&"player", _build_player)
+
+	var on_server: Array[Movement] = []
+	var on_client: Array[Movement] = []
+	for i in ENTITIES:
+		var spawned := host.spawner.spawn(&"player", 3, Transform3D.IDENTITY, 0)
+		var server_entity: DotNetIdentity = spawned.value
+		var _mirror := watcher.spawner.spawn_remote(&"player", server_entity.net_id, 3, Transform3D.IDENTITY, 0)
+		on_server.append(server_entity.behaviours[0] as Movement)
+		on_client.append(watcher.registry.get_identity(server_entity.net_id).behaviours[0] as Movement)
+		on_server[i].position = Vector3(1.0 + i, 0, 0)
+	var largest := 0
+	var first_parts := 0
+	var arrived := 0
+	var ticks := 0
+	var tick := 3
+	while arrived < ENTITIES and ticks < 4:
+		host.server_tick(tick)
+		tick += 1
+		ticks += 1
+		if ticks == 1:
+			first_parts = sent.size()
+		for payload in sent:
+			largest = maxi(largest, payload.size())
+			var _r := watcher.receive_snapshot(payload)
+			var _a := host.receive_ack_payload(2, watcher.encode_ack())
+		sent.clear()
+		arrived = 0
+		for i in ENTITIES:
+			if absf(float((on_client[i].received_values().get(&"position", Vector3.ZERO) as Vector3).x) - (1.0 + i)) < 0.02:
+				arrived += 1
+	_check("a first snapshot of %d entities is %d parts, each within the MTU (largest %d)" % [ENTITIES, first_parts, largest],
+		first_parts > 1 and first_parts <= DotNetManager.MAX_SNAPSHOT_PARTS and largest <= MTU)
+	_check("what the sixteen parts could not hold follows within %d ticks: %d of %d arrived" % [ticks, arrived, ENTITIES],
+		arrived == ENTITIES and ticks <= 3)
+	_check("and the decode is clean (%d)" % watcher.stats.decode_failures, watcher.stats.decode_failures == 0)
+
+	# More than sixteen parts hold: the rest waits for a later tick, nothing overflows or fails to decode.
+	for i in range(ENTITIES, OVERFLOW):
+		var spawned := host.spawner.spawn(&"player", 3, Transform3D.IDENTITY, 0)
+		var server_entity: DotNetIdentity = spawned.value
+		var _mirror := watcher.spawner.spawn_remote(&"player", server_entity.net_id, 3, Transform3D.IDENTITY, 0)
+	host.server_tick(tick)
+	var failures_before := watcher.stats.decode_failures
+	for payload in sent:
+		var _r := watcher.receive_snapshot(payload)
+	_check("a world too big for sixteen parts is cut at %d, still within the MTU, and decodes (%d)" % [sent.size(), watcher.stats.decode_failures],
+		sent.size() <= DotNetManager.MAX_SNAPSHOT_PARTS and watcher.stats.decode_failures == failures_before)
+	_check("and the overflow was logged once", host._warned_parts or sent.size() < DotNetManager.MAX_SNAPSHOT_PARTS)
+
+	host.stop()
+	watcher.stop()
+	remove_child(host)
+	remove_child(watcher)
+	host.free()
+	watcher.free()
+
+
 ## The extra scenarios of [method _test_snapshot_threads] against the base run [param off].
 func _check_thread_variants(off: Dictionary, extra: Dictionary) -> void:
 	_check("thin: far entities thinned change what is sent %s" % _first_difference(off["payloads"], (extra["thin"] as Array)[0]["payloads"]),

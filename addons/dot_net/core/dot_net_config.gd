@@ -203,8 +203,9 @@ extends DotConfig
 @export var far_distance: float = 0.0
 
 ## Entities replicated to one client per snapshot, at most. 0 is unlimited. The backstop when interest
-## management is not enough — a thousand entities in one room.
-@export_range(0, 4096, 16) var max_entities_per_snapshot: int = 256
+## management is not enough. High by default: what one client really gets is set by interest, the
+## per-peer byte budget and the sixteen snapshot parts (what does not fit waits for a later tick).
+@export_range(0, 4096, 16) var max_entities_per_snapshot: int = 4096
 
 ## Entities built into one peer's snapshot, at most, taken in the budget's accumulated-priority order;
 ## the rest wait their turn, so each entity's update rate follows its score ([member
