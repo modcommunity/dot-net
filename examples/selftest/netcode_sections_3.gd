@@ -37,37 +37,36 @@ func _test_acked_baselines() -> void:
 	_check("a change is dirty for peer 7 again", shared.collect_dirty(7, false).size() == 1)
 	_check("and for peer 8 too", shared.collect_dirty(8, false).size() == 1)
 
-	# Rate limiting was shared the same way: one peer's send silenced the property
-	# for every other peer, not just for the one that had just been given it.
-	var limited := _make_entity(&"player", 0)
-	add_child(limited.get_parent())
-	var capped := limited.behaviours[0] as Movement
-	capped._bind(DotNetConfig.new())
-	capped.find_var(&"health").at_most(1.0)
-	capped.write_state(DotNetWriter.new(), capped.collect_dirty(7, true), 7, 100)
-	capped.health = 70
-	var eight_capped := false
-	for declaration in capped.collect_dirty(8, false):
-		if declaration.property == &"health":
-			eight_capped = true
-	_check("a rate limit is per peer, not global", eight_capped)
-	# And it does hold back the peer just served. write_state records a send time only for
-	# a rate-limited property (nothing else reads one), so this is what says it still does.
-	# Armed: with no send time recorded, peer 7 is sent health again at once.
-	capped.position = Vector3(9, 9, 9)
-	var seven_health := false
-	var seven_position := false
-	for declaration in capped.collect_dirty(7, false):
-		if declaration.property == &"health":
-			seven_health = true
-		if declaration.property == &"position":
-			seven_position = true
+	var limited := _acked_rate_limit()
+	var lonely := _acked_lost_property()
+	var untracked := _acked_untracked()
+	_check("peer 7 has a record", not shared.peer_view_state(7).is_empty())
+	shared.forget_peer(7)
+	_check("and it is gone once the peer is", shared.peer_view_state(7).is_empty())
+	_check("without disturbing peer 8", not shared.peer_view_state(8).is_empty())
+
+	for entity in [first, limited, lonely, untracked]:
+		_out_of_tree(entity)
+
+
+func _acked_untracked() -> DotNetIdentity:
+	# The pre-existing behaviour, and what a host that has not wired acks still gets.
+	var untracked := _make_entity(&"player", 0)
+	add_child(untracked.get_parent())
+	var optimistic := untracked.behaviours[0] as Movement
+	optimistic._bind(DotNetConfig.new())
+	optimistic.write_state(DotNetWriter.new(), optimistic.collect_dirty(7, true), 7, 100)
+	optimistic.health = 42
+	optimistic.write_state(DotNetWriter.new(), optimistic.collect_dirty(7, false), 7, 110)
+	optimistic.trim_pending(7, 200)
 	_check(
-		"a rate-limited change waits for the peer just sent it; the rest does not",
-		not seven_health and seven_position
+		"an unacknowledged send ages out as delivered when no acks arrive",
+		optimistic.collect_dirty(7, false).is_empty()
 	)
+	return untracked
 
 
+func _acked_lost_property() -> DotNetIdentity:
 	var lonely := _make_entity(&"player", 0)
 	add_child(lonely.get_parent())
 	var tracked := lonely.behaviours[0] as Movement
@@ -97,30 +96,40 @@ func _test_acked_baselines() -> void:
 		owed_again.has(&"health")
 	)
 	_check("and nothing that did arrive is re-sent", owed_again.size() == 1)
+	return lonely
 
 
-	# The pre-existing behaviour, and what a host that has not wired acks still gets.
-	var untracked := _make_entity(&"player", 0)
-	add_child(untracked.get_parent())
-	var optimistic := untracked.behaviours[0] as Movement
-	optimistic._bind(DotNetConfig.new())
-	optimistic.write_state(DotNetWriter.new(), optimistic.collect_dirty(7, true), 7, 100)
-	optimistic.health = 42
-	optimistic.write_state(DotNetWriter.new(), optimistic.collect_dirty(7, false), 7, 110)
-	optimistic.trim_pending(7, 200)
+func _acked_rate_limit() -> DotNetIdentity:
+	# Rate limiting was shared the same way: one peer's send silenced the property
+	# for every other peer, not just for the one that had just been given it.
+	var limited := _make_entity(&"player", 0)
+	add_child(limited.get_parent())
+	var capped := limited.behaviours[0] as Movement
+	capped._bind(DotNetConfig.new())
+	capped.find_var(&"health").at_most(1.0)
+	capped.write_state(DotNetWriter.new(), capped.collect_dirty(7, true), 7, 100)
+	capped.health = 70
+	var eight_capped := false
+	for declaration in capped.collect_dirty(8, false):
+		if declaration.property == &"health":
+			eight_capped = true
+	_check("a rate limit is per peer, not global", eight_capped)
+	# And it does hold back the peer just served. write_state records a send time only for
+	# a rate-limited property (nothing else reads one), so this is what says it still does.
+	# Armed: with no send time recorded, peer 7 is sent health again at once.
+	capped.position = Vector3(9, 9, 9)
+	var seven_health := false
+	var seven_position := false
+	for declaration in capped.collect_dirty(7, false):
+		if declaration.property == &"health":
+			seven_health = true
+		if declaration.property == &"position":
+			seven_position = true
 	_check(
-		"an unacknowledged send ages out as delivered when no acks arrive",
-		optimistic.collect_dirty(7, false).is_empty()
+		"a rate-limited change waits for the peer just sent it; the rest does not",
+		not seven_health and seven_position
 	)
-
-
-	_check("peer 7 has a record", not shared.peer_view_state(7).is_empty())
-	shared.forget_peer(7)
-	_check("and it is gone once the peer is", shared.peer_view_state(7).is_empty())
-	_check("without disturbing peer 8", not shared.peer_view_state(8).is_empty())
-
-	for entity in [first, limited, lonely, untracked]:
-		_out_of_tree(entity)
+	return limited
 
 
 ## [member DotNetConfig.share_dirty_sets] against the per-peer rule it short-cuts, on two copies
@@ -439,27 +448,17 @@ func _bump_run(speed: float, loss: float, estimate: StringName) -> Dictionary:
 			pushed[0] += 1
 		return bot
 
-	match estimate:
-		&"oracle":
-			bumper_c.obstacle_at = func(tick: int) -> Vector3:
-				return pacer_s.at(tick, dt)[0]
-		&"heard":
-			bumper_c.obstacle_at = func(_tick: int) -> Vector3:
-				return pacer_c.heard_position if pacer_c.heard_tick >= 0 else Vector3.INF
-		&"ignore":
-			bumper_c.obstacle_at = Callable()
-		&"line":
-			bumper_c.obstacle_at = func(tick: int) -> Vector3:
-				var drawn := guest.interpolator.sample(bot_c.net_id, float(tick))
-				return drawn.get(&"position", Vector3.INF)
-		_:
-			# `extrapolated` and `default`: the call a game makes, at the tick being simulated.
-			bumper_c.obstacle_at = func(tick: int) -> Vector3:
-				var at: Variant = pacer_c.extrapolated_value(&"position", &"velocity", tick)
-				return Vector3.INF if at == null else at as Vector3
-
+	_bump_obstacle_estimate(estimate, bumper_c, pacer_s, pacer_c, bot_c, guest, dt)
 	var server_at := {}
 	var client_at := {}
+	_bump_drive(host, guest, bumper_s, bumper_c, wire, server_at, client_at, dt)
+	var gaps := _bump_gaps(server_at, client_at)
+
+	_free_managers([host, guest])
+	return {"worst": gaps[0], "mean": gaps[1], "contact": pushed[0]}
+
+
+func _bump_drive(host: DotNetManager, guest: DotNetManager, bumper_s: Bumper, bumper_c: Bumper, wire: Array[PackedByteArray], server_at: Dictionary, client_at: Dictionary, dt: float) -> void:
 	for s in range(1, BUMP_TICKS + 1):
 		var c := s + BUMP_LEAD
 		var input := DemoInput.new()
@@ -486,6 +485,29 @@ func _bump_run(speed: float, loss: float, estimate: StringName) -> Dictionary:
 		wire.clear()
 		var _ack := host.receive_ack_payload(2, guest.encode_ack())
 
+
+func _bump_obstacle_estimate(estimate: StringName, bumper_c: Bumper, pacer_s: Pacer, pacer_c: Pacer, bot_c: DotNetIdentity, guest: DotNetManager, dt: float) -> void:
+	match estimate:
+		&"oracle":
+			bumper_c.obstacle_at = func(tick: int) -> Vector3:
+				return pacer_s.at(tick, dt)[0]
+		&"heard":
+			bumper_c.obstacle_at = func(_tick: int) -> Vector3:
+				return pacer_c.heard_position if pacer_c.heard_tick >= 0 else Vector3.INF
+		&"ignore":
+			bumper_c.obstacle_at = Callable()
+		&"line":
+			bumper_c.obstacle_at = func(tick: int) -> Vector3:
+				var drawn := guest.interpolator.sample(bot_c.net_id, float(tick))
+				return drawn.get(&"position", Vector3.INF)
+		_:
+			# `extrapolated` and `default`: the call a game makes, at the tick being simulated.
+			bumper_c.obstacle_at = func(tick: int) -> Vector3:
+				var at: Variant = pacer_c.extrapolated_value(&"position", &"velocity", tick)
+				return Vector3.INF if at == null else at as Vector3
+
+
+func _bump_gaps(server_at: Dictionary, client_at: Dictionary) -> Array[float]:
 	var worst := 0.0
 	var total := 0.0
 	var counted := 0
@@ -497,14 +519,7 @@ func _bump_run(speed: float, loss: float, estimate: StringName) -> Dictionary:
 		worst = maxf(worst, gap)
 		total += gap
 		counted += 1
-
-	host.stop()
-	guest.stop()
-	remove_child(host)
-	remove_child(guest)
-	host.free()
-	guest.free()
-	return {"worst": worst, "mean": total / maxf(1.0, float(counted)), "contact": pushed[0]}
+	return [worst, total / maxf(1.0, float(counted))]
 
 
 func _bump_table() -> Dictionary:

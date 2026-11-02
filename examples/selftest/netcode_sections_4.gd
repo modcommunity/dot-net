@@ -78,36 +78,8 @@ func _test_reconcile_once_per_frame() -> void:
 	const TICKS := 64
 	const LEAD := 6
 
-	var host := DotNetManager.new()
-	host.name = "OnceServer"
-	host.is_server = true
-	host.service_scope = &"once_server"
-	host.local_peer_id = 1
-	host.auto_tick = false
-	host.config_file = ""
-	host.config = DotNetConfig.new()
-	host.config.tick_rate = 60
-	host.config.snapshot_rate = 60
-	add_child(host)
-
-	var guests: Array[DotNetManager] = []
-	for deferred in [false, true]:
-		var guest := DotNetManager.new()
-		guest.name = "OnceClient_%d" % int(deferred)
-		guest.is_server = false
-		guest.service_scope = StringName("once_client_%d" % int(deferred))
-		guest.local_peer_id = 2
-		guest.auto_tick = false
-		guest.config_file = ""
-		guest.config = DotNetConfig.new()
-		guest.config.tick_rate = 60
-		guest.config.snapshot_rate = 60
-		guest.config.input_margin_ticks = LEAD
-		guest.config.reconcile_once_per_frame = deferred
-		add_child(guest)
-		var _set := guest.setup()
-		guests.append(guest)
-
+	var host := _once_host()
+	var guests := _once_guests(LEAD)
 	var _a := host.setup()
 	var wire: Array[PackedByteArray] = []
 	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
@@ -118,18 +90,10 @@ func _test_reconcile_once_per_frame() -> void:
 	host.add_peer(2)
 	host.spawner.register_factory(&"player", _build_player)
 	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
-	var moving: Array[Movement] = []
-	for guest in guests:
-		var _s := guest.start()
-		guest.spawner.register_factory(&"player", _build_player)
-		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
-			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
-		).value
-		moving.append(mirror.behaviours[0] as Movement)
-
-	var replays_before: Array[int] = []
-	for guest in guests:
-		replays_before.append(int(guest.predictor.describe()["replays"]))
+	var moving := _once_mirrors(guests, on_server)
+	var replays_before: Array[int] = [
+		int(guests[0].predictor.describe()["replays"]), int(guests[1].predictor.describe()["replays"])
+	]
 
 	var bursts := 0
 	var read := 0
@@ -140,14 +104,7 @@ func _test_reconcile_once_per_frame() -> void:
 		var c := s + LEAD
 		# A turn every 8 ticks, so a replay on the wrong inputs could not agree by luck.
 		var move := Vector2(1.0, 0.0) if (s / 8) % 2 == 0 else Vector2(0.0, 1.0)
-		for g in range(2):
-			var input := DemoInput.new()
-			input.tick = c
-			input.delta = 1.0 / 60.0
-			input.move = move
-			guests[g].local_inputs().push(input)
-			moving[g]._net_apply_input(input, c)
-			guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
+		_once_push_inputs(guests, moving, move, c)
 
 		var copy := DemoInput.new()
 		copy.tick = c
@@ -188,13 +145,66 @@ func _test_reconcile_once_per_frame() -> void:
 	_check("nothing moves before the flush", untouched)
 	_check("and both land in the same place (worst %.6f m apart)" % worst_apart, worst_apart < 1e-4)
 
-	host.stop()
-	remove_child(host)
-	host.free()
+	_free_managers([host] + guests)
+
+
+func _once_mirrors(guests: Array[DotNetManager], on_server: DotNetIdentity) -> Array[Movement]:
+	var moving: Array[Movement] = []
 	for guest in guests:
-		guest.stop()
-		remove_child(guest)
-		guest.free()
+		var _s := guest.start()
+		guest.spawner.register_factory(&"player", _build_player)
+		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
+			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
+		).value
+		moving.append(mirror.behaviours[0] as Movement)
+	return moving
+
+
+func _once_host() -> DotNetManager:
+	var host := DotNetManager.new()
+	host.name = "OnceServer"
+	host.is_server = true
+	host.service_scope = &"once_server"
+	host.local_peer_id = 1
+	host.auto_tick = false
+	host.config_file = ""
+	host.config = DotNetConfig.new()
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 60
+	add_child(host)
+	return host
+
+
+func _once_push_inputs(guests: Array[DotNetManager], moving: Array[Movement], move: Vector2, c: int) -> void:
+	for g in range(2):
+		var input := DemoInput.new()
+		input.tick = c
+		input.delta = 1.0 / 60.0
+		input.move = move
+		guests[g].local_inputs().push(input)
+		moving[g]._net_apply_input(input, c)
+		guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
+
+
+func _once_guests(lead: int) -> Array[DotNetManager]:
+	var guests: Array[DotNetManager] = []
+	for deferred in [false, true]:
+		var guest := DotNetManager.new()
+		guest.name = "OnceClient_%d" % int(deferred)
+		guest.is_server = false
+		guest.service_scope = StringName("once_client_%d" % int(deferred))
+		guest.local_peer_id = 2
+		guest.auto_tick = false
+		guest.config_file = ""
+		guest.config = DotNetConfig.new()
+		guest.config.tick_rate = 60
+		guest.config.snapshot_rate = 60
+		guest.config.input_margin_ticks = lead
+		guest.config.reconcile_once_per_frame = deferred
+		add_child(guest)
+		var _set := guest.setup()
+		guests.append(guest)
+	return guests
 
 
 ## [member DotNetConfig.skip_matching_replays]: a snapshot the prediction already reached replays
@@ -216,27 +226,7 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	# A: replays everything. B: skips, through `DotNetPredictor.predict`. C: skips, through
 	# `DotNetManager.predict_tick`. D: skips but simulates by hand, so the predictor never
 	# remembers those ticks and only a snapshot a replay happened to cover can match.
-	var guests: Array[DotNetManager] = []
-	for g in range(4):
-		var skip := g > 0
-		var guest := DotNetManager.new()
-		guest.name = "SkipClient_%d" % g
-		guest.is_server = false
-		guest.service_scope = StringName("skip_client_%d" % g)
-		guest.local_peer_id = 2
-		guest.auto_tick = false
-		guest.config_file = ""
-		guest.config = DotNetConfig.new()
-		guest.config.tick_rate = 60
-		guest.config.snapshot_rate = 60
-		guest.config.input_margin_ticks = LEAD
-		guest.config.skip_matching_replays = skip
-		# Both deferred: a skip needs the prediction still in the properties when it decides.
-		guest.config.reconcile_once_per_frame = true
-		add_child(guest)
-		var _set := guest.setup()
-		guests.append(guest)
-
+	var guests := _skip_guests(LEAD)
 	var _a := host.setup()
 	var wire: Array[PackedByteArray] = []
 	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
@@ -247,19 +237,7 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	host.add_peer(2)
 	host.spawner.register_factory(&"player", _build_player)
 	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
-	var moving: Array[Movement] = []
-	for guest in guests:
-		var _s := guest.start()
-		guest.spawner.register_factory(&"player", _build_player)
-		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
-			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
-		).value
-		var movement := mirror.behaviours[0] as Movement
-		movement.keeps_own_state = own_state
-		movement._sim_position = movement.position
-		movement._sim_velocity = movement.velocity
-		moving.append(movement)
-
+	var moving := _skip_mirrors(guests, on_server, own_state)
 	var before: Array[Dictionary] = []
 	for guest in guests:
 		before.append(guest.perf_counters())
@@ -304,9 +282,54 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 		final_apart = moving[0].position.distance_to(moving[1].position)
 		worst_apart = maxf(worst_apart, final_apart)
 
+	_skip_checks(host, guests, moving, before, worst_apart, final_apart, overruled, TICKS, LEAD)
+	_free_managers([host] + guests)
+
+
+func _skip_mirrors(guests: Array[DotNetManager], on_server: DotNetIdentity, own_state: bool) -> Array[Movement]:
+	var moving: Array[Movement] = []
+	for guest in guests:
+		var _s := guest.start()
+		guest.spawner.register_factory(&"player", _build_player)
+		var mirror: DotNetIdentity = guest.spawner.spawn_remote(
+			&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
+		).value
+		var movement := mirror.behaviours[0] as Movement
+		movement.keeps_own_state = own_state
+		movement._sim_position = movement.position
+		movement._sim_velocity = movement.velocity
+		moving.append(movement)
+	return moving
+
+
+func _skip_guests(lead: int) -> Array[DotNetManager]:
+	var guests: Array[DotNetManager] = []
+	for g in range(4):
+		var skip := g > 0
+		var guest := DotNetManager.new()
+		guest.name = "SkipClient_%d" % g
+		guest.is_server = false
+		guest.service_scope = StringName("skip_client_%d" % g)
+		guest.local_peer_id = 2
+		guest.auto_tick = false
+		guest.config_file = ""
+		guest.config = DotNetConfig.new()
+		guest.config.tick_rate = 60
+		guest.config.snapshot_rate = 60
+		guest.config.input_margin_ticks = lead
+		guest.config.skip_matching_replays = skip
+		# Both deferred: a skip needs the prediction still in the properties when it decides.
+		guest.config.reconcile_once_per_frame = true
+		add_child(guest)
+		var _set := guest.setup()
+		guests.append(guest)
+	return guests
+
+
+func _skip_checks(host: DotNetManager, guests: Array[DotNetManager], moving: Array[Movement], before: Array[Dictionary], worst_apart: float, final_apart: float, overruled: int, ticks: int, lead: int) -> void:
 	var hp := host.perf_counters()
 	_check("the server counts its ticks and their send time (%d ticks, %d us)" % [int(hp[&"server_ticks"]), int(hp[&"server_send_usec"])],
-		int(hp[&"server_ticks"]) == TICKS and int(hp[&"server_send_usec"]) > 0)
+		int(hp[&"server_ticks"]) == ticks and int(hp[&"server_send_usec"]) > 0)
 	var a := guests[0].perf_counters()
 	var b := guests[1].perf_counters()
 	var replayed_a := int(a[&"replayed_ticks"]) - int(before[0][&"replayed_ticks"])
@@ -320,7 +343,7 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	var td := guests[3].perf_counters()
 	var replayed_d := int(td[&"replayed_ticks"]) - int(before[3][&"replayed_ticks"])
 
-	_check("with it off every snapshot replays the lead (%d ticks)" % replayed_a, replayed_a >= TICKS * LEAD / 2)
+	_check("with it off every snapshot replays the lead (%d ticks)" % replayed_a, replayed_a >= ticks * lead / 2)
 	_check("with it on most are skipped (%d of %d reconciles)" % [skipped_b, reconciles_b],
 		skipped_b > 0 and skipped_b >= reconciles_b - overruled * 3)
 	_check("and it replays a fraction of the ticks (%d against %d)" % [replayed_b, replayed_a],
@@ -332,7 +355,7 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	_check("predict_tick skips as much (%d of %d reconciles, %d ticks) and counts its time (%d ticks, %d us)"
 		% [skipped_c, reconciles_c, replayed_c, int(tc[&"client_ticks"]) - int(before[2][&"client_ticks"]), int(tc[&"predict_usec"]) - int(before[2][&"predict_usec"])],
 		skipped_c >= reconciles_c - overruled * 3 - 2 and replayed_c * 4 < replayed_a
-		and int(tc[&"client_ticks"]) - int(before[2][&"client_ticks"]) >= TICKS - 2)
+		and int(tc[&"client_ticks"]) - int(before[2][&"client_ticks"]) >= ticks - 2)
 	_check("where simulating by hand, unremembered, replays most of the lead anyway (%d ticks against %d)" % [replayed_d, replayed_c],
 		replayed_d > replayed_c * 2)
 	var c_apart := moving[2].position.distance_to(moving[0].position)
@@ -348,14 +371,6 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 	raw.round_trip()
 	_check("round_trip rounds an input to what the server decodes (%s against %s)" % [raw.move, decoded.move],
 		raw.move == decoded.move and raw.tick == 7 and not is_equal_approx(raw.move.x, 0.123456))
-
-	host.stop()
-	remove_child(host)
-	host.free()
-	for guest in guests:
-		guest.stop()
-		remove_child(guest)
-		guest.free()
 
 
 ## [member DotNetConfig.stagger_snapshots]: each peer still gets a snapshot every
@@ -442,34 +457,28 @@ func _test_staggered_snapshots() -> void:
 	_sections_completed += 1
 
 
+func _reorder_manager(node_name: String, scope: StringName, server_side: bool, peer: int) -> DotNetManager:
+	var manager := DotNetManager.new()
+	manager.name = node_name
+	manager.is_server = server_side
+	manager.service_scope = scope
+	manager.local_peer_id = peer
+	manager.auto_tick = false
+	manager.config_file = ""
+	manager.config = DotNetConfig.new()
+	manager.config.tick_rate = 60
+	manager.config.snapshot_rate = 20
+	add_child(manager)
+	return manager
+
+
 func _reorder_run(every_other: bool) -> void:
 	_reorder_rng.seed = 20261009
 	_reorder_held_change = false
 	var label := "every other snapshot late" if every_other else "jitter"
 
-	var host := DotNetManager.new()
-	host.name = "ReorderServer"
-	host.is_server = true
-	host.service_scope = &"reorder_server"
-	host.local_peer_id = 1
-	host.auto_tick = false
-	host.config_file = ""
-	host.config = DotNetConfig.new()
-	host.config.tick_rate = 60
-	host.config.snapshot_rate = 20
-	add_child(host)
-
-	var watcher := DotNetManager.new()
-	watcher.name = "ReorderClient"
-	watcher.is_server = false
-	watcher.service_scope = &"reorder_client"
-	watcher.local_peer_id = 2
-	watcher.auto_tick = false
-	watcher.config_file = ""
-	watcher.config = DotNetConfig.new()
-	watcher.config.tick_rate = 60
-	watcher.config.snapshot_rate = 20
-	add_child(watcher)
+	var host := _reorder_manager("ReorderServer", &"reorder_server", true, 1)
+	var watcher := _reorder_manager("ReorderClient", &"reorder_client", false, 2)
 
 	var _s1 := host.setup()
 	var _s2 := watcher.setup()
@@ -515,24 +524,7 @@ func _reorder_run(every_other: bool) -> void:
 			on_server.health = 42
 		host.server_tick(tick)
 
-		for payload in sent:
-			# The snapshot carrying the change is always held back, any other with a fixed chance; a
-			# held one arrives after the next and is ignored as older. Not every other one: the re-send
-			# would then land late every time (a link with that exact period would starve a property).
-			var carries_change := tick >= 61 and tick <= 63 and held.is_empty() and changed_at < 0 \
-				and not _reorder_held_change
-			if held.is_empty() and (carries_change or every_other or _reorder_rng.randf() < 0.3):
-				if carries_change:
-					_reorder_held_change = true
-				held.append(payload)
-				continue
-			deliver.call(payload)
-			if not held.is_empty():
-				deliver.call(held[0])
-				held.clear()
-			# And now and then a stale copy of one already applied, arriving again.
-			if tick % 7 == 0:
-				deliver.call(payload)
+		_reorder_deliver(sent, held, deliver, tick, every_other, changed_at)
 		sent.clear()
 
 		var now_health := int(on_client.received_values().get(&"health", 100))
@@ -551,12 +543,28 @@ func _reorder_run(every_other: bool) -> void:
 		watcher.stats.decode_failures == 0)
 	_check("%s: the watched position keeps up (%.2f m behind)" % [label, apart], apart < 1.0)
 
-	host.stop()
-	watcher.stop()
-	remove_child(host)
-	remove_child(watcher)
-	host.free()
-	watcher.free()
+	_free_managers([host, watcher])
+
+
+func _reorder_deliver(sent: Array[PackedByteArray], held: Array[PackedByteArray], deliver: Callable, tick: int, every_other: bool, changed_at: int) -> void:
+	for payload in sent:
+		# The snapshot carrying the change is always held back, any other with a fixed chance; a
+		# held one arrives after the next and is ignored as older. Not every other one: the re-send
+		# would then land late every time (a link with that exact period would starve a property).
+		var carries_change := tick >= 61 and tick <= 63 and held.is_empty() and changed_at < 0 \
+			and not _reorder_held_change
+		if held.is_empty() and (carries_change or every_other or _reorder_rng.randf() < 0.3):
+			if carries_change:
+				_reorder_held_change = true
+			held.append(payload)
+			continue
+		deliver.call(payload)
+		if not held.is_empty():
+			deliver.call(held[0])
+			held.clear()
+		# And now and then a stale copy of one already applied, arriving again.
+		if tick % 7 == 0:
+			deliver.call(payload)
 
 
 func _test_reordered_and_repeated() -> void:

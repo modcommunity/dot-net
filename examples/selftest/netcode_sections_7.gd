@@ -246,43 +246,7 @@ func _test_integration() -> void:
 	print("")
 	print("[integration]")
 
-	server = _bare_manager(true, 1)
-	server.name = "Server"
-	server.config.snapshot_rate = 20
-	server.config.tick_rate = 60
-	add_child(server)
-
-	client = _bare_manager(false, 2)
-	client.name = "Client"
-	client.config.snapshot_rate = 20
-	client.config.tick_rate = 60
-	add_child(client)
-
-	_check("server setup", server.setup().ok)
-	_check("client setup", client.setup().ok)
-
-	# The loopback: the server's payloads land in the client, with loss.
-	server.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
-		if peer_id != 2 and peer_id != 0:
-			return
-		# The reliable route: the schema table, which the client decodes as a message.
-		# Never dropped -- a reliable channel is one that does not lose things.
-		if d != DotNetMessage.Delivery.UNRELIABLE:
-			var into := client.receive(payload, 1)
-			_check("the client adopts the server's schema table", into.ok)
-			return
-		_drop_next += 1
-		# Drop one packet in five, so interpolation and loss handling are exercised
-		# rather than assumed.
-		if _drop_next % 5 == 0:
-			return
-		_in_flight.append({"payload": payload})
-
-	server.start()
-	client.start()
-
-	server.add_peer(2)
-
+	_integration_link()
 	# The same prefab on both sides, built in code so the demo needs no scene files.
 	server.spawner.register_factory(&"player", _build_player)
 	client.spawner.register_factory(&"player", _build_player)
@@ -339,6 +303,15 @@ func _test_integration() -> void:
 		divergence < 2.0
 	)
 
+	_integration_stats_checks()
+	# Disconnect must release everything the peer owned.
+	var released := server.remove_peer(2)
+	_check("peer removal released its entities", released.size() == 1)
+	_check("registry emptied", server.registry.count() == 0)
+	_sections_completed += 1
+
+
+func _integration_stats_checks() -> void:
 	_check("stats recorded sends", server.stats.packets_sent > 0)
 	_check("stats recorded receives", client.stats.packets_received > 0)
 	_check(
@@ -351,11 +324,44 @@ func _test_integration() -> void:
 		server.stats.average_packet_bytes() > 0.0
 	)
 
-	# Disconnect must release everything the peer owned.
-	var released := server.remove_peer(2)
-	_check("peer removal released its entities", released.size() == 1)
-	_check("registry emptied", server.registry.count() == 0)
-	_sections_completed += 1
+
+func _integration_link() -> void:
+	server = _bare_manager(true, 1)
+	server.name = "Server"
+	server.config.snapshot_rate = 20
+	server.config.tick_rate = 60
+	add_child(server)
+
+	client = _bare_manager(false, 2)
+	client.name = "Client"
+	client.config.snapshot_rate = 20
+	client.config.tick_rate = 60
+	add_child(client)
+
+	_check("server setup", server.setup().ok)
+	_check("client setup", client.setup().ok)
+
+	# The loopback: the server's payloads land in the client, with loss.
+	server.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if peer_id != 2 and peer_id != 0:
+			return
+		# The reliable route: the schema table, which the client decodes as a message.
+		# Never dropped -- a reliable channel is one that does not lose things.
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var into := client.receive(payload, 1)
+			_check("the client adopts the server's schema table", into.ok)
+			return
+		_drop_next += 1
+		# Drop one packet in five, so interpolation and loss handling are exercised
+		# rather than assumed.
+		if _drop_next % 5 == 0:
+			return
+		_in_flight.append({"payload": payload})
+
+	server.start()
+	client.start()
+
+	server.add_peer(2)
 
 
 ## Ninety ticks of the server's snapshots reaching [param c] four ticks late, the mirror spawned

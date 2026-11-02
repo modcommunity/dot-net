@@ -696,3 +696,11 @@ func _check(what: String, passed: bool) -> void:
 	else:
 		_failed += 1
 		print("  %-52s FAILED" % what)
+
+
+## Stops, detaches and frees managers a section built by hand.
+func _free_managers(managers: Array) -> void:
+	for manager: DotNetManager in managers:
+		manager.stop()
+		remove_child(manager)
+		manager.free()
