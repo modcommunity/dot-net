@@ -8,7 +8,7 @@ At 100 players a snapshot's cost is bookkeeping, not bandwidth: a few microsecon
 
 ## Turning it on
 
-`DotNetConfig.native = true`, or `DOT_NET_NATIVE=1`, or `--net-native` on the server's command line. The manager logs one line either way: `snapshots are built natively` with the library's path, or `native snapshots asked for but unavailable; GDScript in use` with the reason (no library for this platform, not a desktop or server build, an ABI mismatch). `describe_lines()` has a `native` line. With `snapshot_workers` on as well, interest runs on dot-core's workers as before and the builds on the library's own threads.
+On by default (`DotNetConfig.native = true`; only a server builds snapshots). `DOT_NET_NATIVE=0` or `--net-native=false` turns it off. The manager logs one line either way: `snapshots are built natively` with the library's path, or (INFO) `native snapshots unavailable; GDScript in use` with the reason (no library for this platform, not a desktop or server build, an ABI mismatch). `describe_lines()` has a `native` line. With `snapshot_workers` on as well, interest runs on dot-core's workers as before and the builds on the library's own threads.
 
 The library is looked for at `DotNetConfig.native_path` (`DOT_NET_NATIVE_PATH`), else `addons/dot_net/native/dot_net_native.cfg`, else `dot_net_native/dot_net_native.cfg` next to the executable. It is a `.cfg`, not a `.gdextension`, so an editor or a client never loads it on its own; `DotNetNative.load_library()` loads it once per process when a server asks.
 

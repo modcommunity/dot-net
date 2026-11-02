@@ -593,6 +593,8 @@ func _parts_manager(label: String, server: bool, mtu: int) -> DotNetManager:
 	manager.config.snapshot_rate = 60
 	manager.config.mtu = mtu
 	manager.config.per_client_budget = 0
+	# These sections read the GDScript path's counters; [native] covers the library.
+	manager.config.native = false
 	add_child(manager)
 	var _s := manager.setup()
 	# Every entity spawned is relevant at once, not after the interest cache expires.
