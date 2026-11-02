@@ -6,7 +6,6 @@ extends RefCounted
 ## The cvar side is wired by the host (dot-net has no console): [method bind_client_cvar] on a client,
 ## [method bind_server_cvar] on a server, [method follow_cvars] on a client to read the server's switch.
 
-const CHANNEL := "net"
 const CVAR_BASELINE := "cl_latency_baseline"
 const CVAR_ALLOW := "sv_allow_client_latency"
 ## Longest baseline accepted, seconds.
