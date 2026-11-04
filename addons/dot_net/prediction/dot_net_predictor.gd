@@ -14,6 +14,9 @@ var config: DotNetConfig
 ## Outstanding visual corrections being eased out.
 var _corrections: Dictionary = {}
 
+## When 0 or more, the clock easing reads, in milliseconds, instead of the wall clock (tests freeze it).
+var fixed_now_ms: int = -1
+
 var _replays: int = 0
 var _corrections_applied: int = 0
 var _snaps: int = 0
@@ -320,7 +323,7 @@ func _begin_correction(
 		# offset by the difference — which then decays to zero. The simulation
 		# stays authoritative while the visuals catch up.
 		"offset": offset,
-		"at_ms": Time.get_ticks_msec(),
+		"at_ms": _now_ms(),
 		"sec": _ease_sec(offset.length()),
 	}
 
@@ -332,7 +335,7 @@ func visual_offset(net_id: int) -> Vector3:
 		return Vector3.ZERO
 
 	var correction: Dictionary = _corrections[net_id]
-	var elapsed := float(Time.get_ticks_msec() - int(correction["at_ms"])) / 1000.0
+	var elapsed := float(_now_ms() - int(correction["at_ms"])) / 1000.0
 
 	var sec: float = correction.get("sec", config.reconcile_smooth_sec)
 	if sec <= 0.0 or elapsed >= sec:
@@ -344,6 +347,10 @@ func visual_offset(net_id: int) -> Vector3:
 	# Eased rather than linear: a linear decay has a visible corner at the end,
 	# where the correction stops moving all at once.
 	return (correction["offset"] as Vector3) * (remaining * remaining)
+
+
+func _now_ms() -> int:
+	return fixed_now_ms if fixed_now_ms >= 0 else Time.get_ticks_msec()
 
 
 func has_pending_correction(net_id: int) -> bool:

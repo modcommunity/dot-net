@@ -592,6 +592,7 @@ func _test_correction_offsets() -> void:
 		client_movement._net_simulate(input.tick, dt)
 
 	var predictor := DotNetPredictor.new(config)
+	predictor.fixed_now_ms = 1000
 
 	# Four millimetres: under the reporting epsilon, and the size a replay from a quantised
 	# state moves a player by on every snapshot.
