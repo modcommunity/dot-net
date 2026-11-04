@@ -421,36 +421,25 @@ func _test_skipped_ticks() -> void:
 	var long := _skip_run(2, false)
 	_check("a jump past predict_fill_ticks is left to the replay (%d filled, %d replays)" % [long["filled"], long["replays"]],
 		int(long["filled"]) > 0 and int(long["replays"]) > 0)
+	_check("and still lands on the server's state (%.5f m)" % float(long["apart"]), float(long["apart"]) < 0.0001)
+	var jump := _jump_run(10, 8, 25)
+	_check("a jump past the bound in a reconciling frame ends on the server (%.5f m, %s)" % [float(jump["apart"]), jump["bad"]],
+		float(jump["apart"]) < 0.0001 and (jump["bad"] as Array).is_empty())
+	var behind := _jump_run(10, 12, 15)
+	_check("a snapshot newer than the last prediction is not stepped again (%.5f m, %s)" % [float(behind["apart"]), behind["bad"]],
+		float(behind["apart"]) < 0.0001 and (behind["bad"] as Array).is_empty())
+	var stale := _jump_run(10, -1, 16, 5)
+	_check("an entity that stopped being predicted is not filled on regaining it (%d filled, %s)" % [int(stale["filled"]), stale["bad"]],
+		int(stale["filled"]) == 0 and (stale["bad"] as Array).is_empty())
 
 
 ## A client that predicts only the tick its clock lands on, jumping 3 or 4 ticks every fifth frame, against a server that runs every tick and keeps the previous command through a hole; a snapshot six ticks old is read every frame. [param own_fill] predicts the skipped ticks itself first, as a game working round the hole does.
 func _skip_run(fill: int, own_fill: bool) -> Dictionary:
-	var c := DotNetManager.new()
-	c.is_server = false
-	c.local_peer_id = 5
-	c.auto_tick = false
-	c.config_file = ""
-	c.service_scope = StringName("skip_%d_%s" % [fill, own_fill])
-	c.config = DotNetConfig.new()
-	c.config.reconcile_once_per_frame = true
-	c.config.skip_matching_replays = true
-	c.config.predict_fill_ticks = fill
-	add_child(c)
-	var _up := c.setup()
-	c.clock.sync_from_server(0, 0.0)
-	var body := Node3D.new()
-	var identity := DotNetIdentity.new()
-	identity.owner_peer_id = 5
-	identity.authority = DotNetIdentity.Authority.SHARED
-	body.add_child(identity)
-	var mover := CountedMovement.new()
-	body.add_child(mover)
-	identity.entity = body
-	identity.behaviours = [mover]
-	mover.identity = identity
-	mover._bind(c.config)
-	add_child(body)
-	var _reg := c.registry.register(identity, 40, 0, c.config)
+	var rig := _jump_rig("skip_%d_%s" % [fill, own_fill], fill)
+	var c: DotNetManager = rig["c"]
+	var body: Node3D = rig["body"]
+	var identity: DotNetIdentity = rig["identity"]
+	var mover: CountedMovement = rig["mover"]
 	var server := Movement.new()
 	var states := {}
 	var t := 0
@@ -485,8 +474,104 @@ func _skip_run(fill: int, own_fill: bool) -> Dictionary:
 	var described: Dictionary = c.predictor.describe()
 	var out := {"bad": bad, "apart": mover.position.distance_to(server.position),
 		"replays": int(described["replays"]), "skipped": int(described["skipped"]),
-		"filled": int(described["filled"]), "mismatches": described["mismatches"]}
+		"filled": int(described.get("filled", 0)), "mismatches": described["mismatches"]}
 	server.free()
+	remove_child(body)
+	body.free()
+	_free_managers([c])
+	return out
+
+
+## A client rig for [method _skip_run] and [method _jump_run]: one predicted [CountedMovement] at net id 40.
+func _jump_rig(scope: String, fill: int) -> Dictionary:
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 5
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = StringName(scope)
+	c.config = DotNetConfig.new()
+	c.config.reconcile_once_per_frame = true
+	c.config.skip_matching_replays = true
+	c.config.set(&"predict_fill_ticks", fill)
+	add_child(c)
+	var _up := c.setup()
+	c.clock.sync_from_server(0, 0.0)
+	var body := Node3D.new()
+	var identity := DotNetIdentity.new()
+	identity.owner_peer_id = 5
+	identity.authority = DotNetIdentity.Authority.SHARED
+	body.add_child(identity)
+	var mover := CountedMovement.new()
+	body.add_child(mover)
+	identity.entity = body
+	identity.behaviours = [mover]
+	mover.identity = identity
+	mover._bind(c.config)
+	add_child(body)
+	var _reg := c.registry.register(identity, 40, 0, c.config)
+	return {"c": c, "body": body, "identity": identity, "mover": mover}
+
+
+## Predicts ticks 1..[param last], then in one frame reads a snapshot of [param snap] (none when negative) and jumps to [param to], against a server holding the previous command through the hole. [param unpredicted] ticks after [param last] the entity is not predicted (and the server's state is adopted), so [param to] should then simulate alone.
+func _jump_run(last: int, snap: int, to: int, unpredicted: int = 0) -> Dictionary:
+	var rig := _jump_rig("jump_%d_%d_%d_%d" % [last, snap, to, unpredicted], 8)
+	var c: DotNetManager = rig["c"]
+	var identity: DotNetIdentity = rig["identity"]
+	var mover: CountedMovement = rig["mover"]
+	var server := Movement.new()
+	var step := c.clock.tick_duration()
+	var inputs := {}
+	for tick in range(1, last + 1):
+		c.clock.tick = tick
+		var input := DemoInput.new()
+		input.tick = tick
+		input.delta = 1.0 / 60.0
+		input.move = Vector2(1.0, 0.0) if (tick / 4) % 2 == 0 else Vector2(0.0, 1.0)
+		var _pushed := c.local_inputs().push(input)
+		c.predict_tick(tick, input)
+		inputs[tick] = input
+	var states := {}
+	for s in range(1, to):
+		if inputs.has(s):
+			server._net_apply_input(inputs[s], s)
+		server._net_simulate(s, step)
+		states[s] = [server.position, server.velocity]
+	if unpredicted > 0:
+		identity.authority = DotNetIdentity.Authority.SERVER
+		for tick in range(last + 1, last + unpredicted + 1):
+			c.clock.tick = tick
+			c.predict_tick(tick)
+		identity.authority = DotNetIdentity.Authority.SHARED
+		mover.position = states[to - 1][0]
+		mover.velocity = states[to - 1][1]
+	if snap >= 0:
+		c._pending_reconcile[40] = [identity, snap, {&"position": states[snap][0], &"velocity": states[snap][1]}]
+	c.clock.tick = to
+	var final := DemoInput.new()
+	final.tick = to
+	final.delta = 1.0 / 60.0
+	final.move = Vector2(-1.0, 0.0)
+	var _final_pushed := c.local_inputs().push(final)
+	var filled_before := int(c.predictor.describe().get("filled", 0))
+	c.predict_tick(to, final)
+	server._net_apply_input(final, to)
+	server._net_simulate(to, step)
+	# Ticks the reconcile replays run twice; a tick the snapshot covers or the entity was not predicted for, never.
+	var bad := []
+	for s in range(1, to + 1):
+		if snap >= 0 and s > snap and s <= last:
+			continue
+		var wanted := 1
+		if s > last and s < to and (unpredicted > 0 or s <= snap):
+			wanted = 0
+		var runs := int(mover.runs.get(s, 0))
+		if runs != wanted:
+			bad.append("%d:%d" % [s, runs])
+	var out := {"apart": mover.position.distance_to(server.position), "bad": bad,
+		"filled": int(c.predictor.describe().get("filled", 0)) - filled_before}
+	server.free()
+	var body: Node3D = rig["body"]
 	remove_child(body)
 	body.free()
 	_free_managers([c])

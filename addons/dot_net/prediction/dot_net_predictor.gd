@@ -58,7 +58,8 @@ func _init(p_config: DotNetConfig) -> void:
 
 
 ## Simulates one tick for every predicted entity. Called on the client each tick, after the input for
-## that tick has been recorded.
+## that tick has been recorded. [param identities] is every predicted entity: one left out is
+## forgotten as predicted, so a gap since it is never filled on a stale command.
 func predict(
 	identities: Array[DotNetIdentity],
 	tick: int,
@@ -68,9 +69,11 @@ func predict(
 	if not config.enable_prediction:
 		return
 
+	var seen := {}
 	for identity in identities:
 		if not identity.is_predicted():
 			continue
+		seen[identity.net_id] = true
 
 		if input != null:
 			_fill_skipped(identity, tick, delta)
@@ -80,25 +83,31 @@ func predict(
 			behaviour._net_simulate(tick, delta)
 		_last_predicted[identity.net_id] = tick
 		_remember(identity, tick)
+	for net_id: int in _last_predicted.keys():
+		if not seen.has(net_id):
+			_last_predicted.erase(net_id)
 	if input != null:
 		_last_input = input
 
 
 ## Predicts the ticks a clock jump stepped over since [param identity]'s last prediction, on the
-## previous command, as the server ran them; else their snapshots find no prediction and replay.
-## A jump past [member DotNetConfig.predict_fill_ticks] is left to the replay.
+## previous command, as the server ran them: a reconcile replays only through the last tick
+## predicted, so nothing else would. Only a jump within [member DotNetConfig.predict_fill_ticks] is
+## remembered for the replay-skip; any jump is bounded by the input history, as a replay is.
 func _fill_skipped(identity: DotNetIdentity, tick: int, delta: float) -> void:
 	if _last_input == null or not _last_predicted.has(identity.net_id):
 		return
-	var from := int(_last_predicted[identity.net_id]) + 1
-	if from >= tick or tick - from > config.predict_fill_ticks:
+	var from := maxi(int(_last_predicted[identity.net_id]) + 1, tick - config.input_history_ticks)
+	if from >= tick:
 		return
+	var remember := tick - from <= config.predict_fill_ticks
 	for t in range(from, tick):
 		for behaviour in identity.behaviours:
 			if behaviour.has_method("_net_apply_input"):
 				behaviour.call("_net_apply_input", _last_input, t)
 			behaviour._net_simulate(t, delta)
-		_remember(identity, t)
+		if remember:
+			_remember(identity, t)
 	_filled += tick - from
 
 
@@ -271,6 +280,11 @@ func reconcile(
 		# catching up — which would make it fall further behind.
 		if replayed > config.input_history_ticks:
 			break
+
+	# A snapshot newer than the last prediction (the client was behind) leaves the state at its
+	# tick: the fill must start after it, not step those ticks again.
+	if _last_predicted.has(identity.net_id):
+		_last_predicted[identity.net_id] = maxi(int(_last_predicted[identity.net_id]), replay_tick - 1)
 
 	_replays += 1
 	_last_replay_ticks = replayed
