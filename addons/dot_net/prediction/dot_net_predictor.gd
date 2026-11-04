@@ -47,6 +47,10 @@ var _predicted: Dictionary = {}
 
 ## net_id -> the newest tick [method predict] simulated it for, where a replay stops.
 var _last_predicted: Dictionary = {}
+## The newest input [method predict] was handed: what a tick the clock stepped over runs on.
+var _last_input: DotNetInput = null
+## Ticks predicted by [method _fill_skipped].
+var _filled := 0
 
 
 func _init(p_config: DotNetConfig) -> void:
@@ -68,12 +72,34 @@ func predict(
 		if not identity.is_predicted():
 			continue
 
+		if input != null:
+			_fill_skipped(identity, tick, delta)
 		for behaviour in identity.behaviours:
 			if input != null and behaviour.has_method("_net_apply_input"):
 				behaviour.call("_net_apply_input", input, tick)
 			behaviour._net_simulate(tick, delta)
 		_last_predicted[identity.net_id] = tick
 		_remember(identity, tick)
+	if input != null:
+		_last_input = input
+
+
+## Predicts the ticks a clock jump stepped over since [param identity]'s last prediction, on the
+## previous command, as the server ran them; else their snapshots find no prediction and replay.
+## A jump past [member DotNetConfig.predict_fill_ticks] is left to the replay.
+func _fill_skipped(identity: DotNetIdentity, tick: int, delta: float) -> void:
+	if _last_input == null or not _last_predicted.has(identity.net_id):
+		return
+	var from := int(_last_predicted[identity.net_id]) + 1
+	if from >= tick or tick - from > config.predict_fill_ticks:
+		return
+	for t in range(from, tick):
+		for behaviour in identity.behaviours:
+			if behaviour.has_method("_net_apply_input"):
+				behaviour.call("_net_apply_input", _last_input, t)
+			behaviour._net_simulate(t, delta)
+		_remember(identity, t)
+	_filled += tick - from
 
 
 ## Keeps what [param tick] produced for [param identity], when replays may be skipped.
@@ -383,6 +409,8 @@ func clear() -> void:
 	_corrections.clear()
 	_was_predicting.clear()
 	_predicted.clear()
+	_last_predicted.clear()
+	_last_input = null
 
 
 func forget(net_id: int) -> void:
@@ -410,6 +438,7 @@ func describe() -> Dictionary:
 		"enabled": config.enable_prediction,
 		"replays": _replays,
 		"skipped": _skipped,
+		"filled": _filled,
 		"last_replay_ticks": _last_replay_ticks,
 		"corrections": _corrections_applied,
 		"snaps": _snaps,

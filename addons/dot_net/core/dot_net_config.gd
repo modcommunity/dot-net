@@ -94,6 +94,11 @@ extends DotConfig
 ## predicted tick produced.
 @export var skip_matching_replays: bool = false
 
+## Most ticks [method DotNetManager.predict_tick] predicts on the previous command when the clock
+## jumped over them (a lead correction, a catch-up), so their snapshots can skip the replay. A longer
+## jump is left to the replay; 0 turns it off. (API 18.)
+@export_range(0, 64) var predict_fill_ticks: int = 8
+
 ## Whether [method DotNetManager.predict_tick] rounds each input to the wire
 ## ([method DotNetInput.round_trip]) before it is simulated, so the prediction runs on
 ## the command the server decodes. On by default; off only to measure what it costs not to.

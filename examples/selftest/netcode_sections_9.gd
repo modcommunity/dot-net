@@ -399,3 +399,95 @@ func _bound_run(order: StringName) -> Dictionary:
 	body.free()
 	_free_managers([c])
 	return out
+
+
+## [b]A tick the clock jumped over is predicted on the previous command.[/b] The server ran it on that command, and a snapshot describing a tick the client never remembered predicting replays the lead.
+func _test_skipped_ticks() -> void:
+	print("")
+	print("[ticks a clock jump stepped over are predicted]")
+	var filled := _skip_run(8, false)
+	_check("no snapshot found a tick unpredicted (%s)" % [filled["mismatches"]],
+		not (filled["mismatches"] as Dictionary).has(&"(no prediction)"))
+	_check("every snapshot skipped its replay (%d skipped, %d replays, %d ticks filled)" % [filled["skipped"], filled["replays"], filled["filled"]],
+		int(filled["replays"]) == 0 and int(filled["skipped"]) > 10 and int(filled["filled"]) > 0)
+	_check("no tick simulated twice or never (%s)" % [filled["bad"]], (filled["bad"] as Array).is_empty())
+	_check("and it lands on the server's state (%.5f m)" % float(filled["apart"]), float(filled["apart"]) < 0.0001)
+	var off := _skip_run(0, false)
+	_check("with the fill off, a snapshot of a skipped tick finds no prediction (%s)" % [off["mismatches"]],
+		int((off["mismatches"] as Dictionary).get(&"(no prediction)", 0)) > 0 and int(off["replays"]) > 0)
+	var own := _skip_run(8, true)
+	_check("a game filling the gap itself is not filled again (%d filled, %s)" % [own["filled"], own["bad"]],
+		int(own["filled"]) == 0 and (own["bad"] as Array).is_empty() and int(own["replays"]) == 0)
+	var long := _skip_run(2, false)
+	_check("a jump past predict_fill_ticks is left to the replay (%d filled, %d replays)" % [long["filled"], long["replays"]],
+		int(long["filled"]) > 0 and int(long["replays"]) > 0)
+
+
+## A client that predicts only the tick its clock lands on, jumping 3 or 4 ticks every fifth frame, against a server that runs every tick and keeps the previous command through a hole; a snapshot six ticks old is read every frame. [param own_fill] predicts the skipped ticks itself first, as a game working round the hole does.
+func _skip_run(fill: int, own_fill: bool) -> Dictionary:
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 5
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = StringName("skip_%d_%s" % [fill, own_fill])
+	c.config = DotNetConfig.new()
+	c.config.reconcile_once_per_frame = true
+	c.config.skip_matching_replays = true
+	c.config.predict_fill_ticks = fill
+	add_child(c)
+	var _up := c.setup()
+	c.clock.sync_from_server(0, 0.0)
+	var body := Node3D.new()
+	var identity := DotNetIdentity.new()
+	identity.owner_peer_id = 5
+	identity.authority = DotNetIdentity.Authority.SHARED
+	body.add_child(identity)
+	var mover := CountedMovement.new()
+	body.add_child(mover)
+	identity.entity = body
+	identity.behaviours = [mover]
+	mover.identity = identity
+	mover._bind(c.config)
+	add_child(body)
+	var _reg := c.registry.register(identity, 40, 0, c.config)
+	var server := Movement.new()
+	var states := {}
+	var t := 0
+	var last: DemoInput = null
+	for frame in range(60):
+		var ticks := (3 + frame % 2) if frame % 5 == 4 else 1
+		if states.has(t - 6):
+			c._pending_reconcile[40] = [identity, t - 6, {&"position": states[t - 6][0], &"velocity": states[t - 6][1]}]
+		var tick := t + ticks
+		c.clock.tick = tick
+		var input := DemoInput.new()
+		input.tick = tick
+		input.delta = 1.0 / 60.0
+		input.move = Vector2(1.0, 0.0) if (tick / 7) % 2 == 0 else Vector2(0.0, 1.0)
+		var _pushed := c.local_inputs().push(input)
+		if own_fill and last != null:
+			for s in range(t + 1, tick):
+				c.predict_tick(s, last)
+		c.predict_tick(tick, input)
+		var step := c.clock.tick_duration()
+		for s in range(t + 1, tick + 1):
+			if s == tick:
+				server._net_apply_input(input, s)
+			server._net_simulate(s, step)
+			states[s] = [server.position, server.velocity]
+		last = input
+		t = tick
+	var bad := []
+	for s in range(1, t + 1):
+		if int(mover.runs.get(s, 0)) != 1:
+			bad.append("%d:%d" % [s, int(mover.runs.get(s, 0))])
+	var described: Dictionary = c.predictor.describe()
+	var out := {"bad": bad, "apart": mover.position.distance_to(server.position),
+		"replays": int(described["replays"]), "skipped": int(described["skipped"]),
+		"filled": int(described["filled"]), "mismatches": described["mismatches"]}
+	server.free()
+	remove_child(body)
+	body.free()
+	_free_managers([c])
+	return out
