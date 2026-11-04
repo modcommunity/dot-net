@@ -535,6 +535,21 @@ func _test_starved_input() -> void:
 		absf(held[0] - 7.0) < 0.05 and absf(held[1]) < 0.01 and int(c.describe()["held_ticks"]) == 1)
 	_check("and its input keeps what was sent, so history and server agree in either order (%s)" % str(kept),
 		kept == [true, true])
+	# The other order: sent after predict_tick, on a held tick; the bytes must be the buffered input.
+	var late_input := DemoInput.new()
+	late_input.tick = 140
+	late_input.delta = 1.0 / 60.0
+	late_input.move = Vector2(0.7, 0.0)
+	late_input.round_trip()
+	var buffered := DotNetWriter.new()
+	late_input.write(buffered)
+	var held_before := int(c.describe()["held_ticks"])
+	c.predict_tick(140, late_input)
+	var sent_after := DotNetWriter.new()
+	late_input.write(sent_after)
+	_check("a command sent after predict_tick, on a held tick, is the buffered input",
+		int(c.describe()["held_ticks"]) == held_before + 1
+		and sent_after.to_bytes() == buffered.to_bytes())
 	_out_of_tree(mine)
 	remove_child(c)
 	c.free()
