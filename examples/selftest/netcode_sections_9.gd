@@ -399,3 +399,75 @@ func _bound_run(order: StringName) -> Dictionary:
 	body.free()
 	_free_managers([c])
 	return out
+
+
+## [b]Mismatches are counted once per divergent server tick.[/b] The server is a second [Movement] fed the same inputs, snapshotted three ticks behind the client with [param skip] on or off; it is bumped on [param bumps] so the only differences are the ones the test put there.
+func _mismatch_run(skip: bool, bumps: Array) -> Dictionary:
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 5
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = StringName("mm_%s" % skip)
+	c.config = DotNetConfig.new()
+	c.config.skip_matching_replays = skip
+	c.config.reconcile_once_per_frame = true
+	add_child(c)
+	var _up := c.setup()
+	c.clock.sync_from_server(0, 0.0)
+	var body := Node3D.new()
+	var identity := DotNetIdentity.new()
+	identity.owner_peer_id = 5
+	identity.authority = DotNetIdentity.Authority.SHARED
+	body.add_child(identity)
+	var mover := Movement.new()
+	body.add_child(mover)
+	identity.entity = body
+	identity.behaviours = [mover]
+	mover.identity = identity
+	mover._bind(c.config)
+	add_child(body)
+	var _reg := c.registry.register(identity, 41, 0, c.config)
+	var server := Movement.new()
+	var states := {}
+	for t in range(1, 81):
+		var input := DemoInput.new()
+		input.tick = t
+		input.delta = 1.0 / 60.0
+		input.move = Vector2(1.0, 0.0) if (t / 6) % 2 == 0 else Vector2(0.0, 1.0)
+		var _pushed := c.local_inputs().push(input)
+		server._net_apply_input(input, t)
+		server._net_simulate(t, 1.0 / 60.0)
+		if bumps.has(t):
+			server.position += Vector3(0.5, 0.0, 0.0)
+		states[t] = {&"position": server.position, &"velocity": server.velocity}
+		c.clock.tick = t
+		if t > 3:
+			c._pending_reconcile[41] = [identity, t - 3, states[t - 3]]
+			c.flush_reconcile()
+		c.predict_tick(t, input)
+	var out: Dictionary = c.predictor.describe()
+	server.free()
+	remove_child(body)
+	body.free()
+	_free_managers([c])
+	return out
+
+
+func _test_mismatch_accounting() -> void:
+	print("")
+	print("[mismatch accounting]")
+	var bumps := [20, 35, 50]
+	for skip in [false, true]:
+		var clean := _mismatch_run(skip, [])
+		var total := 0
+		for n: int in (clean["mismatches"] as Dictionary).values():
+			total += n
+		_check("skip %s: a deterministic prediction the server agrees with has 0 mismatches (%d; %d skipped)" % [skip, total, int(clean["skipped"])],
+			total == 0 and (not skip or int(clean["skipped"]) > 50))
+		var bent := _mismatch_run(skip, bumps)
+		var count := 0
+		for n: int in (bent["mismatches"] as Dictionary).values():
+			count += n
+		_check("skip %s: %d server-side divergences report %d (%s)" % [skip, bumps.size(), count, bent["mismatches"]],
+			count == (bumps.size() if skip else 0))
