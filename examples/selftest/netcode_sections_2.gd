@@ -11,56 +11,10 @@ func _test_render_delay() -> void:
 	print("")
 	print("[render delay]")
 
-	var fast := DotNetConfig.new()
-	fast.tick_rate = 128
-	fast.snapshot_rate = 20
-	fast.interpolation_buffer = 2.0
-	fast.adaptive_interpolation = false
+	_check_delay_buffer_units()
 
-	var sized := DotNetInterpolator.new(fast)
-	_check(
-		"the buffer is counted in snapshots (%.2f)" % sized.delay_snapshots(),
-		is_equal_approx(sized.delay_snapshots(), 2.0)
-	)
-	# 128 / 20 is 6.4, and the manager sends every `ticks_per_snapshot()` = 6 ticks: two of
-	# the snapshots that actually arrive are twelve ticks.
-	_check(
-		"and sampled in ticks: two snapshots at 128/20 are 12 (%.2f)" % sized.delay_ticks(),
-		is_equal_approx(sized.delay_ticks(), 12.0)
-	)
-	_check(
-		"its milliseconds are those ticks, and the config's (%.1f ms)" % sized.delay_ms(),
-		absf(sized.delay_ms() - 12.0 / 128.0 * 1000.0) < 0.01
-			and absf(sized.delay_ms() - fast.interpolation_delay() * 1000.0) < 0.01
-	)
-
-	var server_d := DotNetManager.new()
-	server_d.name = "DelayServer"
-	server_d.is_server = true
-	server_d.service_scope = &"delay_server"
-	server_d.local_peer_id = 1
-	server_d.auto_tick = false
-	server_d.config_file = ""
-	server_d.config = DotNetConfig.new()
-	server_d.config.tick_rate = 128
-	server_d.config.snapshot_rate = 20
-	add_child(server_d)
-
-	var client_d := DotNetManager.new()
-	client_d.name = "DelayClient"
-	client_d.is_server = false
-	client_d.service_scope = &"delay_client"
-	client_d.local_peer_id = 2
-	client_d.auto_tick = false
-	client_d.config_file = ""
-	client_d.config = DotNetConfig.new()
-	client_d.config.tick_rate = 128
-	client_d.config.snapshot_rate = 20
-	client_d.config.interpolation_buffer = 2.0
-	# Off so the buffer is the configured one: arrivals in a loop that does not wait are
-	# all zero milliseconds apart, which would adapt it to something no link produces.
-	client_d.config.adaptive_interpolation = false
-	add_child(client_d)
+	var server_d := _delay_manager(true)
+	var client_d := _delay_manager(false)
 
 	var ok_setup := server_d.setup().ok and client_d.setup().ok
 
@@ -109,8 +63,31 @@ func _test_render_delay() -> void:
 	server_move.velocity = Vector3(10.0, 0.0, 0.0)
 
 	var interp := client_d.interpolator
-	var step_x := 10.0 / 128.0
 	var worst := [0.0, 0.0, 0.0]
+	var counts := _run_render_delay_legs(server_d, client_d, client_move, delivered, lossy, worst)
+
+	_check_render_delay_counts(counts, worst, interp)
+
+	_check_render_delay_stop(server_d, client_d, server_move, client_move, delivered, lossy)
+
+	_free_delay_managers(server_d, client_d)
+	_sections_completed += 1
+
+
+func _free_delay_managers(server_d: DotNetManager, client_d: DotNetManager) -> void:
+	server_d.stop()
+	client_d.stop()
+	remove_child(server_d)
+	remove_child(client_d)
+	server_d.free()
+	client_d.free()
+
+
+func _run_render_delay_legs(
+		server_d: DotNetManager, client_d: DotNetManager, client_move: Movement,
+		delivered: Array[PackedByteArray], lossy: Array, worst: Array) -> Array[Dictionary]:
+	var interp := client_d.interpolator
+	var step_x := 10.0 / 128.0
 	var counts: Array[Dictionary] = []
 
 	# The third leg is clean on a 120 ms round trip. The render time counts back from the newest
@@ -146,7 +123,55 @@ func _test_render_delay() -> void:
 			"stalls": interp.stall_count(),
 			"extrapolations": interp.extrapolation_count(),
 		})
+	return counts
 
+
+func _delay_manager(as_server: bool) -> DotNetManager:
+	var m := DotNetManager.new()
+	m.name = "DelayServer" if as_server else "DelayClient"
+	m.is_server = as_server
+	m.service_scope = &"delay_server" if as_server else &"delay_client"
+	m.local_peer_id = 1 if as_server else 2
+	m.auto_tick = false
+	m.config_file = ""
+	m.config = DotNetConfig.new()
+	m.config.tick_rate = 128
+	m.config.snapshot_rate = 20
+	if not as_server:
+		m.config.interpolation_buffer = 2.0
+		# Off so the buffer is the configured one: arrivals in a loop that does not wait are
+		# all zero milliseconds apart, which would adapt it to something no link produces.
+		m.config.adaptive_interpolation = false
+	add_child(m)
+	return m
+
+
+func _check_delay_buffer_units() -> void:
+	var fast := DotNetConfig.new()
+	fast.tick_rate = 128
+	fast.snapshot_rate = 20
+	fast.interpolation_buffer = 2.0
+	fast.adaptive_interpolation = false
+
+	var sized := DotNetInterpolator.new(fast)
+	_check(
+		"the buffer is counted in snapshots (%.2f)" % sized.delay_snapshots(),
+		is_equal_approx(sized.delay_snapshots(), 2.0)
+	)
+	# 128 / 20 is 6.4, and the manager sends every `ticks_per_snapshot()` = 6 ticks: two of
+	# the snapshots that actually arrive are twelve ticks.
+	_check(
+		"and sampled in ticks: two snapshots at 128/20 are 12 (%.2f)" % sized.delay_ticks(),
+		is_equal_approx(sized.delay_ticks(), 12.0)
+	)
+	_check(
+		"its milliseconds are those ticks, and the config's (%.1f ms)" % sized.delay_ms(),
+		absf(sized.delay_ms() - 12.0 / 128.0 * 1000.0) < 0.01
+			and absf(sized.delay_ms() - fast.interpolation_delay() * 1000.0) < 0.01
+	)
+
+
+func _check_render_delay_counts(counts: Array[Dictionary], worst: Array, interp: DotNetInterpolator) -> void:
 	for leg in range(3):
 		var c: Dictionary = counts[leg]
 		var label: String = ["clean", "lossy (1 in 5)", "120 ms round trip"][leg]
@@ -173,6 +198,10 @@ func _test_render_delay() -> void:
 			float(worst[leg]) < 0.02
 		)
 
+
+func _check_render_delay_stop(
+		server_d: DotNetManager, client_d: DotNetManager, server_move: Movement,
+		client_move: Movement, delivered: Array[PackedByteArray], lossy: Array) -> void:
 	# And then they stop. Every snapshot after the stop carries nothing for `position`, so what
 	# is drawn later has to be where the server left them, not the blend being drawn when the
 	# stop arrived (a property read back after the interpolator wrote into it).
@@ -192,14 +221,6 @@ func _test_render_delay() -> void:
 		"stopped: drawn where the server left them (%.3f m short)" % gap,
 		gap < 0.02
 	)
-
-	server_d.stop()
-	client_d.stop()
-	remove_child(server_d)
-	remove_child(client_d)
-	server_d.free()
-	client_d.free()
-	_sections_completed += 1
 
 
 func _test_lag_compensation() -> void:
@@ -287,15 +308,7 @@ func _test_prediction() -> void:
 	var predictor := DotNetPredictor.new(config)
 	var dt := 1.0 / 60.0
 
-	# Direction changes every tick, so simulating tick 14 with tick 20's input
-	# gives a visibly different answer.
-	var inputs: Array[DemoInput] = []
-	for tick in range(1, 21):
-		var input := DemoInput.new()
-		input.tick = tick
-		input.delta = dt
-		input.move = Vector2(1.0, 0.0) if tick % 2 == 1 else Vector2(0.0, 1.0)
-		inputs.append(input)
+	var inputs := _alternating_inputs(dt)
 
 	# The server, as DotNetManager.server_tick does: take the input for the tick, apply it,
 	# then simulate. In the tree, unlike the other sections' entities: reconciliation reads
@@ -349,6 +362,32 @@ func _test_prediction() -> void:
 	_check("velocity reconverged too",
 		client_movement.velocity.distance_to(server_movement.velocity) < 0.001)
 
+	_check_prediction_holes(config, inputs, authoritative_at_10, dt)
+	_check_prediction_edges(predictor, config, buffer, authoritative_at_10, dt)
+
+	for entity in [server_entity, client_entity]:
+		_out_of_tree(entity)
+
+
+
+## A link that turns jittery: the interpolation buffer must grow without moving the render
+## time backwards, and once grown cover how late snapshots are. 128 ticks, a snapshot every 4,
+## with the receive timeline on the quickest arrivals, as `DotNetClock` keeps it.
+func _alternating_inputs(dt: float) -> Array[DemoInput]:
+	# Direction changes every tick, so simulating tick 14 with tick 20's input
+	# gives a visibly different answer.
+	var inputs: Array[DemoInput] = []
+	for tick in range(1, 21):
+		var input := DemoInput.new()
+		input.tick = tick
+		input.delta = dt
+		input.move = Vector2(1.0, 0.0) if tick % 2 == 1 else Vector2(0.0, 1.0)
+		inputs.append(input)
+	return inputs
+
+
+func _check_prediction_holes(
+		config: DotNetConfig, inputs: Array[DemoInput], authoritative_at_10: Dictionary, dt: float) -> void:
 	# A hole in the history: the client's clock jumped over ticks 14-16, so it made no commands
 	# for them and the server ran them on tick 13's. The replay must do the same, not stop at
 	# the hole (that left the predicted player 2 m short at 20% loss).
@@ -391,7 +430,13 @@ func _test_prediction() -> void:
 	_check("a replay stops at the newest input rather than predict ticks not played (%d)" % (int(stopped.value) if stopped.ok else -1),
 		stopped.ok and int(stopped.value) == 2)
 	_out_of_tree(ahead_client)
+	_out_of_tree(holed_server)
+	_out_of_tree(holed_client)
 
+
+func _check_prediction_edges(
+		predictor: DotNetPredictor, config: DotNetConfig, buffer: DotNetInput.Buffer,
+		authoritative_at_10: Dictionary, dt: float) -> void:
 	# A replay that cannot reach its inputs must stop rather than compound the
 	# error — history has been acked away here, so there is nothing to replay from.
 	var starved := DotNetInput.Buffer.new(config.input_history_ticks)
@@ -451,15 +496,10 @@ func _test_prediction() -> void:
 	_check("the next misprediction after a respawn is counted again (%.2f m)" % predictor._worst_error,
 		predictor._worst_error > 1.0)
 	_out_of_tree(dead)
-
-	for entity in [server_entity, client_entity, lonely, untouched, holed_server, holed_client]:
-		_out_of_tree(entity)
-
+	_out_of_tree(lonely)
+	_out_of_tree(untouched)
 
 
-## A link that turns jittery: the interpolation buffer must grow without moving the render
-## time backwards, and once grown cover how late snapshots are. 128 ticks, a snapshot every 4,
-## with the receive timeline on the quickest arrivals, as `DotNetClock` keeps it.
 func _test_buffer_growth() -> void:
 	print("[the buffer growing]")
 	var config := DotNetConfig.new()

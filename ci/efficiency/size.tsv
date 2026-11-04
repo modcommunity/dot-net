@@ -4,8 +4,6 @@ addons/dot_net/core/dot_net_clock.gd	853
 addons/dot_net/dot_net_manager.gd	1027
 addons/dot_net/dot_net_manager.gd::_receive_snapshot	127
 addons/dot_net/replication/dot_net_behaviour.gd	1267
-examples/selftest/netcode_sections_2.gd::_test_prediction	184
-examples/selftest/netcode_sections_2.gd::_test_render_delay	194
 examples/selftest/netcode_sections_3.gd::_standing_still_run	158
 examples/selftest/netcode_sections_3.gd::_test_shared_dirty_sets	150
 examples/selftest/netcode_sections_5.gd::_test_snapshot_parts	200
