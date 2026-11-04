@@ -302,9 +302,9 @@ func _skip_mirrors(guests: Array[DotNetManager], on_server: DotNetIdentity, own_
 	return moving
 
 
-func _skip_guests(lead: int) -> Array[DotNetManager]:
+func _skip_guests(lead: int, count: int = 4) -> Array[DotNetManager]:
 	var guests: Array[DotNetManager] = []
-	for g in range(4):
+	for g in range(count):
 		var skip := g > 0
 		var guest := DotNetManager.new()
 		guest.name = "SkipClient_%d" % g

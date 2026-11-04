@@ -93,7 +93,7 @@ func _remember(identity: DotNetIdentity, tick: int) -> void:
 
 
 ## Whether the server's [param values] for [param server_tick] are what this client
-## predicted for that tick, every property of it.
+## predicted for that tick, every property it predicts ([member DotNetVar.client_predicts]).
 func _predicted_matches(identity: DotNetIdentity, server_tick: int, values: Dictionary) -> bool:
 	var ticks: Dictionary = _predicted.get(identity.net_id, {})
 	var mine: Dictionary = ticks.get(server_tick, {})
@@ -103,7 +103,7 @@ func _predicted_matches(identity: DotNetIdentity, server_tick: int, values: Dict
 	var compared := 0
 	for behaviour in identity.behaviours:
 		for declaration in behaviour.net_vars:
-			if not values.has(declaration.property):
+			if not declaration.client_predicts or not values.has(declaration.property):
 				continue
 			if not mine.has(declaration.property):
 				_note_mismatch(declaration.property)

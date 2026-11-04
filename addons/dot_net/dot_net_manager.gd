@@ -649,7 +649,9 @@ func _apply_entity(
 			var held := {}
 			if config.reconcile_once_per_frame:
 				for declaration in behaviour.net_vars:
-					held[declaration.property] = behaviour._net_read_property(declaration.property)
+					# The client never computes a server-driven value: the server's is the newest there is.
+					if declaration.client_predicts:
+						held[declaration.property] = behaviour._net_read_property(declaration.property)
 			var applied: DotResult = DotResult.success(0)
 			if reader == null:
 				behaviour.apply_unchanged(tick, true)

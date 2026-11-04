@@ -239,3 +239,76 @@ func _unchanged_codec(rig: QuietRig) -> void:
 	var refused := fresh.receive_snapshot(bad.to_bytes())
 	_check("a truncated list is refused and applies nothing",
 		not refused.ok and on_fresh[0].applied == before)
+
+
+## [method DotNetVar.server_driven]: a property only the server writes never counts as a misprediction,
+## and a skipped replay still leaves the server's value in it. Both guests skip matching replays; the
+## server bumps [code]health[/code] every 8 ticks, and only guest 1 declares it server-driven.
+func _test_server_driven_vars() -> void:
+	print("")
+	print("[server-driven vars]")
+	const TICKS := 64
+	const LEAD := 4
+	var host := _bare_manager(true, 1)
+	host.name = "DrivenServer"
+	host.service_scope = &"driven_server"
+	host.config.tick_rate = 60
+	host.config.snapshot_rate = 60
+	add_child(host)
+	var guests := _skip_guests(LEAD, 2)
+	guests[0].config.skip_matching_replays = true
+	var _a := host.setup()
+	var wire: Array[PackedByteArray] = []
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d == DotNetMessage.Delivery.UNRELIABLE:
+			wire.append(payload)
+	var _c := host.start()
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
+	var served := on_server.behaviours[0] as Movement
+	var moving := _skip_mirrors(guests, on_server, false)
+	for declaration in moving[1].net_vars:
+		if declaration.property == &"health":
+			var _d := declaration.server_driven()
+	var stale := 0
+	for s in range(1, TICKS + 1):
+		var c := s + LEAD
+		var move := Vector2(1.0, 0.0) if (s / 8) % 2 == 0 else Vector2(0.0, 1.0)
+		for g in range(guests.size()):
+			var input := DemoInput.new()
+			input.tick = c
+			input.delta = 1.0 / 60.0
+			input.move = move
+			guests[g].local_inputs().push(input)
+			moving[g]._net_apply_input(input, c)
+			guests[g].predictor.predict(guests[g].registry.predicted(), c, 1.0 / 60.0)
+		var copy := DemoInput.new()
+		copy.tick = c
+		copy.delta = 1.0 / 60.0
+		copy.move = move
+		host.input_buffer_for(2).push(copy)
+		if s % 8 == 0:
+			served.health -= 1
+		host.server_tick(s)
+		for payload in wire:
+			for guest in guests:
+				guest.clock.tick = c
+				var _r := guest.receive_snapshot(payload)
+				guest.flush_reconcile()
+				var _ack := host.receive_ack_payload(2, guest.encode_ack())
+		wire.clear()
+		if moving[1].health != served.health:
+			stale += 1
+	var control: Dictionary = guests[0].predictor.describe()
+	var marked: Dictionary = guests[1].predictor.describe()
+	_check("a predicted server-only value mismatches every bump (%s)" % [control["mismatches"]],
+		int((control["mismatches"] as Dictionary).get(&"health", 0)) >= TICKS / 8 - 1)
+	_check("a server-driven value is never a mismatch (%s)" % [marked["mismatches"]],
+		not (marked["mismatches"] as Dictionary).has(&"health"))
+	_check("so its replays are skipped (%d skipped, %d replays; control %d, %d)" % [int(marked["skipped"]), int(marked["replays"]), int(control["skipped"]), int(control["replays"])],
+		int(marked["skipped"]) > int(control["skipped"]) and int(marked["replays"]) < int(control["replays"]))
+	_check("and the client holds the server's value after every snapshot (%d ticks stale)" % stale, stale == 0)
+	_check("the predicted position agrees with the replaying guest (%.4f m apart)" % moving[1].position.distance_to(moving[0].position),
+		moving[1].position.distance_to(moving[0].position) < 0.01)
+	_free_managers([host] + guests)

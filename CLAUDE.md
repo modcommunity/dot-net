@@ -56,6 +56,7 @@ A game should never need to fork dot-net. Family rules: [extension-points.md](..
 | To change | Subclass / assign | Notes |
 | --- | --- | --- |
 | What replicates, and how precisely | `DotNetVar` declarations in `_register_net_vars()` | `Type.CUSTOM` + `.codec(w, r)` replicates anything |
+| What the owner's prediction is judged on | `.server_driven()` on a `DotNetVar` | For state only the server writes; skipped by the replay-skip match (API 17) |
 | Simulation | `DotNetBehaviour._net_simulate` | Must be deterministic |
 | Player controls | `DotNetInput` subclass | `_sanitise()` is not optional |
 | Message types | `DotNetMessageRegistry.register` | Id derived from the name; `required = false` for a type a peer may lack |

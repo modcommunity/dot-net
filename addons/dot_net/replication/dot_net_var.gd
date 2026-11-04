@@ -84,6 +84,11 @@ enum Audience {
 ## point drift produces.
 @export var epsilon: float = 0.0
 
+## Whether the owning client's simulation computes this property. False for state only the server
+## writes (a score, a challenge's progress): a predicted entity takes the server's value as it arrives,
+## and the comparison that lets [member DotNetConfig.skip_matching_replays] skip a replay ignores it.
+@export var client_predicts: bool = true
+
 ## Called on a receiving client when the value changes.
 ##
 ## Signature: [code]func(old_value: Variant, new_value: Variant) -> void[/code].
@@ -152,6 +157,12 @@ func once() -> DotNetVar:
 
 func with_epsilon(value: float) -> DotNetVar:
 	epsilon = value
+	return self
+
+
+## See [member client_predicts]. Replication and the deadband are unchanged. (API 17.)
+func server_driven() -> DotNetVar:
+	client_predicts = false
 	return self
 
 
