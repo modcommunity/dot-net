@@ -129,9 +129,8 @@ func start() -> DotResult:
 		CHANNEL, "started", {"schema": messages.schema_hash().substr(0, 12)}
 	)
 
-	# A client tells the server what it speaks as soon as it can speak at all. The server
-	# is the end that decides whether the two can play, and it is told first so that a
-	# refusal arrives before anything else the join would have sent.
+	# A client announces its schema first: the server decides compatibility, so a refusal
+	# must arrive before anything else the join sends.
 	if not is_server:
 		announce_schema(1)
 	for peer_id in _peers:
@@ -270,9 +269,8 @@ func _physics_process(delta: float) -> void:
 	if Engine.is_editor_hint() or not _running or not auto_tick:
 		return
 
-	# Before step(), and unconditionally: the rolling rates have to close their
-	# window even on a frame with no traffic, or a peer that stopped sending
-	# keeps reporting the throughput it had when it stopped.
+	# Unconditional: rolling rates must close their window even on a frame with no
+	# traffic, or a silent peer keeps reporting its last throughput.
 	if stats != null:
 		stats.roll()
 
