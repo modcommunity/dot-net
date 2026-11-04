@@ -513,16 +513,29 @@ func _test_starved_input() -> void:
 	c.setup()
 	c.clock.sync_from_server(100, 0.0)
 	c._snapshot_heard_tick = 100
+	var mine := _in_tree(_make_entity(&"player", 5))
+	var _mine_reg := c.registry.register(mine, 22, 0, c.config)
+	var walker := mine.behaviours[0] as Movement
 	var held := []
+	var kept := []
 	for tick in [110, 100 + ceili(c.config.prediction_hold_sec * 60.0) + 1]:
 		var input := DemoInput.new()
 		input.tick = tick
 		input.delta = 1.0 / 60.0
-		input.move = Vector2(1.0, 0.0)
+		input.move = Vector2(0.7, 0.0)
+		# Sent first, as most games' bridges do: the server runs these bytes.
+		var sent := DotNetWriter.new()
+		input.write(sent)
 		c.predict_tick(tick, input)
-		held.append(input.move.x)
-	_check("a client holds its input only after prediction_hold_sec without a snapshot (%s)" % str(held),
-		held[0] == 1.0 and absf(held[1]) < 0.01 and int(c.describe()["held_ticks"]) == 1)
+		held.append(walker.velocity.x)
+		var after := DotNetWriter.new()
+		input.write(after)
+		kept.append(after.to_bytes() == sent.to_bytes())
+	_check("a client holds its prediction only after prediction_hold_sec without a snapshot (%s)" % str(held),
+		absf(held[0] - 7.0) < 0.05 and absf(held[1]) < 0.01 and int(c.describe()["held_ticks"]) == 1)
+	_check("and its input keeps what was sent, so history and server agree in either order (%s)" % str(kept),
+		kept == [true, true])
+	_out_of_tree(mine)
 	remove_child(c)
 	c.free()
 

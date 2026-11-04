@@ -404,21 +404,25 @@ func client_tick(tick: int) -> void:
 ## One predicted tick for a host that records its own command and simulates it: the snapshots read since the last tick are reconciled first ([method flush_reconcile]), then every predicted entity is handed [param input] and simulated for [param tick].
 ##
 ## Through the predictor, not around it: otherwise [member DotNetConfig.skip_matching_replays] has nothing to match and [method perf_counters] reports no predict time. (API 10.)
+##
+## [param input] is only rounded to what the server decodes ([method DotNetInput.round_trip]), never neutralised: the prediction hold predicts on a copy, so the input may be sent before or after this call and the server, the buffered history and every replay run the same command.
 func predict_tick(tick: int, input: DotNetInput = null) -> void:
 	if not clock.is_synced():
 		return
 	flush_reconcile()
 	var started := Time.get_ticks_usec()
-	# Neutralised in place: the buffered and sent input is this same object, so the server
-	# and the replays see the held one too.
-	if input != null and _snapshot_heard_tick >= 0 \
-			and tick - _snapshot_heard_tick > _hold_ticks(config.prediction_hold_sec):
-		input._neutralise()
-		_held_ticks += 1
-	# The buffered input is this same object, so its replays run on the rounded one too.
+	# Rounded in place: the server decodes exactly this whether it was sent before or after,
+	# and the buffered input is this object, so the replays run on the rounded one too.
 	if input != null and config.predict_wire_input:
 		input.round_trip()
-	predictor.predict(registry.predicted(), tick, clock.tick_duration(), input)
+	# The hold predicts on a neutral copy and leaves the caller's input as sent: neutralised in
+	# place, a caller that sent first had the server run the live one and the replays the held one.
+	var predicted := input
+	if input != null and _snapshot_heard_tick >= 0 \
+			and tick - _snapshot_heard_tick > _hold_ticks(config.prediction_hold_sec):
+		predicted = input.neutralised(input.tick)
+		_held_ticks += 1
+	predictor.predict(registry.predicted(), tick, clock.tick_duration(), predicted)
 	_perf_predict_usec += Time.get_ticks_usec() - started
 	_perf_client_ticks += 1
 
