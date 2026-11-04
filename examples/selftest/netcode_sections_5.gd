@@ -12,7 +12,6 @@ func _test_snapshot_parts() -> void:
 
 	const ENTITIES := 40
 	const MTU := 256
-
 	var host := _parts_manager("PartsServer", true, MTU)
 	var watcher := _parts_manager("PartsClient", false, MTU)
 
@@ -46,8 +45,31 @@ func _test_snapshot_parts() -> void:
 
 	var at := func(m: Movement) -> float:
 		return float((m.received_values().get(&"position", Vector3.ZERO) as Vector3).x)
+	var s := {"host": host, "watcher": watcher, "sent": sent, "on_server": on_server,
+		"on_client": on_client, "deliver": deliver, "at": at}
+	_parts_check_first_tick(s, ENTITIES, MTU)
+	var second := _parts_check_lost_part(s, ENTITIES)
+	_parts_check_late_and_resent(s, second, ENTITIES)
+	_parts_check_older_after_newer(s, ENTITIES)
+	_parts_check_under_mtu(s, ENTITIES)
+	_parts_check_max_parts(s, MTU)
+
+	host.stop()
+	watcher.stop()
+	remove_child(host)
+	remove_child(watcher)
+	host.free()
+	watcher.free()
 
 
+func _parts_check_first_tick(s: Dictionary, ENTITIES: int, MTU: int) -> void:
+	var host: DotNetManager = s.host
+	var watcher: DotNetManager = s.watcher
+	var sent: Array[PackedByteArray] = s.sent
+	var on_server: Array[Movement] = s.on_server
+	var on_client: Array[Movement] = s.on_client
+	var deliver: Callable = s.deliver
+	var at: Callable = s.at
 	for i in ENTITIES:
 		on_server[i].position = Vector3(1.0 + i, 0, 0)
 	host.server_tick(3)
@@ -82,6 +104,14 @@ func _test_snapshot_parts() -> void:
 		watcher.stats.decode_failures == 0)
 
 
+func _parts_check_lost_part(s: Dictionary, ENTITIES: int) -> Array[PackedByteArray]:
+	var host: DotNetManager = s.host
+	var watcher: DotNetManager = s.watcher
+	var sent: Array[PackedByteArray] = s.sent
+	var on_server: Array[Movement] = s.on_server
+	var on_client: Array[Movement] = s.on_client
+	var deliver: Callable = s.deliver
+	var at: Callable = s.at
 	for i in ENTITIES:
 		on_server[i].position = Vector3(100.0 + i, 0, 0)
 	host.server_tick(6)
@@ -105,7 +135,17 @@ func _test_snapshot_parts() -> void:
 		lost_count > 0 and stayed == lost_count)
 	_check("a tick with a part missing is not acknowledged (%d)" % watcher.ack_tick(),
 		watcher.ack_tick() == 3)
+	return second
 
+
+func _parts_check_late_and_resent(s: Dictionary, second: Array[PackedByteArray], ENTITIES: int) -> void:
+	var host: DotNetManager = s.host
+	var watcher: DotNetManager = s.watcher
+	var sent: Array[PackedByteArray] = s.sent
+	var on_server: Array[Movement] = s.on_server
+	var on_client: Array[Movement] = s.on_client
+	var deliver: Callable = s.deliver
+	var at: Callable = s.at
 	# A late copy of the lost part, after a newer tick: superseded, not applied.
 	on_server[0].position = Vector3(200.0, 0, 0)
 	host.server_tick(9)
@@ -137,6 +177,14 @@ func _test_snapshot_parts() -> void:
 	_check("the lost part's entities are re-sent and arrive (%d of %d)" % [caught_up, ENTITIES - 1],
 		caught_up == ENTITIES - 1)
 
+
+func _parts_check_older_after_newer(s: Dictionary, ENTITIES: int) -> void:
+	var host: DotNetManager = s.host
+	var sent: Array[PackedByteArray] = s.sent
+	var on_server: Array[Movement] = s.on_server
+	var on_client: Array[Movement] = s.on_client
+	var deliver: Callable = s.deliver
+	var at: Callable = s.at
 	# A part of an older tick that turns up after a part of a newer, still incomplete one
 	# is superseded too: entities are not in the same part every tick (the order is the
 	# priority accumulator's), so it can carry an entity the newer part already moved.
@@ -162,6 +210,12 @@ func _test_snapshot_parts() -> void:
 		deliver.call(newer[index])
 
 
+func _parts_check_under_mtu(s: Dictionary, ENTITIES: int) -> void:
+	var host: DotNetManager = s.host
+	var watcher: DotNetManager = s.watcher
+	var sent: Array[PackedByteArray] = s.sent
+	var on_server: Array[Movement] = s.on_server
+	var at: Callable = s.at
 	host.config.mtu = 8192
 	for i in ENTITIES:
 		on_server[i].position = Vector3(300.0 + i, 0, 0)
@@ -179,6 +233,12 @@ func _test_snapshot_parts() -> void:
 	sent.clear()
 
 
+func _parts_check_max_parts(s: Dictionary, MTU: int) -> void:
+	var host: DotNetManager = s.host
+	var watcher: DotNetManager = s.watcher
+	var sent: Array[PackedByteArray] = s.sent
+	var deliver: Callable = s.deliver
+	var at: Callable = s.at
 	host.config.mtu = MTU
 	host.config.max_entities_per_snapshot = 0
 	for i in 200:
@@ -197,12 +257,7 @@ func _test_snapshot_parts() -> void:
 	_check("and every one of them decodes", watcher.stats.decode_failures == failures_before)
 	sent.clear()
 
-	host.stop()
-	watcher.stop()
-	remove_child(host)
-	remove_child(watcher)
-	host.free()
-	watcher.free()
+
 
 
 ## A thousand-entity world under the default entity cap reaches a client whole, within the parts limit.

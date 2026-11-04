@@ -142,39 +142,9 @@ func _test_shared_dirty_sets() -> void:
 
 	var owner := 3
 	var peers: Array[int] = [2, 3, 4, 5, 6, 7]
-	var copies: Array[Sharing] = []
-	for share in [true, false]:
-		var config := DotNetConfig.new()
-		config.share_dirty_sets = share
-		var identity := DotNetIdentity.new()
-		identity.owner_peer_id = owner
-		identity.authority = DotNetIdentity.Authority.SHARED
-		var behaviour := Sharing.new()
-		identity.behaviours = [behaviour]
-		behaviour.identity = identity
-		behaviour._bind(config)
-		copies.append(behaviour)
+	var copies := _sharing_copies(owner)
 
-	# A run shifted once per bit of a byte and kept (DotNetBehaviour._shifted, what write_state
-	# lays in for every peer after the first at that bit) against the shift per write it
-	# replaced, at every bit, over a written prefix that is not zero.
-	var source := PackedByteArray([0xA5, 0x3C, 0xFF, 0x01, 0x80])
-	var shifts_agree := true
-	for bits in [1, 7, 8, 9, 17, 33, 40]:
-		var data := source.slice(0, (bits + 7) >> 3)
-		if bits & 7 != 0:
-			data[data.size() - 1] &= (1 << (bits & 7)) - 1
-		var entry := [data, bits, {}, []]
-		for pad in range(1, 8):
-			var per_write := DotNetWriter.new()
-			per_write.write_bits(0x55, pad)
-			per_write.write_shifted_run(data, bits)
-			var kept := DotNetWriter.new()
-			kept.write_bits(0x55, pad)
-			kept.write_bit_run(copies[0]._shifted(entry, pad), pad, pad + bits)
-			if per_write.to_bytes() != kept.to_bytes() or per_write.bit_length() != kept.bit_length():
-				shifts_agree = false
-	_check("a run shifted once per bit is the bits a shift per write gives", shifts_agree)
+	_check_shifted_runs(copies[0])
 
 	var sent: Dictionary = {}     # peer -> ticks sent and not yet resolved, in order
 	var acked: Dictionary = {}    # peer -> newest tick it has acknowledged
@@ -191,20 +161,7 @@ func _test_shared_dirty_sets() -> void:
 		var tick := snapshot * 4
 
 		# The same change to both copies: most snapshots move, some change nothing at all.
-		var roll := _share_rng.randf()
-		var changes := {}
-		if roll < 0.7:
-			changes[&"position"] = Vector3(_share_rng.randi_range(0, 3), 0, 0)
-		if roll < 0.15:
-			changes[&"health"] = _share_rng.randi_range(90, 92)
-		if _share_rng.randf() < 0.05:
-			changes[&"tag"] = ["", "a", "bb", "ccc"][_share_rng.randi_range(0, 3)]
-		if _share_rng.randf() < 0.05:
-			changes[&"secret"] = _share_rng.randf() < 0.5
-		if _share_rng.randf() < 0.05:
-			changes[&"seen"] = _share_rng.randi_range(0, 2)
-		if _share_rng.randf() < 0.02:
-			changes[&"kind"] = _share_rng.randi_range(1, 2)
+		var changes := _random_share_changes()
 		for behaviour in copies:
 			for property in changes:
 				behaviour.set(property, changes[property])
@@ -278,6 +235,68 @@ func _test_shared_dirty_sets() -> void:
 		shared_answers > 100
 	)
 
+	_free_sharing_copies(copies)
+
+
+func _sharing_copies(owner: int) -> Array[Sharing]:
+	var copies: Array[Sharing] = []
+	for share in [true, false]:
+		var config := DotNetConfig.new()
+		config.share_dirty_sets = share
+		var identity := DotNetIdentity.new()
+		identity.owner_peer_id = owner
+		identity.authority = DotNetIdentity.Authority.SHARED
+		var behaviour := Sharing.new()
+		identity.behaviours = [behaviour]
+		behaviour.identity = identity
+		behaviour._bind(config)
+		copies.append(behaviour)
+	return copies
+
+
+## A run shifted once per bit of a byte and kept against the shift per write it replaced.
+func _check_shifted_runs(sharing: Sharing) -> void:
+	# DotNetBehaviour._shifted is what write_state lays in for every peer after the first
+	# at that bit; checked at every bit over a written prefix that is not zero.
+	var source := PackedByteArray([0xA5, 0x3C, 0xFF, 0x01, 0x80])
+	var shifts_agree := true
+	for bits in [1, 7, 8, 9, 17, 33, 40]:
+		var data := source.slice(0, (bits + 7) >> 3)
+		if bits & 7 != 0:
+			data[data.size() - 1] &= (1 << (bits & 7)) - 1
+		var entry := [data, bits, {}, []]
+		for pad in range(1, 8):
+			var per_write := DotNetWriter.new()
+			per_write.write_bits(0x55, pad)
+			per_write.write_shifted_run(data, bits)
+			var kept := DotNetWriter.new()
+			kept.write_bits(0x55, pad)
+			kept.write_bit_run(sharing._shifted(entry, pad), pad, pad + bits)
+			if per_write.to_bytes() != kept.to_bytes() or per_write.bit_length() != kept.bit_length():
+				shifts_agree = false
+	_check("a run shifted once per bit is the bits a shift per write gives", shifts_agree)
+
+
+## One snapshot's change, the same for both copies: most move, some change nothing at all.
+func _random_share_changes() -> Dictionary:
+	var roll := _share_rng.randf()
+	var changes := {}
+	if roll < 0.7:
+		changes[&"position"] = Vector3(_share_rng.randi_range(0, 3), 0, 0)
+	if roll < 0.15:
+		changes[&"health"] = _share_rng.randi_range(90, 92)
+	if _share_rng.randf() < 0.05:
+		changes[&"tag"] = ["", "a", "bb", "ccc"][_share_rng.randi_range(0, 3)]
+	if _share_rng.randf() < 0.05:
+		changes[&"secret"] = _share_rng.randf() < 0.5
+	if _share_rng.randf() < 0.05:
+		changes[&"seen"] = _share_rng.randi_range(0, 2)
+	if _share_rng.randf() < 0.02:
+		changes[&"kind"] = _share_rng.randi_range(1, 2)
+	return changes
+
+
+func _free_sharing_copies(copies: Array[Sharing]) -> void:
 	for behaviour in copies:
 		var identity := behaviour.identity
 		behaviour.free()
@@ -540,6 +559,57 @@ func _bump_table() -> Dictionary:
 	return table
 
 
+func _still_manager(node_name: String, as_server: bool, peer: int, scope: StringName) -> DotNetManager:
+	var m := DotNetManager.new()
+	m.name = node_name
+	m.is_server = as_server
+	m.service_scope = scope
+	m.local_peer_id = peer
+	m.auto_tick = false
+	m.config_file = ""
+	m.config = DotNetConfig.new()
+	m.config.tick_rate = 60
+	m.config.snapshot_rate = 60 / STILL_INTERVAL
+	if not as_server:
+		# The first snapshot anchors the clock at the server's tick plus this lead, and
+		# reconciliation replays up to the clock's tick, so it has to be the harness's lead,
+		# or the first replay stops a tick short and the control reads that as disagreement.
+		m.config.input_margin_ticks = STILL_LEAD
+	add_child(m)
+	return m
+
+
+## Worst and last gap (x, y) between where the client predicted and where the server was.
+func _still_gaps(server_at: Dictionary, client_at: Dictionary) -> Vector2:
+	var worst := 0.0
+	var last := 0.0
+	for tick: int in server_at:
+		if not client_at.has(tick):
+			continue
+		var gap := (client_at[tick] as Vector3).distance_to(server_at[tick] as Vector3)
+		worst = maxf(worst, gap)
+		last = gap
+	return Vector2(worst, last)
+
+
+## The steady-state packet size, from the last quarter, when nothing has changed for a
+## long time and there is nothing left in flight to resend.
+func _still_tail_bytes(bytes: Array[int]) -> int:
+	var tail_bytes := 0
+	for b in bytes.slice(int(bytes.size() * 0.75)):
+		tail_bytes = maxi(tail_bytes, b)
+	return tail_bytes
+
+
+func _free_still_managers(host: DotNetManager, guest: DotNetManager) -> void:
+	host.stop()
+	guest.stop()
+	remove_child(host)
+	remove_child(guest)
+	host.free()
+	guest.free()
+
+
 ## One run of [method _test_standing_still]. [param server_moves] gives the server the client's
 ## inputs (until non-zero [param stop_at], then it stops the entity itself); [param lossy] drops
 ## every fourth snapshot. Returns worst and final gap, and how many rewinds went to a wrong position.
@@ -547,33 +617,8 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 	const TICKS := 120
 	var scope := "still_%d_%d_%d_%d" % [int(server_moves), int(lossy), stop_at, int(compact)]
 
-	var host := DotNetManager.new()
-	host.name = "StillServer_" + scope
-	host.is_server = true
-	host.service_scope = StringName(scope + "_server")
-	host.local_peer_id = 1
-	host.auto_tick = false
-	host.config_file = ""
-	host.config = DotNetConfig.new()
-	host.config.tick_rate = 60
-	host.config.snapshot_rate = 60 / STILL_INTERVAL
-	add_child(host)
-
-	var guest := DotNetManager.new()
-	guest.name = "StillClient_" + scope
-	guest.is_server = false
-	guest.service_scope = StringName(scope + "_client")
-	guest.local_peer_id = 2
-	guest.auto_tick = false
-	guest.config_file = ""
-	guest.config = DotNetConfig.new()
-	guest.config.tick_rate = 60
-	guest.config.snapshot_rate = 60 / STILL_INTERVAL
-	# The first snapshot anchors the clock at the server's tick plus this lead, and
-	# reconciliation replays up to the clock's tick — so it has to be the harness's lead,
-	# or the first replay stops a tick short and the control reads that as disagreement.
-	guest.config.input_margin_ticks = STILL_LEAD
-	add_child(guest)
+	var host := _still_manager("StillServer_" + scope, true, 1, StringName(scope + "_server"))
+	var guest := _still_manager("StillClient_" + scope, false, 2, StringName(scope + "_client"))
 
 	var _a := host.setup()
 	var _b := guest.setup()
@@ -668,25 +713,12 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 		# The acknowledgement rides in front of the next input packet, as every game's does.
 		var _ack := host.receive_ack_payload(2, guest.encode_ack())
 
-	var worst := 0.0
-	var last := 0.0
-	for tick: int in server_at:
-		if not client_at.has(tick):
-			continue
-		var gap := (client_at[tick] as Vector3).distance_to(server_at[tick] as Vector3)
-		worst = maxf(worst, gap)
-		last = gap
-
-	# The steady-state packet size, from the last quarter, when nothing has changed for a
-	# long time and there is nothing left in flight to resend.
-	var tail := bytes.slice(int(bytes.size() * 0.75))
-	var tail_bytes := 0
-	for b in tail:
-		tail_bytes = maxi(tail_bytes, b)
+	var gaps := _still_gaps(server_at, client_at)
+	var tail_bytes := _still_tail_bytes(bytes)
 
 	var out := {
-		"worst": worst,
-		"last": last,
+		"worst": gaps.x,
+		"last": gaps.y,
 		"snapshots": snapshots,
 		"stale": stale,
 		"stop_lost": lost_ticks.has(stop_at),
@@ -694,10 +726,5 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 		"tail_bytes": tail_bytes,
 	}
 
-	host.stop()
-	guest.stop()
-	remove_child(host)
-	remove_child(guest)
-	host.free()
-	guest.free()
+	_free_still_managers(host, guest)
 	return out

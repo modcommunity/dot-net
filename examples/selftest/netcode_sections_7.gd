@@ -611,6 +611,16 @@ func _test_spawning() -> void:
 	var good := _pack_entity(true)
 	var identity_less := _pack_entity(false)
 
+	_spawning_registration(spawner, good, identity_less)
+	_spawning_allow_list(spawner, registry)
+	_spawning_client_refused(config, good)
+	_spawning_pooled(spawner, registry)
+	_spawning_declared(registry, config, good, identity_less)
+
+	_sections_completed += 1
+
+
+func _spawning_registration(spawner: DotNetSpawner, good: PackedScene, identity_less: PackedScene) -> void:
 	_check("empty id refused", not spawner.register_prefab(&"", good).ok)
 	_check("null scene refused", not spawner.register_prefab(&"nothing", null).ok)
 
@@ -628,6 +638,8 @@ func _test_spawning() -> void:
 	)
 	_check("prefab is known", spawner.has_prefab(&"player"))
 
+
+func _spawning_allow_list(spawner: DotNetSpawner, registry: DotNetRegistry) -> void:
 	# The allow-list property: an id nobody registered cannot name anything.
 	var unknown := spawner.spawn(&"res://addons/dot_net/plugin.cfg", 1)
 	_check(
@@ -649,6 +661,8 @@ func _test_spawning() -> void:
 			and (live.entity as Node3D).global_position.is_equal_approx(Vector3(3, 0, 4))
 	)
 
+
+func _spawning_client_refused(config: DotNetConfig, good: PackedScene) -> void:
 	# A client may not invent entities, and may not invent ids either.
 	var client_registry := DotNetRegistry.new(false, 2)
 	var client_spawner := DotNetSpawner.new()
@@ -672,6 +686,8 @@ func _test_spawning() -> void:
 	_check("remote spawn uses the id it was given",
 		remote.ok and (remote.value as DotNetIdentity).net_id == 4242)
 
+
+func _spawning_pooled(spawner: DotNetSpawner, registry: DotNetRegistry) -> void:
 	_pool.clear()
 	_pool_context = {}
 	_pool_parent = Node.new()
@@ -750,6 +766,8 @@ func _test_spawning() -> void:
 	_check("despawn_owned_by returns the count", swept == owned, )
 	_check("peer 7 owns nothing", registry.owned_by(7).is_empty())
 
+
+func _spawning_declared(registry: DotNetRegistry, config: DotNetConfig, good: PackedScene, identity_less: PackedScene) -> void:
 	# register_prefab's contract is that a prefab with no identity is a *startup* error, not a
 	# silently non-networked spawn. The inspector path must honour it too, or the guarantee
 	# only holds for games that register in code.
@@ -761,5 +779,3 @@ func _test_spawning() -> void:
 
 	_check("declared prefab registered", declared.has_prefab(&"good"))
 	_check("declared prefab with no identity refused", not declared.has_prefab(&"bad"))
-
-	_sections_completed += 1

@@ -29,8 +29,7 @@ extends DotConfig
 @export_range(-1, 64) var snapshot_workers: int = 0
 
 ## Build server snapshots in the optional native library ([DotNetNative]): the same bytes, several
-## times cheaper. On by default: only a server builds snapshots, and where the library cannot load
-## (web, no binary for the platform) it falls back to GDScript, logged once. See docs/native.md.
+## times cheaper; falls back to GDScript where it cannot load. See docs/native.md.
 ## Environment [code]DOT_NET_NATIVE[/code], command line [code]--net-native[/code].
 @export var native: bool = true
 

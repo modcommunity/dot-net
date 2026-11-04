@@ -458,6 +458,10 @@ func _test_input_lead() -> void:
 		(m as DotNetManager).stop()
 		(m as DotNetManager).queue_free()
 
+	_check_stray_lead()
+
+
+func _check_stray_lead() -> void:
 	# A host that stamps its own lead (every game's headless_net harness stamps `_tick + 2`)
 	# hears about commands the clock did not stamp: each report asks a tick more than the clock
 	# has given, whatever it gives. Capped, it stops (7 ticks ahead); uncapped it ran 29 ahead in 10 s.
@@ -474,6 +478,28 @@ func _test_input_lead() -> void:
 		stray_lead = stray.tick - server_at
 	_check("a clock told about commands it did not stamp does not run away (%d ticks ahead)" % stray_lead,
 		stray.is_lead_reported() and stray_lead <= 12)
+
+
+## Frame lengths in ms: a second at 60 Hz to settle, the stalls, then slow frames.
+func _visit_frames(stalls: Array, slow_seconds: float, frame_ms: float, settle_ms: float) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	var frames: Array[float] = []
+	for _i in int(1000.0 / settle_ms):
+		frames.append(settle_ms)
+	var stalls_end := float(int(1000.0 / settle_ms)) * settle_ms
+	for stall in stalls:
+		frames.append(float(stall) * 1000.0)
+		stalls_end += float(stall) * 1000.0
+		for _i in int(1000.0 / 6.0 / settle_ms):
+			frames.append(settle_ms)
+			stalls_end += settle_ms
+	var slow := 0.0
+	while slow < slow_seconds * 1000.0:
+		var ms := frame_ms if frame_ms > 0.0 else rng.randf_range(60.0, 150.0)
+		frames.append(ms)
+		slow += ms
+	return {"frames": frames, "stalls_end": stalls_end}
 
 
 ## A first visit's frames against a server in real time: the engine runs at most [param cap]
@@ -508,24 +534,9 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 
 	var buffer := host.input_buffer_for(2)
 	var step_ms := 1000.0 / float(rate)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 4242
-	# Frames: a second at 60 Hz to settle, the stalls, then slow frames.
-	var frames: Array[float] = []
-	for _i in int(1000.0 / settle_ms):
-		frames.append(settle_ms)
-	var stalls_end := float(int(1000.0 / settle_ms)) * settle_ms
-	for stall in stalls:
-		frames.append(float(stall) * 1000.0)
-		stalls_end += float(stall) * 1000.0
-		for _i in int(1000.0 / 6.0 / settle_ms):
-			frames.append(settle_ms)
-			stalls_end += settle_ms
-	var slow := 0.0
-	while slow < slow_seconds * 1000.0:
-		var ms := frame_ms if frame_ms > 0.0 else rng.randf_range(60.0, 150.0)
-		frames.append(ms)
-		slow += ms
+	var plan := _visit_frames(stalls, slow_seconds, frame_ms, settle_ms)
+	var frames: Array[float] = plan.frames
+	var stalls_end: float = plan.stalls_end
 
 	# In a dictionary: a lambda captures a local by value.
 	var server := {"tick": 0}
@@ -607,10 +618,14 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 	out["floors"] = guest.clock.floor_count()
 	out["lost_ms"] = int(guest.clock.lost_seconds() * 1000.0)
 	out["snaps"] = int(guest.clock.describe()["snaps"])
+	_free_visit_managers(host, guest)
+	return out
+
+
+func _free_visit_managers(host: DotNetManager, guest: DotNetManager) -> void:
 	for m in [host, guest]:
 		(m as DotNetManager).stop()
 		(m as DotNetManager).queue_free()
-	return out
 
 
 ## The stuck-on-the-spawn-pad report: a browser's first visit stalls for seconds, then draws slow

@@ -2,9 +2,8 @@ class_name DotNetLatency
 extends RefCounted
 
 ## Artificial latency a client adds to its own traffic, both directions, for testing lag: `cl_latency_baseline`
-## (seconds) unless the server's `sv_allow_client_latency` is 0. Zero costs one float compare per packet.
-## The cvar side is wired by the host (dot-net has no console): [method bind_client_cvar] on a client,
-## [method bind_server_cvar] on a server, [method follow_cvars] on a client to read the server's switch.
+## (seconds) unless the server's `sv_allow_client_latency` is 0. The host wires the cvars (no console here):
+## [method bind_client_cvar], [method bind_server_cvar], [method follow_cvars].
 
 const CVAR_BASELINE := "cl_latency_baseline"
 const CVAR_ALLOW := "sv_allow_client_latency"
