@@ -45,6 +45,9 @@ var _last_mismatch: Dictionary = {}
 ## [member DotNetConfig.skip_matching_replays]. Trimmed to the unacknowledged window.
 var _predicted: Dictionary = {}
 
+## net_id -> the newest tick [method predict] simulated it for, where a replay stops.
+var _last_predicted: Dictionary = {}
+
 
 func _init(p_config: DotNetConfig) -> void:
 	config = p_config
@@ -69,6 +72,7 @@ func predict(
 			if input != null and behaviour.has_method("_net_apply_input"):
 				behaviour.call("_net_apply_input", input, tick)
 			behaviour._net_simulate(tick, delta)
+		_last_predicted[identity.net_id] = tick
 		_remember(identity, tick)
 
 
@@ -182,6 +186,9 @@ func reconcile(
 	# would simulate (DotNetBehaviour._net_predicts): then the rewound state is the answer.
 	var replayed := 0
 	var replay_tick := server_tick + 1
+	# Never past the newest predicted tick: a client that moves its clock and then reconciles
+	# (predict_tick flushes first) would replay the tick it is about to predict, playing it twice.
+	var through := mini(current_tick, int(_last_predicted.get(identity.net_id, current_tick)))
 	var predicting := false
 	for behaviour in identity.behaviours:
 		if behaviour._net_predicts():
@@ -192,7 +199,7 @@ func reconcile(
 	var from_prediction: bool = _was_predicting.get(identity.net_id, true)
 	_was_predicting[identity.net_id] = predicting
 
-	while predicting and replay_tick <= current_tick:
+	while predicting and replay_tick <= through:
 		var input := input_buffer.peek(replay_tick)
 
 		# [b]A hole is not a gap.[/b] A tick with no input, but older and newer ones in the buffer, is a
@@ -209,7 +216,7 @@ func reconcile(
 		# A missing input means the client discarded it — the buffer is too short
 		# for this latency. Simulating with no input diverges, so stop and let the
 		# next snapshot correct it rather than compounding the error.
-		if input == null and replay_tick < current_tick:
+		if input == null and replay_tick < through:
 			DotLog.debug(
 				CHANNEL,
 				"replay gap; input history is too short for this latency",
@@ -382,6 +389,7 @@ func forget(net_id: int) -> void:
 	_corrections.erase(net_id)
 	_was_predicting.erase(net_id)
 	_predicted.erase(net_id)
+	_last_predicted.erase(net_id)
 
 
 ## Reconciliations skipped because the prediction already matched the server.
