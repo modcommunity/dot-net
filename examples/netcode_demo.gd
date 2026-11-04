@@ -6,7 +6,7 @@ extends "selftest/netcode_sections_9.gd"
 
 
 ## Every check this suite makes, the last one included. The section counter cannot see a check that never ran inside a section that had announced itself, so the total is compared with this. Raise it with every check added.
-const CHECKS := 551
+const CHECKS := 557
 
 
 func _ready() -> void:
@@ -66,6 +66,7 @@ func _run() -> void:
 	await _test_integration()
 	_test_late_mirror_observer_vars()
 	_test_latency_baseline()
+	_test_replay_bound()
 
 	print("")
 	_check(

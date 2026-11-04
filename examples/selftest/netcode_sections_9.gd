@@ -312,3 +312,90 @@ func _test_server_driven_vars() -> void:
 	_check("the predicted position agrees with the replaying guest (%.4f m apart)" % moving[1].position.distance_to(moving[0].position),
 		moving[1].position.distance_to(moving[0].position) < 0.01)
 	_free_managers([host] + guests)
+
+
+## A [Movement] that counts how often each tick is simulated.
+class CountedMovement extends Movement:
+	var runs: Dictionary = {}
+
+	func _net_simulate(tick: int, delta: float) -> void:
+		runs[tick] = int(runs.get(tick, 0)) + 1
+		super(tick, delta)
+
+
+## [b]A reconcile replays only ticks already predicted.[/b] A client that advances its clock and records the tick's input before [method DotNetManager.predict_tick] has a snapshot waiting at that point; the replay must stop at the last tick predicted, or it plays the new one and predict_tick plays it again.
+func _test_replay_bound() -> void:
+	print("")
+	print("[replay stops at the last predicted tick]")
+	var straight := _bound_run(&"none")
+	for order: StringName in [&"flush first", &"advance first", &"on receipt"]:
+		var run := _bound_run(order)
+		_check("%s: no tick played twice before it was predicted (%d)" % [order, int(run["twice"])],
+			int(run["twice"]) == 0 and int(run["replays"]) > 0)
+		var apart := (run["position"] as Vector3).distance_to(straight["position"])
+		_check("%s: and lands where no snapshot does (%.4f m)" % [order, apart], apart < 0.0001)
+
+
+## Predicts 60 ticks, some frames two at a time, with a snapshot of a tick predicted three before read every third frame. [param order] is where the clock moves relative to the reconcile.
+func _bound_run(order: StringName) -> Dictionary:
+	var c := DotNetManager.new()
+	c.is_server = false
+	c.local_peer_id = 5
+	c.auto_tick = false
+	c.config_file = ""
+	c.service_scope = StringName("bound_%s" % order)
+	c.config = DotNetConfig.new()
+	c.config.reconcile_once_per_frame = order != &"on receipt"
+	add_child(c)
+	var _up := c.setup()
+	c.clock.sync_from_server(0, 0.0)
+	var body := Node3D.new()
+	var identity := DotNetIdentity.new()
+	identity.owner_peer_id = 5
+	identity.authority = DotNetIdentity.Authority.SHARED
+	body.add_child(identity)
+	var mover := CountedMovement.new()
+	body.add_child(mover)
+	identity.entity = body
+	identity.behaviours = [mover]
+	mover.identity = identity
+	mover._bind(c.config)
+	add_child(body)
+	var _reg := c.registry.register(identity, 40, 0, c.config)
+	var replays_before := int(c.predictor.describe()["replays"])
+	var states := {}
+	var twice := 0
+	var t := 0
+	for frame in range(40):
+		var ticks := 2 if frame % 4 == 3 else 1
+		var snapshot := []
+		if order != &"none" and frame % 3 == 2 and states.has(t - 3):
+			var s := t - 3
+			snapshot = [identity, s, {&"position": states[s][0], &"velocity": states[s][1]}]
+		if order == &"flush first":
+			if not snapshot.is_empty():
+				c._pending_reconcile[40] = snapshot
+			c.flush_reconcile()
+		c.clock.tick = t + ticks
+		if not snapshot.is_empty() and order == &"advance first":
+			c._pending_reconcile[40] = snapshot
+		if not snapshot.is_empty() and order == &"on receipt":
+			c._reconcile(identity, int(snapshot[1]), snapshot[2])
+		for i in range(ticks):
+			var tick := c.clock.tick - (ticks - 1 - i)
+			var input := DemoInput.new()
+			input.tick = tick
+			input.delta = 1.0 / 60.0
+			input.move = Vector2(1.0, 0.0) if (tick / 6) % 2 == 0 else Vector2(0.0, 1.0)
+			var _pushed := c.local_inputs().push(input)
+			c.predict_tick(tick, input)
+			if int(mover.runs.get(tick, 0)) != 1:
+				twice += 1
+			states[tick] = [mover.position, mover.velocity]
+		t += ticks
+	var out := {"twice": twice, "position": mover.position,
+		"replays": int(c.predictor.describe()["replays"]) - replays_before}
+	remove_child(body)
+	body.free()
+	_free_managers([c])
+	return out
