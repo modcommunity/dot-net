@@ -623,3 +623,115 @@ func _bits_before_trailer(payload: PackedByteArray, client: DotNetManager) -> in
 		for b in behaviours:
 			var _r := identity.behaviours[b].read_state(reader, 0)
 	return reader.bit_position()
+
+
+## The server, a reported client and an old control client wired through a delayed link, as one dict for [method _lead_phase].
+func _lead_rig() -> Dictionary:
+	var host := _parts_manager("LeadServer", true, 1200)
+	var fresh := _parts_manager("LeadClient", false, 1200)
+	var legacy := _parts_manager("LeadLegacy", false, 1200)
+	legacy.local_peer_id = 3
+	legacy.messages.features = DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS
+	# Twenty snapshots a second, as most games here send: the receive timeline steps back a
+	# tick only after sixteen arrivals behind it, so a timeline the drift carried ahead stays
+	# there for most of a second a tick.
+	for m in [host, fresh, legacy]:
+		(m as DotNetManager).config.snapshot_rate = 20
+
+	var clients := {2: fresh, 3: legacy}
+	# [arrival ms, payload] in flight, each direction, each client.
+	var down := {2: [], 3: []}
+	var up := {2: [], 3: []}
+	var link := {"one_way": 40.0, "now": 0.0}
+
+	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _schema := (clients[peer_id] as DotNetManager).receive(payload, 1)
+			return
+		(down[peer_id] as Array).append([float(link["now"]) + float(link["one_way"]), payload])
+	fresh.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 2)
+	legacy.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			var _adopted := host.receive(payload, 3)
+
+	host.start()
+	fresh.start()
+	legacy.start()
+	host.add_peer(2)
+	host.add_peer(3)
+
+	var state := {"frame": 0, "enet_rtt": 80.0, "legacy_bytes": 0, "legacy_snapshots": 0}
+	# Per client, over a phase: late or missing commands, when the last one was, the real lead's
+	# range, and how far the receive timeline ran past the newest snapshot that had arrived.
+	return {"host": host, "fresh": fresh, "legacy": legacy, "clients": clients, "down": down,
+		"up": up, "link": link, "state": state, "phase": {}}
+
+
+## Runs [param seconds] of the rig at 60 frames a second, filling ctx["phase"] per client.
+func _lead_phase(ctx: Dictionary, seconds: float) -> void:
+	var host: DotNetManager = ctx["host"]
+	var clients: Dictionary = ctx["clients"]
+	var down: Dictionary = ctx["down"]
+	var up: Dictionary = ctx["up"]
+	var link: Dictionary = ctx["link"]
+	var state: Dictionary = ctx["state"]
+	var phase: Dictionary = ctx["phase"]
+	var frame_ms := 1000.0 / 60.0
+	phase.clear()
+	for peer in [2, 3]:
+		phase[peer] = {"missed_at_start": host.input_buffer_for(peer).late_count
+			+ host.input_buffer_for(peer).starved_count, "last_miss_ms": -1.0,
+			"lead_min": 1 << 30, "lead_max": -(1 << 30), "ahead_max": -(1 << 30), "newest": -1}
+	var started := float(link["now"])
+	var frames := int(seconds * 60.0)
+	for _f in frames:
+		var now := float(state["frame"]) * frame_ms
+		link["now"] = now
+		state["frame"] = int(state["frame"]) + 1
+		# ENet's smoothed round trip: an eighth of the way to the truth every half second.
+		if int(state["frame"]) % 30 == 0:
+			state["enet_rtt"] = float(state["enet_rtt"]) + (2.0 * float(link["one_way"]) - float(state["enet_rtt"])) / 8.0
+
+		# The server: what has arrived, then one tick.
+		for peer in [2, 3]:
+			var queue: Array = up[peer]
+			var buffer := host.input_buffer_for(peer)
+			while not queue.is_empty() and float(queue[0][0]) <= now:
+				var _pushed := buffer.push(queue.pop_front()[1])
+		host.server_tick(int(state["frame"]))
+
+		for peer in [2, 3]:
+			var client: DotNetManager = clients[peer]
+			var queue: Array = down[peer]
+			var p: Dictionary = phase[peer]
+			while not queue.is_empty() and float(queue[0][0]) <= now:
+				var payload: PackedByteArray = queue.pop_front()[1]
+				if peer == 3:
+					state["legacy_bytes"] = int(state["legacy_bytes"]) + payload.size()
+					state["legacy_snapshots"] = int(state["legacy_snapshots"]) + 1
+				client.stats.note_rtt(float(state["enet_rtt"]))
+				var _r := client.receive_snapshot(payload)
+				p["newest"] = maxi(int(p["newest"]), DotNetReader.new(payload).read_uint(32))
+			var ticks := client.clock.advance(1.0 / 60.0)
+			for i in ticks:
+				if not client.clock.is_synced():
+					continue
+				var input := DemoInput.new()
+				input.tick = client.clock.tick - (ticks - 1 - i)
+				input.delta = 1.0 / 60.0
+				(up[peer] as Array).append([now + float(link["one_way"]), input])
+			if client.clock.is_synced():
+				var lead := client.clock.tick - int(state["frame"])
+				p["lead_min"] = mini(int(p["lead_min"]), lead)
+				p["lead_max"] = maxi(int(p["lead_max"]), lead)
+				# From a second and a half in: a link that slows leaves a gap in the
+				# snapshots, which the timeline runs on through (as it should) until the
+				# next one; what is measured is whether it comes back.
+				if int(p["newest"]) >= 0 and now - started >= 1500.0:
+					p["ahead_max"] = maxi(int(p["ahead_max"]), client.clock.received_tick() - int(p["newest"]))
+			var buffer := host.input_buffer_for(peer)
+			if buffer.late_count + buffer.starved_count > int(p.get("missed_seen", p["missed_at_start"])):
+				p["missed_seen"] = buffer.late_count + buffer.starved_count
+				p["last_miss_ms"] = now - started

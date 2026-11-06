@@ -179,35 +179,10 @@ func _test_shared_dirty_sets() -> void:
 			if not relevant:
 				continue
 
-			var lists: Array = []
-			var bytes: Array = []
-			for behaviour in copies:
-				# The sharing copy the way DotNetManager asks (one fused call), the other the
-				# three calls that are its definition: the two must agree, list and bytes.
-				var dirty: Array[DotNetVar]
-				if behaviour == copies[0]:
-					dirty = behaviour.collect_for_peer(peer, acked_tick, strict, tick - 32 * 4, peer == owner)
-				else:
-					behaviour.sync_peer_acks(peer, acked_tick, strict)
-					behaviour.trim_pending(peer, tick - 32 * 4)
-					dirty = behaviour.collect_dirty(peer, false, peer == owner)
-				var names := []
-				for declaration in dirty:
-					names.append(declaration.property)
-				lists.append(names)
-				var writer := DotNetWriter.new()
-				# Entities start at any bit of a byte, so the string's alignment is exercised.
-				if snapshot % 8 > 0:
-					writer.write_bits(0, snapshot % 8)
-				if not starved:
-					behaviour.write_state(writer, dirty, peer, tick)
-				bytes.append(writer.to_bytes())
-				if behaviour == copies[0]:
-					for other in answers:
-						if is_same(answers[other], dirty):
-							shared_answers += 1
-							break
-					answers[peer] = dirty
+			var got := _share_collect(copies, peer, owner, snapshot, tick, acked_tick, strict, starved, answers)
+			var lists: Array = got[0]
+			var bytes: Array = got[1]
+			shared_answers += int(got[2])
 
 			if lists[0] != lists[1] or bytes[0] != bytes[1]:
 				mismatches += 1
@@ -236,6 +211,43 @@ func _test_shared_dirty_sets() -> void:
 	)
 
 	_free_sharing_copies(copies)
+
+
+## Both copies' dirty list and bytes for one peer at one snapshot, and how many earlier answers in
+## [param answers] the sharing copy's equals (which is added to). Returns [lists, bytes, shared].
+func _share_collect(copies: Array[Sharing], peer: int, owner: int, snapshot: int, tick: int,
+		acked_tick: int, strict: bool, starved: bool, answers: Dictionary) -> Array:
+	var lists: Array = []
+	var bytes: Array = []
+	var shared := 0
+	for behaviour in copies:
+		# The sharing copy the way DotNetManager asks (one fused call), the other the
+		# three calls that are its definition: the two must agree, list and bytes.
+		var dirty: Array[DotNetVar]
+		if behaviour == copies[0]:
+			dirty = behaviour.collect_for_peer(peer, acked_tick, strict, tick - 32 * 4, peer == owner)
+		else:
+			behaviour.sync_peer_acks(peer, acked_tick, strict)
+			behaviour.trim_pending(peer, tick - 32 * 4)
+			dirty = behaviour.collect_dirty(peer, false, peer == owner)
+		var names := []
+		for declaration in dirty:
+			names.append(declaration.property)
+		lists.append(names)
+		var writer := DotNetWriter.new()
+		# Entities start at any bit of a byte, so the string's alignment is exercised.
+		if snapshot % 8 > 0:
+			writer.write_bits(0, snapshot % 8)
+		if not starved:
+			behaviour.write_state(writer, dirty, peer, tick)
+		bytes.append(writer.to_bytes())
+		if behaviour == copies[0]:
+			for other in answers:
+				if is_same(answers[other], dirty):
+					shared += 1
+					break
+			answers[peer] = dirty
+	return [lists, bytes, shared]
 
 
 func _sharing_copies(owner: int) -> Array[Sharing]:
@@ -610,6 +622,65 @@ func _free_still_managers(host: DotNetManager, guest: DotNetManager) -> void:
 	guest.free()
 
 
+## Hooks the host's send (snapshots recorded in [param rec], every fourth dropped when lossy) and,
+## for a compact run, the guest's schema reply.
+func _still_wire(host: DotNetManager, guest: DotNetManager, lossy: bool, compact: bool, rec: Dictionary) -> void:
+	var wire: Array[Dictionary] = rec["wire"]
+	var sent: Array = rec["sent"]
+	var bytes: Array[int] = rec["bytes"]
+	var lost_ticks: Array[int] = rec["lost"]
+	var now: Array = rec["now"]
+	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+		# Snapshots only; see _test_render_delay.
+		if d != DotNetMessage.Delivery.UNRELIABLE:
+			return
+		sent[0] += 1
+		bytes.append(payload.size())
+		if lossy and sent[0] % 4 == 0:
+			lost_ticks.append(now[0])
+			return
+		wire.append({"payload": payload, "tick": now[0]})
+
+	# The client's schema reaches the server only when asked for: it is what tells the server
+	# this client reads unchanged lists (docs/wire.md#unchanged-entities). Without it the
+	# runs below are the format every client before the lists reads.
+	if compact:
+		guest.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
+			if d != DotNetMessage.Delivery.UNRELIABLE:
+				var _adopted := host.receive(payload, 2)
+
+
+## The player on the server and its remote on the guest; their Movement behaviours.
+func _still_spawn(host: DotNetManager, guest: DotNetManager) -> Array:
+	host.add_peer(2)
+	host.spawner.register_factory(&"player", _build_player)
+	guest.spawner.register_factory(&"player", _build_player)
+
+	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
+	var on_client: DotNetIdentity = guest.spawner.spawn_remote(
+		&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
+	).value
+	return [on_server.behaviours[0] as Movement, on_client.behaviours[0] as Movement]
+
+
+## Delivers the recorded snapshots at client tick [param c]: how many applied, and how many left the
+## rewound position away from what the server had at the tick they were built on.
+func _still_deliver(guest: DotNetManager, movement: Movement, wire: Array[Dictionary], server_at: Dictionary, c: int) -> Vector2i:
+	var applied_count := 0
+	var stale := 0
+	for entry in wire:
+		guest.clock.tick = c
+		var applied := guest.receive_snapshot(entry["payload"] as PackedByteArray)
+		if not applied.ok:
+			continue
+		applied_count += 1
+		var rewound: Variant = movement.authoritative_values().get(&"position")
+		var truth: Vector3 = server_at[int(entry["tick"])]
+		if rewound == null or (rewound as Vector3).distance_to(truth) > 0.05:
+			stale += 1
+	return Vector2i(applied_count, stale)
+
+
 ## One run of [method _test_standing_still]. [param server_moves] gives the server the client's
 ## inputs (until non-zero [param stop_at], then it stops the entity itself); [param lossy] drops
 ## every fourth snapshot. Returns worst and final gap, and how many rewinds went to a wrong position.
@@ -630,37 +701,13 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 	var bytes: Array[int] = []
 	var lost_ticks: Array[int] = []
 	var now := [0]
-	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
-		# Snapshots only; see _test_render_delay.
-		if d != DotNetMessage.Delivery.UNRELIABLE:
-			return
-		sent[0] += 1
-		bytes.append(payload.size())
-		if lossy and sent[0] % 4 == 0:
-			lost_ticks.append(now[0])
-			return
-		wire.append({"payload": payload, "tick": now[0]})
-
-	# The client's schema reaches the server only when asked for: it is what tells the server
-	# this client reads unchanged lists (docs/wire.md#unchanged-entities). Without it the
-	# runs below are the format every client before the lists reads.
-	if compact:
-		guest.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
-			if d != DotNetMessage.Delivery.UNRELIABLE:
-				var _adopted := host.receive(payload, 2)
+	_still_wire(host, guest, lossy, compact, {"wire": wire, "sent": sent, "bytes": bytes, "lost": lost_ticks, "now": now})
 
 	var _c := host.start()
 	var _d := guest.start()
-	host.add_peer(2)
-	host.spawner.register_factory(&"player", _build_player)
-	guest.spawner.register_factory(&"player", _build_player)
-
-	var on_server: DotNetIdentity = host.spawner.spawn(&"player", 2, Transform3D.IDENTITY, 0).value
-	var on_client: DotNetIdentity = guest.spawner.spawn_remote(
-		&"player", on_server.net_id, 2, Transform3D.IDENTITY, 0
-	).value
-	var server_movement := on_server.behaviours[0] as Movement
-	var client_movement := on_client.behaviours[0] as Movement
+	var moves := _still_spawn(host, guest)
+	var server_movement: Movement = moves[0]
+	var client_movement: Movement = moves[1]
 
 	var server_at := {}
 	var client_at := {}
@@ -698,16 +745,9 @@ func _standing_still_run(server_moves: bool, lossy: bool, stop_at: int, compact:
 		host.server_tick(s)
 		server_at[s] = server_movement.position
 
-		for entry in wire:
-			guest.clock.tick = c
-			var applied := guest.receive_snapshot(entry["payload"] as PackedByteArray)
-			if not applied.ok:
-				continue
-			snapshots += 1
-			var rewound: Variant = client_movement.authoritative_values().get(&"position")
-			var truth: Vector3 = server_at[int(entry["tick"])]
-			if rewound == null or (rewound as Vector3).distance_to(truth) > 0.05:
-				stale += 1
+		var heard := _still_deliver(guest, client_movement, wire, server_at, c)
+		snapshots += heard.x
+		stale += heard.y
 		wire.clear()
 
 		# The acknowledgement rides in front of the next input packet, as every game's does.
