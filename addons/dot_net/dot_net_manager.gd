@@ -445,6 +445,21 @@ func perf_counters() -> Dictionary:
 		&"server_ticks": _perf_server_ticks,
 		&"server_sim_usec": _perf_server_sim_usec,
 		&"server_send_usec": _perf_server_send_usec,
+		# Inside server_send_usec (inline path; the native and pooled paths count prepare, reads
+		# and thaw only): freeze + interest prepare, the shared property reads, per-peer relevance
+		# and ranking, per-peer build + send, thaw.
+		&"snap_prepare_usec": _ph_prepare_usec,
+		&"snap_reads_usec": _ph_reads_usec,
+		&"snap_interest_usec": _ph_interest_usec,
+		&"snap_build_usec": _ph_build_usec,
+		&"snap_thaw_usec": _ph_thaw_usec,
+		&"snap_snapshots": _ph_snapshots,
+		# Native and pooled paths: the core's begin (property reads), peer interest and ranking, handing the lists over, the fork-to-join build, and sending what came back.
+		&"snap_begin_usec": _ph_begin_usec,
+		&"snap_nint_usec": _snapshot_interest_usec_total,
+		&"snap_submit_usec": _snapshot_submit_usec_total,
+		&"snap_join_usec": _snapshot_join_usec_total,
+		&"snap_apply_usec": _snapshot_apply_usec_total,
 	}
 
 

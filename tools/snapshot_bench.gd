@@ -200,6 +200,11 @@ func _run() -> void:
 	}
 	if _hash:
 		row["hash"] = digest.finish().hex_encode()
+	# Phase split (ms per snapshot, whole run including warm-up), inline path only.
+	var pc := host.perf_counters()
+	var snaps := maxi(1, int(pc[&"snap_snapshots"]))
+	for k: String in ["prepare", "reads", "interest", "build", "thaw", "begin", "nint", "submit", "join", "apply"]:
+		row["ph_" + k] = snappedf(float(pc[StringName("snap_%s_usec" % k)]) / 1000.0 / snaps, 0.01)
 	for k: String in _laps:
 		row["lap_" + k] = snappedf(float(_laps[k]) / 1000.0 / times.size(), 0.01)
 	print("BENCH %s" % JSON.stringify(row))

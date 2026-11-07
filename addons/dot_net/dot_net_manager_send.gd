@@ -28,6 +28,9 @@ func _send_snapshots(
 
 	interest._prepare(identities, context)
 	interest.index_snapshot(identities)
+	var phase_at := Time.get_ticks_usec()
+	_ph_prepare_usec += phase_at - prep_started
+	_ph_snapshots += 1
 
 	_last_snapshot_tick = tick
 
@@ -43,6 +46,9 @@ func _send_snapshots(
 		for identity in identities:
 			for behaviour in identity.behaviours:
 				behaviour.begin_snapshot_reads(now_ms, pooled)
+		var reads_done := Time.get_ticks_usec()
+		_ph_reads_usec += reads_done - phase_at
+		phase_at = reads_done
 
 	if native != null:
 		_snapshot_prep_usec_total += Time.get_ticks_usec() - prep_started
@@ -80,9 +86,14 @@ func _send_snapshots(
 				_within_send_budget(kept, relevant, observer)
 				relevant = kept
 
+			var built_at := Time.get_ticks_usec()
+			_ph_interest_usec += built_at - phase_at
 			if _send_to_peer(peer_id, tick, relevant):
 				sent_to += 1
+			phase_at = Time.get_ticks_usec()
+			_ph_build_usec += phase_at - built_at
 
+	var thaw_at := Time.get_ticks_usec()
 	if native == null:
 		for identity in identities:
 			for behaviour in identity.behaviours:
@@ -96,6 +107,7 @@ func _send_snapshots(
 			if is_instance_valid(identity):
 				identity.thaw_position()
 		_late_frozen.clear()
+	_ph_thaw_usec += Time.get_ticks_usec() - thaw_at
 
 	snapshot_sent.emit(tick, sent_to)
 
@@ -188,10 +200,12 @@ func _send_snapshots_native(
 		interest_cfg["starvation_ticks"] = budget.starvation_ticks
 		interest_cfg["starvation_weight"] = budget.starvation_weight
 	core.set_interest(interest_cfg)
+	var begin_at := Time.get_ticks_usec()
 	core.begin_snapshot(identities, PackedInt64Array([
 		tick, int(context["now_ms"]), config.mtu, oldest_pending, workers,
 		DotNetIdentity.Authority.SHARED,
 	]))
+	_ph_begin_usec += Time.get_ticks_usec() - begin_at
 	var jobs: Array[SnapshotJob] = []
 	var interest_started := Time.get_ticks_usec()
 	if core_interest:
