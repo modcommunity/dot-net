@@ -299,109 +299,21 @@ func _test_input_lead() -> void:
 	print("")
 	print("[the input lead the server reports]")
 
-	var host := _parts_manager("LeadServer", true, 1200)
-	var fresh := _parts_manager("LeadClient", false, 1200)
-	var legacy := _parts_manager("LeadLegacy", false, 1200)
-	legacy.local_peer_id = 3
-	legacy.messages.features = DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS
-	# Twenty snapshots a second, as most games here send: the receive timeline steps back a
-	# tick only after sixteen arrivals behind it, so a timeline the drift carried ahead stays
-	# there for most of a second a tick.
-	for m in [host, fresh, legacy]:
-		(m as DotNetManager).config.snapshot_rate = 20
-
-	var clients := {2: fresh, 3: legacy}
-	# [arrival ms, payload] in flight, each direction, each client.
-	var down := {2: [], 3: []}
-	var up := {2: [], 3: []}
-	var link := {"one_way": 40.0, "now": 0.0}
-
-	host.send_fn = func(peer_id: int, payload: PackedByteArray, d: int) -> void:
-		if d != DotNetMessage.Delivery.UNRELIABLE:
-			var _schema := (clients[peer_id] as DotNetManager).receive(payload, 1)
-			return
-		(down[peer_id] as Array).append([float(link["now"]) + float(link["one_way"]), payload])
-	fresh.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
-		if d != DotNetMessage.Delivery.UNRELIABLE:
-			var _adopted := host.receive(payload, 2)
-	legacy.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
-		if d != DotNetMessage.Delivery.UNRELIABLE:
-			var _adopted := host.receive(payload, 3)
-
-	host.start()
-	fresh.start()
-	legacy.start()
-	host.add_peer(2)
-	host.add_peer(3)
+	var ctx := _lead_rig()
+	var host: DotNetManager = ctx["host"]
+	var fresh: DotNetManager = ctx["fresh"]
+	var legacy: DotNetManager = ctx["legacy"]
+	var link: Dictionary = ctx["link"]
+	var state: Dictionary = ctx["state"]
+	var phase: Dictionary = ctx["phase"]
 
 	_check("the new client says it reads the input lead, the old one does not",
 		host.messages.peer_supports(2, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
 			and not host.messages.peer_supports(3, DotNetMessageRegistry.FEATURE_INPUT_LEAD))
 
-	var frame_ms := 1000.0 / 60.0
-	var state := {"frame": 0, "enet_rtt": 80.0, "legacy_bytes": 0, "legacy_snapshots": 0}
-	# Per client, over a phase: late or missing commands, when the last one was, the real lead's
-	# range, and how far the receive timeline ran past the newest snapshot that had arrived.
-	var phase := {}
 
 	var run := func(seconds: float) -> void:
-		# Cleared, not reassigned: a lambda's captured variable is its own copy of the reference.
-		phase.clear()
-		for peer in [2, 3]:
-			phase[peer] = {"missed_at_start": host.input_buffer_for(peer).late_count
-				+ host.input_buffer_for(peer).starved_count, "last_miss_ms": -1.0,
-				"lead_min": 1 << 30, "lead_max": -(1 << 30), "ahead_max": -(1 << 30), "newest": -1}
-		var started := float(link["now"])
-		var frames := int(seconds * 60.0)
-		for _f in frames:
-			var now := float(state["frame"]) * frame_ms
-			link["now"] = now
-			state["frame"] = int(state["frame"]) + 1
-			# ENet's smoothed round trip: an eighth of the way to the truth every half second.
-			if int(state["frame"]) % 30 == 0:
-				state["enet_rtt"] = float(state["enet_rtt"]) + (2.0 * float(link["one_way"]) - float(state["enet_rtt"])) / 8.0
-
-			# The server: what has arrived, then one tick.
-			for peer in [2, 3]:
-				var queue: Array = up[peer]
-				var buffer := host.input_buffer_for(peer)
-				while not queue.is_empty() and float(queue[0][0]) <= now:
-					var _pushed := buffer.push(queue.pop_front()[1])
-			host.server_tick(int(state["frame"]))
-
-			for peer in [2, 3]:
-				var client: DotNetManager = clients[peer]
-				var queue: Array = down[peer]
-				var p: Dictionary = phase[peer]
-				while not queue.is_empty() and float(queue[0][0]) <= now:
-					var payload: PackedByteArray = queue.pop_front()[1]
-					if peer == 3:
-						state["legacy_bytes"] = int(state["legacy_bytes"]) + payload.size()
-						state["legacy_snapshots"] = int(state["legacy_snapshots"]) + 1
-					client.stats.note_rtt(float(state["enet_rtt"]))
-					var _r := client.receive_snapshot(payload)
-					p["newest"] = maxi(int(p["newest"]), DotNetReader.new(payload).read_uint(32))
-				var ticks := client.clock.advance(1.0 / 60.0)
-				for i in ticks:
-					if not client.clock.is_synced():
-						continue
-					var input := DemoInput.new()
-					input.tick = client.clock.tick - (ticks - 1 - i)
-					input.delta = 1.0 / 60.0
-					(up[peer] as Array).append([now + float(link["one_way"]), input])
-				if client.clock.is_synced():
-					var lead := client.clock.tick - int(state["frame"])
-					p["lead_min"] = mini(int(p["lead_min"]), lead)
-					p["lead_max"] = maxi(int(p["lead_max"]), lead)
-					# From a second and a half in: a link that slows leaves a gap in the
-					# snapshots, which the timeline runs on through (as it should) until the
-					# next one; what is measured is whether it comes back.
-					if int(p["newest"]) >= 0 and now - started >= 1500.0:
-						p["ahead_max"] = maxi(int(p["ahead_max"]), client.clock.received_tick() - int(p["newest"]))
-				var buffer := host.input_buffer_for(peer)
-				if buffer.late_count + buffer.starved_count > int(p.get("missed_seen", p["missed_at_start"])):
-					p["missed_seen"] = buffer.late_count + buffer.starved_count
-					p["last_miss_ms"] = now - started
+		_lead_phase(ctx, seconds)
 
 	var missed := func(peer: int) -> int:
 		var buffer := host.input_buffer_for(peer)
@@ -502,12 +414,9 @@ func _visit_frames(stalls: Array, slow_seconds: float, frame_ms: float, settle_m
 	return {"frames": frames, "stalls_end": stalls_end}
 
 
-## A first visit's frames against a server in real time: the engine runs at most [param cap]
-## steps a frame and drops the rest, [param stalls] (seconds) at the start, then 60 to 150 ms
-## frames. [param follow] hands the clock the engine's numbers. Returns what the server saw after.
-func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds: float = 6.0,
-		frame_ms: float = 150.0, read_first: bool = false, settle_ms: float = 1000.0 / 60.0,
-		each_frame: Callable = Callable()) -> Dictionary:
+## A server and a client at [param rate] ticks a second joined by a [param one_way] ms link: the
+## server's snapshots are queued in [param down] with their arrival time from [param link]["now"].
+func _visit_rig(rate: int, down: Array, link: Dictionary, one_way: float) -> Array:
 	var host := _parts_manager("DropServer%d" % rate, true, 1200)
 	var guest := _parts_manager("DropClient%d" % rate, false, 1200)
 	for m in [host, guest]:
@@ -516,10 +425,6 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 		(m as DotNetManager).clock.tick_rate = rate
 	guest.clock.follow_engine_time = false
 
-	var one_way := 50.0
-	var down: Array = []
-	var up: Array = []
-	var link := {"now": 0.0}
 	host.send_fn = func(_peer: int, payload: PackedByteArray, d: int) -> void:
 		if d != DotNetMessage.Delivery.UNRELIABLE:
 			var _schema := guest.receive(payload, 1)
@@ -531,6 +436,22 @@ func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds
 	host.start()
 	guest.start()
 	host.add_peer(2)
+	return [host, guest]
+
+
+## A first visit's frames against a server in real time: the engine runs at most [param cap]
+## steps a frame and drops the rest, [param stalls] (seconds) at the start, then 60 to 150 ms
+## frames. [param follow] hands the clock the engine's numbers. Returns what the server saw after.
+func _first_visit(rate: int, cap: int, stalls: Array, follow: bool, slow_seconds: float = 6.0,
+		frame_ms: float = 150.0, read_first: bool = false, settle_ms: float = 1000.0 / 60.0,
+		each_frame: Callable = Callable()) -> Dictionary:
+	var down: Array = []
+	var up: Array = []
+	var link := {"now": 0.0}
+	var one_way := 50.0
+	var pair := _visit_rig(rate, down, link, one_way)
+	var host: DotNetManager = pair[0]
+	var guest: DotNetManager = pair[1]
 
 	var buffer := host.input_buffer_for(2)
 	var step_ms := 1000.0 / float(rate)
