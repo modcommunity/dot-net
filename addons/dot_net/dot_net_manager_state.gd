@@ -158,6 +158,15 @@ var _perf_predict_usec: int = 0
 var _perf_server_ticks: int = 0
 var _perf_server_sim_usec: int = 0
 var _perf_server_send_usec: int = 0
+## Where a snapshot's time goes, running wall-clock totals in microseconds: freeze and interest prepare, the shared property reads, per-peer relevance and ranking, per-peer build and send, thaw. See [method DotNetManager.perf_counters].
+var _ph_prepare_usec: int = 0
+var _ph_reads_usec: int = 0
+var _ph_interest_usec: int = 0
+var _ph_build_usec: int = 0
+var _ph_thaw_usec: int = 0
+var _ph_snapshots: int = 0
+## Native path: handing the entities to the core (it reads every property here).
+var _ph_begin_usec: int = 0
 
 ## peer_id -> newest snapshot tick they have acknowledged, on the server.
 var _acks: Dictionary = {}

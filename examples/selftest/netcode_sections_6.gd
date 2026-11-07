@@ -158,6 +158,43 @@ func _native_encoders_match(loaded: bool) -> void:
 		not loaded or (compared == 120 * 14 * 8 and mismatched.is_empty()))
 
 
+## [method DotNetBehaviour._native_encode]'s two shortcuts: nothing is encoded for an owner-only
+## property of an entity nobody owns (no peer can be sent it), and an unchanged value answers from
+## the last snapshot's encoding; a changed value, another owner or the switch off encodes again.
+func _native_encode_shortcuts() -> void:
+	var write_code := func(w: DotNetWriter, value: Variant) -> void:
+		w.write_uint(int(value), 16)
+	var read_code := func(r: DotNetReader) -> Variant:
+		return r.read_uint(16)
+	var declaration := DotNetVar.make(&"code", DotNetVar.Type.CUSTOM).codec(write_code, read_code).to_owner_only()
+	declaration.bind_config(DotNetConfig.new())
+	var holder := DotNetBehaviour.new()
+	holder.net_vars = [declaration]
+	var ident := DotNetIdentity.new()
+	holder.identity = ident
+
+	ident.owner_peer_id = 0
+	_check("native encode: owner-only property of an ownerless entity is not encoded",
+		holder._native_encode(0, 7, 8).is_empty())
+
+	ident.owner_peer_id = 5
+	var first: Array = holder._native_encode(0, 7, 8)
+	var again: Array = holder._native_encode(0, 7, 8)
+	_check("native encode: an owned entity's owner-only property is encoded at all 8 pads", first.size() == 16)
+	_check("native encode: an unchanged value is answered from the last encoding", is_same(first, again))
+	var changed: Array = holder._native_encode(0, 8, 8)
+	_check("native encode: a changed value is encoded again", not is_same(first, changed) and changed[0] != first[0])
+	var plain: Array = holder._native_encode(0, 8, 1)
+	_check("native encode: another pad count is not answered from a different one", plain.size() == 2)
+
+	DotNetBehaviour.native_encode_shortcuts = false
+	var off: Array = holder._native_encode(0, 8, 8)
+	DotNetBehaviour.native_encode_shortcuts = true
+	_check("native encode: shortcuts off encodes afresh to the same bytes", not is_same(off, changed) and off == changed)
+	holder.free()
+	ident.free()
+
+
 ## The optional native core ([DotNetNative]) against the GDScript path: each encoder bit for bit
 ## at every pad, and whole scripted games byte for byte, inline and on workers. Without the
 ## library built every check reads as the fallback's: GDScript sends, and says why.
@@ -168,6 +205,7 @@ func _test_native() -> void:
 	print("  native library: %s" % ("loaded" if loaded else DotNetNative.describe()["reason"]))
 
 	_native_encoders_match(loaded)
+	_native_encode_shortcuts()
 
 	for variant: String in ["", "coded", "thin", "grid"]:
 		var serial: Dictionary = _threads_scenario("Native" + variant + "Off", 0, false, variant)
