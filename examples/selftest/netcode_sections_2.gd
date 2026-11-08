@@ -711,6 +711,8 @@ func _interpolation_value_at(interpolator: DotNetInterpolator) -> void:
 	_check("and (-1, -1) before the oldest", interpolator.bracket_at(50.0) == Vector2i(-1, -1))
 	_check("value_between blends the two samples named (a gap kept as a gap)", interpolator.value_between(4, &"position", 104, 106, 105.5) == Vector3(40.375, 0, 0))
 	_check("and is null for a sample the track does not have", interpolator.value_between(4, &"position", 103, 106, 105.0) == null)
+	_check("value_between with a cut is null across a teleport inside the bracket", interpolator.value_between(4, &"position", 102, 104, 103.0, 10.0) == null)
+	_check("and ignores a teleport after the bracket, as the server's rewind cannot know it", interpolator.value_between(4, &"position", 100, 102, 101.0, 10.0) == Vector3(0.25, 0, 0))
 	var wire_spec := DotNetVar.make(&"position", DotNetVar.Type.VECTOR3_POSITION)
 	var on_wire: Vector3 = wire_spec.wire_value(Vector3(1.2345, -0.004, 7.0))
 	var round_trip := DotNetWriter.new()
