@@ -614,6 +614,7 @@ IdRec *DotNetNativeCore::_identity_for(const Variant &identity) {
 		rec->always = bool(obj->get("always_relevant"));
 		rec->linger_sec = double(obj->get("interest_linger_sec"));
 		rec->pos = Vector3(obj->call("world_position"));
+		rec->cluster = _icfg.vis ? _icfg.vis->cluster_of(rec->pos) : -1;
 		PackedStringArray tags = obj->get("interest_tags");
 		rec->radius = _icfg.radius;
 		rec->score_limit = std::max(1.0, _icfg.radius);
@@ -841,6 +842,11 @@ void DotNetNativeCore::set_interest(const Dictionary &cfg) {
 		c.starvation_ticks = int64_t(cfg.get("starvation_ticks", 10));
 		c.starvation_weight = double(cfg.get("starvation_weight", 1.0));
 		c.invalidation = int64_t(cfg.get("invalidation", 0));
+		Dictionary vis = cfg.get("vis", Dictionary());
+		if (!vis.is_empty()) {
+			c.vis = _vis_tree(vis, _icfg.vis);
+			c.vis_audible = double(cfg.get("vis_audible", 0.0));
+		}
 		if (c.invalidation != _icfg.invalidation) {
 			for (auto &p : _peers) {
 				p.second->interest = PeerInterest();
@@ -850,6 +856,57 @@ void DotNetNativeCore::set_interest(const Dictionary &cfg) {
 		c.invalidation = _icfg.invalidation;
 	}
 	_icfg = c;
+}
+
+// The tree of a DotNetVisibility.native_dict, or [param kept] when its serial is the one already copied:
+// set_interest runs every snapshot and the arrays only change with the map.
+std::shared_ptr<const VisTree> DotNetNativeCore::_vis_tree(const Dictionary &d, const std::shared_ptr<const VisTree> &kept) {
+	int64_t serial = int64_t(d.get("serial", 0));
+	if (kept && kept->serial == serial) {
+		return kept;
+	}
+	auto g = std::make_shared<VisTree>();
+	g->serial = serial;
+	PackedFloat32Array planes = d.get("planes", PackedFloat32Array());
+	g->planes.assign(planes.ptr(), planes.ptr() + planes.size());
+	auto ints = [](const PackedInt32Array &a, std::vector<int32_t> &out) {
+		out.assign(a.ptr(), a.ptr() + a.size());
+	};
+	ints(PackedInt32Array(d.get("nodes", PackedInt32Array())), g->nodes);
+	ints(PackedInt32Array(d.get("leaf_cluster", PackedInt32Array())), g->leaf_cluster);
+	g->head = int32_t(int64_t(d.get("head", 0)));
+	g->row_bytes = int64_t(d.get("row_bytes", 0));
+	g->clusters = int64_t(d.get("clusters", 0));
+	AABB bounds = d.get("bounds", AABB());
+	g->bounded = bounds.has_volume();
+	g->lo = bounds.position;
+	g->hi = bounds.position + bounds.size;
+	PackedByteArray rows = d.get("rows", PackedByteArray());
+	g->rows.assign(rows.ptr(), rows.ptr() + rows.size());
+	// What the walk indexes, checked once; a bad tree is no tree, not a crash on a worker.
+	const int64_t node_count = int64_t(g->nodes.size() / 3);
+	const int64_t plane_count = int64_t(g->planes.size() / 4);
+	const int64_t leaf_count = int64_t(g->leaf_cluster.size());
+	bool ok = g->clusters > 0 && g->row_bytes == ((g->clusters + 7) >> 3)
+			&& int64_t(g->rows.size()) == g->clusters * g->row_bytes
+			&& g->planes.size() % 4 == 0 && g->nodes.size() % 3 == 0 && node_count > 0
+			&& g->head >= 0 && g->head < node_count && leaf_count > 0;
+	for (int64_t i = 0; ok && i < node_count; i++) {
+		const int32_t *n = g->nodes.data() + size_t(i) * 3;
+		ok = n[0] >= 0 && n[0] < plane_count;
+		for (int k = 1; ok && k < 3; k++) {
+			ok = n[k] >= 0 ? n[k] < node_count : (-1 - int64_t(n[k])) < leaf_count;
+		}
+	}
+	for (int32_t c : g->leaf_cluster) {
+		ok = ok && c < g->clusters;
+	}
+	ERR_FAIL_COND_V_MSG(!ok, nullptr, "DotNetNativeCore.set_interest: a malformed vis tree, ignored.");
+	return g;
+}
+
+bool DotNetNativeCore::visibility_supported() {
+	return true;
 }
 
 void DotNetNativeCore::expire_interest() {
@@ -879,10 +936,17 @@ void DotNetNativeCore::_interest_job(Job *job) {
 			}
 		}
 	} else {
+		// DotNetInterestDistance._evaluate_visible_into: the distance test, then the map's visibility.
+		const VisTree *vis = job->has_observer ? c.vis.get() : nullptr;
+		const int32_t from = vis ? vis->cluster_of(job->obs_pos) : -1;
+		const double audible2 = c.vis_audible * c.vis_audible;
 		for (IdRec *r : _all) {
 			if (!job->has_observer || r->always || r->owner == job->obs_owner) {
 				relevant.push_back(r);
-			} else if (double(job->obs_pos.distance_squared_to(r->pos)) <= r->radius * r->radius) {
+				continue;
+			}
+			double d2 = double(job->obs_pos.distance_squared_to(r->pos));
+			if (d2 <= r->radius * r->radius && (!vis || d2 <= audible2 || vis->sees(from, r->cluster))) {
 				relevant.push_back(r);
 			}
 		}
@@ -1568,6 +1632,7 @@ Dictionary DotNetNativeCore::describe() {
 
 void DotNetNativeCore::_bind_methods() {
 	ClassDB::bind_static_method("DotNetNativeCore", D_METHOD("abi_version"), &DotNetNativeCore::abi_version);
+	ClassDB::bind_static_method("DotNetNativeCore", D_METHOD("visibility_supported"), &DotNetNativeCore::visibility_supported);
 	ClassDB::bind_method(D_METHOD("begin_snapshot", "identities", "params"), &DotNetNativeCore::begin_snapshot);
 	ClassDB::bind_method(D_METHOD("submit_peer", "relevant", "info", "accumulators", "starved_ticks"), &DotNetNativeCore::submit_peer);
 	ClassDB::bind_method(D_METHOD("set_interest", "cfg"), &DotNetNativeCore::set_interest);
