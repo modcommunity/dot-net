@@ -19,6 +19,10 @@ extends DotConfig
 ## snapshot on the same tick.
 @export var stagger_snapshots: bool = false
 
+## Skips a snapshot's preparation (freezing, interest, property reads) on a tick no peer is due one: a server
+## with only bots, or a staggered phase nobody is on, sent nothing and paid for all of it. History is still recorded.
+@export var skip_idle_snapshots: bool = true
+
 ## Whether peers in step share one dirty set per entity per snapshot ([method
 ## DotNetBehaviour.collect_dirty]).
 @export var share_dirty_sets: bool = true
