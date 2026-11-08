@@ -2,7 +2,8 @@ extends Node
 
 ## Snapshot cost on a scripted server: N peers each owning a predicted player, plus NPCs, moving
 ## every tick. Run: [code]res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213[/code]; [code]--hash[/code]
-## prints a digest of every payload sent, [code]BENCH {json}[/code] the result.
+## prints a digest of every payload sent, [code]BENCH {json}[/code] the result. [code]--no-sim-codec[/code]
+## keeps dot-sim's native state codec ([DotNetSimCodec]) off, for a with/without comparison.
 
 class Player extends DotNetBehaviour:
 	var position := Vector3.ZERO
@@ -100,6 +101,7 @@ func _ready() -> void:
 			"--split": _split = true
 			"--native": _native = true
 			"--native-interest": _native = true; _native_interest = true
+			"--no-sim-codec": DotNetSimCodec.enabled = false
 	_run.call_deferred()
 
 
@@ -192,6 +194,7 @@ func _run() -> void:
 		total += t
 	var row := {
 		"peers": _peers, "npcs": _npcs, "relevance": _relevance, "workers": _workers, "native": host._native_note if _native else "off",
+		"sim_codec": DotNetSimCodec.available(),
 		"far_every": _far_every, "far_tiers": _far_tiers, "send_budget": _send_budget, "mean_ms": snappedf(total / times.size(), 0.01),
 		"p50_ms": snappedf(times[times.size() / 2], 0.01),
 		"min_ms": snappedf(times[0], 0.01),
