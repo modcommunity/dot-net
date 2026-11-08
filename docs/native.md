@@ -29,6 +29,12 @@ cd addons/dot_net/native
 
 Same selection and bytes: netcode_demo's `[native]` section runs the scripted ten-peer game with it on, inline and on three workers, for the base, coded, thinned and cached variants, and compares every payload (which is exactly the entities chosen, in order) and every budget record with GDScript; `snapshot_bench -- --hash --native-interest` prints the same digest as without.
 
+## dot-sim's snapshot codec
+
+A second, separate native path: `DotNetConfig.sim_codec` (on by default; `DOT_NET_SIM_CODEC=0` or `--net-sim-codec=false` turns it off) lets `DotNetBehaviour._encode` and `read_state` run in dot-sim's `DotSimSnapshotCodec` (the `snapshot` module) when that library is loaded. It covers what the core above does not: a client's decode, and a server without dot-net's library. `DotNetSimCodec` checks `ClassDB.class_exists`, so without dot-sim, on the web, or with the setting off, the GDScript codec runs; a value the native codec cannot reproduce exactly (a custom codec, a string, a value of the wrong type) is still written and read by GDScript. Same bytes and values: dot-sim's `examples/snapshot_selftest.tscn` compares both codecs on random states, cut-short and noise packets and five lossy games, and pins golden bytes. `tools/snapshot_bench.tscn -- --no-sim-codec` keeps it off for comparisons.
+
+Measured (dot-sim's suite bench, 128 player states): encode 9.9 ms in GDScript and 2.8 ms native; decode and apply 11.2 ms and 3.2 ms. On a server with this core on, the send does not change (`snapshot_bench`, 128 peers: 0.41 ms against 0.42 ms per tick per client), because the core encodes.
+
 ## What it keeps the same
 
 Every rule of `DotNetBehaviour._collect_dirty`, `write_state`, `_sync_view` / `_trim_view` and `DotNetManager._send_to_peer` is ported line for line: audiences, `max_rate`, epsilon, `once()`, owed-until-confirmed, lost sends going dirty again, the ack window, the budget, parts at the MTU, the unchanged tail, the input lead. Floats are compared and quantised as GDScript does them (doubles; vectors as single-precision `Vector3`, built without fused multiply-add). A value the library cannot convert the way `DotNetVar.write` would (a custom codec, an unusual type in a declaration) is encoded by GDScript when the snapshot opens, at each bit of a byte it could start at if it may align, and copied in. The records of what each peer holds live in the library while it is on; `peer_view_state`, `peer_view_snapshot`, `forget_peer` and `reset_baseline` answer from it.
