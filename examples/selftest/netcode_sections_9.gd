@@ -312,3 +312,53 @@ func _test_server_driven_vars() -> void:
 	_check("the predicted position agrees with the replaying guest (%.4f m apart)" % moving[1].position.distance_to(moving[0].position),
 		moving[1].position.distance_to(moving[0].position) < 0.01)
 	_free_managers([host] + guests)
+
+
+## [member DotNetConfig.skip_idle_snapshots]: a server with nobody to send to prepares no snapshot, still
+## reports one a snapshot tick, and a peer that joins afterwards is sent the world as before.
+func _test_idle_snapshots() -> void:
+	_sections_entered += 1
+	print("")
+	print("[idle snapshots]")
+	var prepared := {}
+	var reported := {}
+	var joined_sends := {}
+	for skip in [false, true]:
+		var host := DotNetManager.new()
+		host.name = "IdleHost%s" % ("Skip" if skip else "Build")
+		host.is_server = true
+		host.service_scope = &"idle_snapshots"
+		host.local_peer_id = 1
+		host.auto_tick = false
+		host.config_file = ""
+		host.config = DotNetConfig.new()
+		host.config.tick_rate = 60
+		host.config.snapshot_rate = 60
+		host.config.skip_idle_snapshots = skip
+		add_child(host)
+		var _ready_now := host.setup()
+		var sends := [0]
+		host.send_fn = func(_peer_id: int, _payload: PackedByteArray, d: int) -> void:
+			if d == DotNetMessage.Delivery.UNRELIABLE:
+				sends[0] += 1
+		var told := [0]
+		host.snapshot_sent.connect(func(_tick: int, _peers: int) -> void: told[0] += 1)
+		host.start()
+		host.spawner.register_factory(&"player", _build_player)
+		var _spawned := host.spawner.spawn(&"player", 0, Transform3D.IDENTITY, 0)
+		for t in range(1, 9):
+			host.server_tick(t)
+		prepared[skip] = int(host.perf_counters()[&"snap_snapshots"])
+		reported[skip] = told[0]
+		host.add_peer(2)
+		for t in range(9, 13):
+			host.server_tick(t)
+		joined_sends[skip] = sends[0]
+		host.stop()
+		remove_child(host)
+		host.free()
+	_check("with no peer, building prepares every snapshot (%d of 8)" % prepared[false], prepared[false] == 8)
+	_check("and skipping prepares none (%d)" % prepared[true], prepared[true] == 0)
+	_check("both still report a snapshot a tick (%d, %d)" % [reported[false], reported[true]], reported[false] == 8 and reported[true] == 8)
+	_check("a peer joining later is sent snapshots either way (%d, %d)" % [joined_sends[false], joined_sends[true]], joined_sends[false] > 0 and joined_sends[true] == joined_sends[false])
+	_sections_completed += 1
