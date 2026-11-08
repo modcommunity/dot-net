@@ -43,6 +43,13 @@ extends DotConfig
 ## Environment [code]DOT_NET_NATIVE_INTEREST=0[/code] or [code]--net-native-interest=false[/code] turns it off.
 @export var native_interest: bool = true
 
+## Encode and decode snapshot states in dot-sim's native codec ([DotNetSimCodec]) when the dot-sim
+## library is loaded: the same bytes and values, cheaper. The GDScript codec otherwise, and always on
+## the web. Covers what [member native] does not: a client's decode, and a server without dot-net's
+## own library. Environment [code]DOT_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code]
+## turns it off.
+@export var sim_codec: bool = true
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.

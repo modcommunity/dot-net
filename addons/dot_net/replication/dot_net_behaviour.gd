@@ -168,6 +168,7 @@ func _bind(config: DotNetConfig) -> void:
 			_align_mask |= 1 << i
 
 	_registered = true
+	_sim_codec = DotNetSimCodec.create(net_vars, config)
 
 	# A behaviour that declares nothing is legal — it may exist only for
 	# _net_simulate — but it is also what a forgotten _register_net_vars looks like.
@@ -541,6 +542,9 @@ func _encoded_for(declarations: Array[DotNetVar], pad: int) -> Array:
 ##
 ## An index per property rather than a bitmask: smaller with a handful of properties, and needs only the shared registration order.
 func _encode(declarations: Array[DotNetVar], pad: int = 0) -> Array:
+	var native := DotNetSimCodec.encode(self, declarations, pad) if _sim_codec != null else []
+	if not native.is_empty():
+		return native
 	var scratch := DotNetWriter.new(64)
 	var recorded := {}
 	var rated: Array[StringName] = []
@@ -752,6 +756,8 @@ func peer_view_state(peer_id: int) -> Dictionary:
 ## range index is a corrupt stream and stops the read, as continuing would decode the rest as the wrong
 ## type.
 func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotResult:
+	if _sim_codec != null and not reader.exhausted:
+		return DotNetSimCodec.read_state(self, reader, tick, rewind)
 	var count := reader.read_uint(6)
 
 	if not reader.ok():
@@ -778,22 +784,21 @@ func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotRes
 
 		if not reader.ok():
 			return DotResult.fail(
-				DotError.CODE_PARSE,
-				"Truncated property value.",
-				String(declaration.property)
+				DotError.CODE_PARSE, "Truncated property value.", String(declaration.property)
 			)
-
-		var previous: Variant = _baseline.get(declaration.property)
-
-		_net_write_property(declaration.property, value)
-		_baseline[declaration.property] = value
-		_read_now[declaration.property] = true
-
-		if declaration.change_handler.is_valid():
-			declaration.change_handler.call(previous, value)
+		_apply_read(declaration, value)
 
 	_finish_read(tick, rewind)
 	return DotResult.success(count)
+
+
+func _apply_read(declaration: DotNetVar, value: Variant) -> void:
+	var previous: Variant = _baseline.get(declaration.property)
+	_net_write_property(declaration.property, value)
+	_baseline[declaration.property] = value
+	_read_now[declaration.property] = true
+	if declaration.change_handler.is_valid():
+		declaration.change_handler.call(previous, value)
 
 
 ## What [method read_state] does for an entity a snapshot listed as unchanged: exactly a read of zero properties (see [code]docs/wire.md#unchanged-entities[/code]), so every consumer downstream sees what it saw for an empty body.
@@ -1229,13 +1234,7 @@ func _native_spec() -> Array:
 		if not slot_of.has(declaration.property):
 			slot_of[declaration.property] = _native_props.size()
 			_native_props.append(declaration.property)
-		decls.append(PackedFloat64Array([
-			declaration.type, declaration.audience, declaration.max_rate, declaration.epsilon,
-			1.0 if declaration.on_spawn_only else 0.0, declaration.bit_width,
-			declaration.min_value, declaration.max_value, declaration._extent(),
-			declaration._position_bits(), declaration._max_speed(), declaration._velocity_bits(),
-			declaration._rotation_bits(), slot_of[declaration.property],
-		]))
+		decls.append(DotNetSimCodec.spec_row(declaration, slot_of[declaration.property]))
 	return [_native_props, decls, net_vars.size()]
 
 
