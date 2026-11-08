@@ -89,6 +89,7 @@ Measured with 32 players at 128 ticks (game-g2gfast's `tools/load_probe`), nearl
 - **Scores are computed once per peer** (`scores_for`) and handed to both `prioritise` and `ranked`; they were computed twice.
 - **The size estimate is made after the compact and unchanged checks**, which skip most entities before it is needed, and positions are frozen on the inline path too, so interest reads a copy rather than a node.
 - **`DotNetConfig.stagger_snapshots`** (off by default): peer `p` gets its snapshot on ticks where `p % ticks_per_snapshot() == tick % ticks_per_snapshot()`, so no one tick builds all of them. Every peer still hears at the same rate. Lag-compensation history is recorded every tick when it is on.
+- **`DotNetConfig.skip_idle_snapshots`** (on by default): a snapshot tick with no peer due one (no peers at all, or a staggered phase nobody is on) skips freezing, interest and property reads. `snapshot_sent` still fires with 0 peers and history is still recorded.
 
 On the wire, an entity with nothing dirty for this peer is listed by id in the part's tail rather than written with an empty body, for a client that reads the list ([wire.md](wire.md#unchanged-entities)); it costs the budget nothing and resets its accumulator as a sent one does.
 
