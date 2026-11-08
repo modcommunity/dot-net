@@ -10,7 +10,9 @@
 
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector3.hpp>
+#include <godot_cpp/variant/vector3i.hpp>
 
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -101,6 +103,8 @@ struct IdRec {
 	bool always = false;
 	double linger_sec = 2.0;
 	godot::Vector3 pos;
+	// Its visibility cluster this snapshot, when the interest has a vis tree.
+	int32_t cluster = -1;
 	double radius = 0.0;
 	double score_limit = 1.0;
 	double far_dist = 0.0;
@@ -113,6 +117,48 @@ struct PeerInterest {
 	std::vector<int64_t> order;
 	std::unordered_set<int64_t> ids;
 	std::vector<std::pair<int64_t, int64_t>> linger;
+};
+
+// DotNetVisibility, copied when its serial changes: the map's BSP tree (planes, nodes, leaf clusters) and a
+// decoded PVS bit row per cluster. cluster_of and sees are DotNetVisibility.cluster_of and cluster_sees.
+struct VisTree {
+	int64_t serial = 0;
+	std::vector<float> planes;
+	std::vector<int32_t> nodes;
+	std::vector<int32_t> leaf_cluster;
+	int32_t head = 0;
+	int64_t row_bytes = 0;
+	int64_t clusters = 0;
+	bool bounded = false;
+	godot::Vector3 lo, hi;
+	std::vector<uint8_t> rows;
+
+	// The walk in doubles, term by term as GDScript evaluates it, so both pick the same side of a plane.
+	int32_t cluster_of(const godot::Vector3 &p) const {
+		if (bounded && (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z)) {
+			return -1;
+		}
+		int32_t node = head;
+		size_t guard = nodes.size() / 3 + 1;
+		while (node >= 0 && guard > 0) {
+			guard--;
+			const int32_t *n = nodes.data() + size_t(node) * 3;
+			const float *pl = planes.data() + size_t(n[0]) * 4;
+			double d = double(pl[0]) * double(p.x) + double(pl[1]) * double(p.y) + double(pl[2]) * double(p.z) - double(pl[3]);
+			node = d >= 0.0 ? n[1] : n[2];
+		}
+		if (node >= 0) {
+			return -1;
+		}
+		size_t leaf = size_t(-1 - int64_t(node));
+		return leaf < leaf_cluster.size() ? leaf_cluster[leaf] : -1;
+	}
+	bool sees(int32_t from, int32_t to) const {
+		if (from < 0 || to < 0 || from >= clusters || to >= clusters) {
+			return true;
+		}
+		return (rows[size_t(from) * size_t(row_bytes) + size_t(to >> 3)] & (1u << (to & 7))) != 0;
+	}
 };
 
 struct InterestCfg {
@@ -131,6 +177,8 @@ struct InterestCfg {
 	int64_t starvation_ticks = 10;
 	double starvation_weight = 1.0;
 	int64_t invalidation = 0;
+	std::shared_ptr<const VisTree> vis;
+	double vis_audible = 0.0;
 	bool thins() const { return far_every > 1 && (far_distance > 0.0 || !far_by_tag.empty()); }
 };
 
@@ -270,6 +318,7 @@ class DotNetNativeCore : public RefCounted {
 	void _worker_loop();
 	void _run_job(dotnet::Job *job);
 	void _interest_job(dotnet::Job *job);
+	static std::shared_ptr<const dotnet::VisTree> _vis_tree(const Dictionary &d, const std::shared_ptr<const dotnet::VisTree> &kept);
 	dotnet::Peer *_peer_for(int64_t peer_id);
 	void _queue(std::unique_ptr<dotnet::Job> job);
 	bool _take_and_run();
@@ -300,6 +349,8 @@ public:
 	/// Native interest (off unless [param cfg] has on = true): DotNetInterestDistance's relevance, thinning,
 	/// scores, entity cap and the budget's accumulator order, run by the build itself. Call before begin_snapshot.
 	void set_interest(const Dictionary &cfg);
+	/// Whether set_interest reads a "vis" tree (DotNetVisibility.native_dict). Its presence is the check.
+	static bool visibility_supported();
 	/// Marks every peer's cached relevance as old (what a test does to DotNetInterest._cache's at_ms).
 	void expire_interest();
 	/// submit_peer for a peer whose candidates the library works out: [param observer] is its entity or null,

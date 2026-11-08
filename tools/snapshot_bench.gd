@@ -196,6 +196,8 @@ func _run() -> void:
 		"p50_ms": snappedf(times[times.size() / 2], 0.01),
 		"min_ms": snappedf(times[0], 0.01),
 		"bytes_per_peer": int(float(sent[1]) / float(maxi(sent[0], 1))),
+		# All of it, parts included, per peer per snapshot (warm-up too): the bandwidth.
+		"peer_bytes_per_snapshot": int(float(sent[1]) / float(maxi(_peers * (_warm + _ticks), 1))),
 		"pairs_us": snappedf(1000.0 * total / times.size() / float(_peers * (_peers + _npcs)), 0.01),
 	}
 	if _hash:
