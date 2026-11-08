@@ -9,6 +9,10 @@ extends "dot_net_manager_wire.gd"
 func _send_snapshots(
 	tick: int, identities: Array[DotNetIdentity], phase: int = -1, period: int = 1
 ) -> void:
+	if config.skip_idle_snapshots and not _peer_due(phase, period):
+		_last_snapshot_tick = tick
+		snapshot_sent.emit(tick, 0)
+		return
 	# The clock read once for the whole snapshot, for interest's cache and every rate limit:
 	# read per peer, two peers either side of a millisecond could be answered differently in
 	# one snapshot, and a snapshot built on workers could not be compared with one built here.
@@ -110,6 +114,16 @@ func _send_snapshots(
 	_ph_thaw_usec += Time.get_ticks_usec() - thaw_at
 
 	snapshot_sent.emit(tick, sent_to)
+
+
+## Whether any peer gets this snapshot: one at all, or, staggered, one on [param phase].
+func _peer_due(phase: int, period: int) -> bool:
+	if phase < 0:
+		return not _peers.is_empty()
+	for peer_id in _peers:
+		if posmod(peer_id, period) == phase:
+			return true
+	return false
 
 
 ## The worker count this snapshot is built with: 0 (on the calling thread) unless
