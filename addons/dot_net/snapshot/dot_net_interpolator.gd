@@ -362,7 +362,9 @@ func value_between(net_id: int, property: StringName, older_tick: int, newer_tic
 			j = k
 	if i < 0 or j < 0:
 		return null
-	if cut > 0.0 and _jumps_after(samples, i, property, cut):
+	# Only a jump inside the bracket cuts it: the server's rewind knows no teleport past the
+	# newer tick it was asked about, so one the client has since received must not null this.
+	if cut > 0.0 and _jumps_after(samples, i, property, cut, j):
 		return null
 	var a: Variant = (samples[i]["values"] as Dictionary).get(property)
 	var b: Variant = (samples[j]["values"] as Dictionary).get(property)
@@ -375,10 +377,12 @@ func value_between(net_id: int, property: StringName, older_tick: int, newer_tic
 
 
 ## Whether [param property] moves further than [param cut] between any two neighbouring
-## samples from index [param from] on: a teleport [method value_at] does not reach across.
-static func _jumps_after(samples: Array, from: int, property: StringName, cut: float) -> bool:
+## samples from index [param from] on (to index [param to] when it is not -1): a teleport
+## [method value_at] does not reach across.
+static func _jumps_after(samples: Array, from: int, property: StringName, cut: float, to := -1) -> bool:
 	var before: Variant = null
-	for j in range(from, samples.size()):
+	var end := samples.size() if to < 0 else mini(to + 1, samples.size())
+	for j in range(from, end):
 		var now: Variant = (samples[j]["values"] as Dictionary).get(property)
 		if now == null:
 			continue
