@@ -121,7 +121,7 @@ Short forms; the reasoning is in the linked file.
 - Godot's ENet sends UNRELIABLE as unsequenced: nothing sent unreliable may assume order. [wire](docs/wire.md#unreliable-means-unordered)
 - A snapshot over `config.mtu` goes out in parts, each applying alone; a client acks a tick only when every part is in, and a part of an older tick than one already read is superseded. [wire](docs/wire.md#snapshot-parts)
 - An entity with nothing dirty is listed by id in the part's tail, not written, only to a client whose schema says `FEATURE_UNCHANGED_RUNS`; the client applies it as an empty body, so `_net_state_applied` still fires per snapshot. A snapshot goes out every snapshot tick, even empty. [wire](docs/wire.md#unchanged-entities)
-- The input lead rides at the end of every snapshot part, after a (possibly empty) unchanged tail, only to a peer naming `FEATURE_INPUT_LEAD`; the server measures arrival in `Buffer.push`. The client-to-server packet is untouched (`ACK_BYTES`). [wire](docs/wire.md#the-input-lead)
+- The input lead rides at the end of every snapshot part, after a (possibly empty) unchanged tail, only to a peer naming `FEATURE_INPUT_LEAD`; the server measures arrival in `Buffer.push_batch`, on a packet's newest input only (a resend first seen after a lost packet is late by the loss, and the clock would jump for it). The client-to-server packet is untouched (`ACK_BYTES`). [wire](docs/wire.md#the-input-lead)
 - Clients send inputs, never state; `_sanitise()` runs on the server after decode; message direction is checked against the transport's sender. [security](docs/security.md)
 
 **GDScript**
