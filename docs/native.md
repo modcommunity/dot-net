@@ -21,7 +21,18 @@ cd addons/dot_net/native
 ./build.sh all          # or debug / release; needs git, python3 and a C++17 compiler
 ```
 
-`build.sh` clones the pinned godot-cpp into `~/.cache/dot-net-native` (`DOT_NET_NATIVE_CACHE`), installs scons there in a venv if it is not on the path, and writes `bin/libdot_net_native.<platform>.<target>.<arch>`. Windows (MSVC or MinGW) and macOS (`universal`) are build-it-yourself: the `.cfg` already names their files, and nothing in the source is platform-specific beyond `std::thread`. A web export has nothing to load and never asks.
+`build.sh` clones the pinned godot-cpp into `~/.cache/dot-net-native` (`DOT_NET_NATIVE_CACHE`), installs scons there in a venv if it is not on the path, and writes `bin/libdot_net_native.<platform>.<target>.<arch>`. A web export has nothing to load and never asks.
+
+Every release tag also builds it on GitHub (`.github/workflows/release.yml`, job `native`): Linux x86_64 and arm64, Windows x86_64 (MSVC) and one macOS `universal` dylib. Each platform becomes `dot_net_native-<version>-<platform>.zip` (made by `ci/package.sh`; entries `addons/dot_net/native/bin/<library>`, unpacked at a project root), listed with its sha256 in `SHA256SUMS.natives` and `natives.json` on the release. The macOS dylib is attached twice, as `macos-arm64` and `macos-x86_64`.
+
+A game gets them through dot-bootstrap by pinning the tag in its `.gitignore`, directly above the addon's line:
+
+```gitignore
+# bootstrap-natives: dot-net v0.1.29 native/bin
+/addons/dot_net
+```
+
+The third field is the library directory inside the addon. Bootstrap fetches the zip for the host platform, checks it against `SHA256SUMS.natives` and stamps `native/bin/.natives`. A library already in `native/bin/` for the host (the committed Linux ones, or your own build) is kept. `bootstrap.ps1 -Export` / `bootstrap.sh --export` copy `dot_net_native.cfg` and the release library into `dot_net_native/` beside the exported binary, the second place `DotNetNative` looks.
 
 ## Interest in the library too
 

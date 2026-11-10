@@ -28,3 +28,101 @@ jobs:
         uses: modcommunity/dot-ci/.github/workflows/release.yml@v1
         permissions:
             contents: write
+
+    # The optional native snapshot core (addons/dot_net/native, see docs/native.md), built per
+    # desktop platform and attached as dot_net_native-<version>-<platform>.zip. Only the Linux
+    # x86_64 libraries are committed; a game pinned with "# bootstrap-natives: dot-net <tag> native/bin"
+    # fetches the others from here. macOS is one universal dylib built on the Intel runner (the
+    # macos-14 arm64 label is refused for this account, see dot-sim's release) and packed twice.
+    native:
+        needs: validate
+        name: native ${{ matrix.platform }}
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 40
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: linux-x86_64
+                      runner: ubuntu-22.04
+                      scons: platform=linux arch=x86_64
+                      pack: linux-x86_64
+                    - platform: linux-arm64
+                      runner: ubuntu-22.04-arm
+                      scons: platform=linux arch=arm64
+                      pack: linux-arm64
+                    - platform: windows-x86_64
+                      runner: windows-2022
+                      scons: platform=windows arch=x86_64
+                      pack: windows-x86_64
+                    - platform: macos-universal
+                      runner: macos-15-intel
+                      scons: platform=macos arch=universal
+                      pack: macos-arm64 macos-x86_64
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+            - name: scons
+              run: python -m pip install --quiet scons
+            - uses: actions/cache@v4
+              with:
+                  path: ~/.cache/dot-net-native/godot-cpp
+                  key: godot-cpp-${{ hashFiles('addons/dot_net/native/build.sh') }}
+            - name: Build
+              run: |
+                  # The committed Linux libraries are rebuilt here so every zip comes from this tag.
+                  rm -f addons/dot_net/native/bin/libdot_net_native.*
+                  bash addons/dot_net/native/build.sh all ${{ matrix.scons }}
+            - name: Package
+              run: |
+                  for p in ${{ matrix.pack }}; do
+                      bash ci/package.sh --version "${GITHUB_REF_NAME}" --platform "$p"
+                  done
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: natives-${{ matrix.platform }}
+                  path: dist/
+                  retention-days: 3
+
+    attach:
+        needs: [release, native]
+        # A platform that cannot build must not withhold the others: attach whatever was built;
+        # natives.json names exactly what is there.
+        if: ${{ !cancelled() && needs.release.result == 'success' }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+        env:
+            GH_TOKEN: ${{ github.token }}
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/download-artifact@v4
+              with:
+                  pattern: natives-*
+                  path: parts
+            - name: Merge the per-platform records and attach them
+              run: |
+                  mkdir -p dist
+                  if ! ls parts/*/dot_net_native-*.zip >/dev/null 2>&1; then echo "::warning::no native library built for this tag"; exit 0; fi
+                  cp parts/*/dot_net_native-*.zip dist/
+                  cat parts/*/SHA256SUMS | sort -k2 > dist/SHA256SUMS.natives
+                  python3 -I - <<'PY'
+                  import glob, json
+                  out = None
+                  for p in sorted(glob.glob("parts/*/natives.json")):
+                      m = json.load(open(p))
+                      if out is None:
+                          out = {"version": m["version"], "files": {}}
+                      assert out["version"] == m["version"], p
+                      out["files"].update(m["files"])
+                  json.dump(out, open("dist/natives.json", "w"), indent=2, sort_keys=True)
+                  PY
+                  (cd dist && sha256sum -c SHA256SUMS.natives)
+                  gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes ""
+                  gh release upload "$GITHUB_REF_NAME" dist/dot_net_native-*.zip dist/natives.json dist/SHA256SUMS.natives --clobber
