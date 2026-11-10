@@ -362,3 +362,190 @@ func _test_idle_snapshots() -> void:
 	_check("both still report a snapshot a tick (%d, %d)" % [reported[false], reported[true]], reported[false] == 8 and reported[true] == 8)
 	_check("a peer joining later is sent snapshots either way (%d, %d)" % [joined_sends[false], joined_sends[true]], joined_sends[false] > 0 and joined_sends[true] == joined_sends[false])
 	_sections_completed += 1
+
+
+## A client clock and a server's input buffer at [param rate] Hz, 55 ms each way, [param loss] of
+## the packets lost both ways, every packet carrying the last four commands. [param batched] hands
+## a packet to [code]push_batch[/code], else each command to [code]push[/code]. Seeded, no real time.
+func _lossy_lead_run(rate: int, loss: float, batched: bool, seconds: float, seed_value: int) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	var clock := DotNetClock.new(rate)
+	clock.follow_engine_time = false
+	var buffer := DotNetInput.Buffer.new(120)
+	var frame_ms := 1000.0 / float(rate)
+	var one_way := 55.0
+	var up: Array = []
+	var down: Array = []
+	var sent: Array[DotNetInput] = []
+	var out := {"holes": 0, "starved": 0, "lead_min": 1 << 30, "lead_max": -(1 << 30), "late_reports": 0}
+	var last_stamped := -1
+	var settle := int(2.0 * float(rate))
+	for frame in int(seconds * float(rate)):
+		var now := float(frame) * frame_ms
+		var server_at := 1000 + frame
+		# The link is clean while the clock settles, so what is counted after is the loss's.
+		var lossy := frame >= settle
+
+		while not up.is_empty() and float(up[0][0]) <= now:
+			var packet: Array = up.pop_front()[1]
+			if batched:
+				var _b := buffer.push_batch(packet)
+			else:
+				for i in packet.size():
+					var command := packet[i] as DotNetInput
+					if i != packet.size() - 1 and command.tick <= buffer.last_consumed_tick():
+						continue
+					var _p := buffer.push(command)
+		if buffer.take(server_at) == null and lossy:
+			out["starved"] = int(out["starved"]) + 1
+		var sample := buffer.take_lead_sample()
+		if not lossy or rng.randf() >= loss:
+			down.append([now + one_way, server_at, sample])
+
+		while not down.is_empty() and float(down[0][0]) <= now:
+			var snapshot: Array = down.pop_front()
+			clock.sync_from_server(int(snapshot[1]), 2.0 * one_way)
+			var report: Vector2i = snapshot[2]
+			if report.x != DotNetInput.Buffer.LEAD_NONE:
+				clock.note_input_lead(report.y, report.x)
+		var ticks := clock.advance(1.0 / float(rate))
+		for i in ticks:
+			var input := DemoInput.new()
+			input.tick = clock.tick - (ticks - 1 - i)
+			if lossy and last_stamped >= 0 and input.tick > last_stamped + 1:
+				out["holes"] = int(out["holes"]) + input.tick - last_stamped - 1
+			last_stamped = input.tick
+			sent.append(input)
+		if ticks > 0 and (not lossy or rng.randf() >= loss):
+			up.append([now + one_way, sent.slice(maxi(0, sent.size() - 4))])
+		if lossy:
+			out["lead_min"] = mini(int(out["lead_min"]), clock.tick - server_at)
+			out["lead_max"] = maxi(int(out["lead_max"]), clock.tick - server_at)
+	out["catch_ups"] = int(clock.describe()["catch_ups"])
+	out["late_reports"] = int(clock.describe()["late_reports"])
+	return out
+
+
+## game-arena's headless_lossy at 22 and 33 Hz: at 20% loss the input tick jumped 2 to 4 ticks
+## several times a window. A command whose packet was lost arrives with a later packet, late by
+## the loss; measured, the clock read that as a stall. Armed: the per-command control still jumps.
+func _test_lossy_lead() -> void:
+	_sections_entered += 1
+	print("")
+	print("[the input lead under packet loss]")
+
+	# The measurement itself: three packets' worth arriving in the third, two ticks before use.
+	var measured := DotNetInput.Buffer.new(16)
+	var each := DotNetInput.Buffer.new(16)
+	var packet: Array = []
+	for tick in [10, 11, 12]:
+		var command := DemoInput.new()
+		command.tick = tick
+		packet.append(command)
+	for buffer: DotNetInput.Buffer in [measured, each]:
+		var first := DemoInput.new()
+		first.tick = 8
+		var _f := buffer.push(first)
+		var _t8 := buffer.take(8)
+		var _t9 := buffer.take(9)
+		var _s := buffer.take_lead_sample()
+	var batch_result := measured.push_batch(packet)
+	for command: DotNetInput in packet:
+		var _e := each.push(command)
+	var batch_sample := measured.take_lead_sample()
+	var each_sample := each.take_lead_sample()
+	_check("a packet's lead is measured on its newest command, not on the resent ones (%s, each on its own %s)"
+			% [batch_sample, each_sample],
+		batch_result.ok and batch_sample == Vector2i(2, 12) and each_sample == Vector2i(0, 10)
+			and measured.size() == 3)
+	var stale: Array = []
+	for tick in [8, 9, 10]:
+		var command := DemoInput.new()
+		command.tick = tick
+		stale.append(command)
+	var _t10 := measured.take(10)
+	var late_before := measured.late_count
+	var stale_result := measured.push_batch(stale)
+	_check("resent copies of simulated ticks are skipped, the packet's own late command is counted (%d late)"
+			% (measured.late_count - late_before),
+		not stale_result.ok and measured.late_count - late_before == 1)
+
+	# Six seeded half-minutes a rate. The price of not chasing the loss is in the last check: a
+	# command lost three packets running is not there for its tick, and the server repeats one.
+	for rate: int in [22, 33]:
+		var control := {"catch_ups": 0, "holes": 0, "starved": 0, "lead_min": 1 << 30, "lead_max": -(1 << 30)}
+		var fixed := control.duplicate()
+		for seed_value in 6:
+			for batched: bool in [false, true]:
+				var run := _lossy_lead_run(rate, 0.2, batched, 32.0, 1000 + seed_value)
+				var total: Dictionary = fixed if batched else control
+				for key: String in ["catch_ups", "holes", "starved"]:
+					total[key] = int(total[key]) + int(run[key])
+				total["lead_min"] = mini(int(total["lead_min"]), int(run["lead_min"]))
+				total["lead_max"] = maxi(int(total["lead_max"]), int(run["lead_max"]))
+		var ticks := 6 * 30 * rate
+		print("    %d Hz, 20%% loss, 6 x 30 s: each command measured %s" % [rate, control])
+		print("                               the packet's newest  %s" % [fixed])
+		_check("at %d Hz the control's clock takes lost packets for stalls and jumps (%d jumps, %d ticks never stamped)"
+				% [rate, int(control["catch_ups"]), int(control["holes"])],
+			int(control["catch_ups"]) >= 3 and int(control["holes"]) >= 6)
+		_check("measured per packet it never jumps and stamps every tick (%d jumps, %d holes)"
+				% [int(fixed["catch_ups"]), int(fixed["holes"])],
+			int(fixed["catch_ups"]) == 0 and int(fixed["holes"]) == 0)
+		_check("the lead stays where the link needs it (%d..%d ticks, the control %d..%d) and %d of %d ticks ran without their command"
+				% [int(fixed["lead_min"]), int(fixed["lead_max"]), int(control["lead_min"]),
+					int(control["lead_max"]), int(fixed["starved"]), ticks],
+			int(fixed["lead_max"]) == int(fixed["lead_min"])
+				and int(fixed["lead_max"]) < int(control["lead_max"])
+				and int(fixed["starved"]) * 100 < ticks)
+
+	_check_replay_from_inside_a_hole()
+	_sections_completed += 1
+
+
+## The hole right after the newest acknowledged command: the clock jumped over ticks 14-16 and
+## the snapshot for 13 arrives after 13's command was acknowledged away. Armed: without the
+## buffer keeping that command the last two replayed nothing and the player stood 0.75 m short.
+func _check_replay_from_inside_a_hole() -> void:
+	var config := DotNetConfig.new()
+	var dt := 1.0 / 60.0
+	var inputs := _alternating_inputs(dt)
+	var server := _in_tree(_make_entity(&"player", 2))
+	server.is_authoritative = true
+	var server_movement := server.behaviours[0] as Movement
+	var at := {}
+	for input in inputs:
+		if input.tick < 14 or input.tick > 16:
+			server_movement._net_apply_input(input, input.tick)
+		server_movement._net_simulate(input.tick, dt)
+		if input.tick >= 12 and input.tick <= 15:
+			at[input.tick] = server_movement.snapshot_values().duplicate()
+	var client := _in_tree(_make_entity(&"player", 2))
+	client.is_owner = true
+	client.is_authoritative = false
+	var client_movement := client.behaviours[0] as Movement
+	var history := DotNetInput.Buffer.new(config.input_history_ticks)
+	for input in inputs:
+		if input.tick < 14 or input.tick > 16:
+			var _p := history.push(input)
+	var predictor := DotNetPredictor.new(config)
+	var replays: Array[int] = []
+	var worst := 0.0
+	# As DotNetManager does for every snapshot: reconcile, then acknowledge its tick.
+	for tick: int in [12, 13, 14, 15]:
+		var result := predictor.reconcile(client, tick, at[tick], history, 20, dt)
+		replays.append(int(result.value) if result.ok else -1)
+		worst = maxf(worst, client_movement.position.distance_to(server_movement.position))
+		var _a := history.acknowledge(tick)
+	_check("a replay that starts inside a hole runs on the acknowledged command before it (%s ticks replayed, %.4f m off at worst)"
+			% [replays, worst],
+		replays == ([8, 7, 6, 5] as Array[int]) and worst < 0.001)
+	var before := DotNetInput.Buffer.new(config.input_history_ticks)
+	_check("a buffer nothing was acknowledged in has no command before its first",
+		before.latest_before(5) == null and history.latest_before(13) == null
+			and history.latest_before(16) != null and history.latest_before(16).tick == 15 - 2)
+	history.clear()
+	_check("and a cleared buffer forgets the acknowledged one", history.latest_before(100) == null)
+	_out_of_tree(server)
+	_out_of_tree(client)

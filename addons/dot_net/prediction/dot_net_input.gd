@@ -179,17 +179,38 @@ class Buffer extends RefCounted:
 	## No arrival measured since the last sample was taken.
 	const LEAD_NONE := 1 << 30
 
+	## Client side: the newest input [method acknowledge] dropped. The server ran a hole right
+	## after it on this command, so a replay starting inside the hole needs it still.
+	var _acknowledged: DotNetInput = null
+
 	func _init(p_capacity: int = 120) -> void:
 		capacity = p_capacity
 
-	## Adds an input, keeping the buffer ordered and bounded.
+	## Adds an input, keeping the buffer ordered and bounded. A server reading a packet of
+	## resent inputs calls [method push_batch], which measures the arrival lead on its newest only.
 	func push(input: DotNetInput) -> DotResult:
-		# Measured on arrival, and only for an input newer than any before it: a resent copy says nothing
-		# about when its tick was needed, and the newest input in a packet is the one that came as late as
-		# the packet did.
+		return _push(input, true)
+
+	## Adds one packet's inputs, oldest first as [method DotNetInput.read_batch] returns them.
+	## Copies of ticks already simulated are skipped, not counted late; the packet's own (newest)
+	## input is always pushed, and is the only one the arrival lead is measured on.
+	func push_batch(inputs: Array) -> DotResult:
+		var pushed := DotResult.success(false)
+		var last := inputs.size() - 1
+		for i in inputs.size():
+			var input := inputs[i] as DotNetInput
+			if input == null or (i != last and input.tick <= _last_consumed_tick):
+				continue
+			pushed = _push(input, i == last)
+		return pushed
+
+	func _push(input: DotNetInput, measure: bool) -> DotResult:
+		# Measured only for an input newer than any before it, and by push_batch only on a packet's
+		# newest: that one came as late as the packet did. An older one seen first here was in a
+		# lost packet, and its lateness is the loss, not a lead the link needs.
 		if input.tick > _newest_tick:
 			_newest_tick = input.tick
-			if _last_consumed_tick >= 0:
+			if measure and _last_consumed_tick >= 0:
 				var lead := input.tick - (_last_consumed_tick + 1)
 				if lead < _lead_min:
 					_lead_min = lead
@@ -262,6 +283,8 @@ class Buffer extends RefCounted:
 	## The newest input for a tick before [param tick], or null when there is none.
 	func latest_before(tick: int) -> DotNetInput:
 		var out: DotNetInput = null
+		if _acknowledged != null and _acknowledged.tick < tick:
+			out = _acknowledged
 		for input in _inputs:
 			if input.tick >= tick:
 				break
@@ -281,7 +304,7 @@ class Buffer extends RefCounted:
 	func acknowledge(tick: int) -> int:
 		var removed := 0
 		while not _inputs.is_empty() and _inputs[0].tick <= tick:
-			_inputs.pop_front()
+			_acknowledged = _inputs.pop_front()
 			removed += 1
 		return removed
 
@@ -305,6 +328,7 @@ class Buffer extends RefCounted:
 
 	func clear() -> void:
 		_inputs.clear()
+		_acknowledged = null
 		_last_consumed_tick = -1
 		_newest_tick = -1
 		_lead_min = LEAD_NONE
