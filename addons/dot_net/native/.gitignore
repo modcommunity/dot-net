@@ -5,3 +5,9 @@
 .sconsign*.dblite
 bin/*.exp
 bin/*.lib
+# Only the Linux x86_64 libraries are committed; the others come from the release zips
+# that dot-bootstrap fetches (stamped in bin/.natives) or from a local build.
+bin/.natives
+bin/*.dll
+bin/*.dylib
+bin/*.arm64.so
