@@ -70,7 +70,7 @@ Interest management is also the anti-cheat that works: data never sent cannot be
 
 ## What a snapshot costs
 
-Measured with 32 players at 128 ticks (game-g2gfast's `tools/load_probe`), nearly all of a snapshot tick was per-entity bookkeeping done once **per peer**. What was done, none of it changing a byte on the wire:
+Measured with 32 players at 128 ticks (game-airdrift's `tools/load_probe`), nearly all of a snapshot tick was per-entity bookkeeping done once **per peer**. What was done, none of it changing a byte on the wire:
 
 - **`_rebuild_believed` only when an entry was dropped unconfirmed.** Promotion of resolved entries cannot change `believed` (it is `acked` with pending laid over in tick order, and the resolved entries are the oldest), so `sync_peer_acks` and `trim_pending` rebuild only in the loss case.
 - **Each property is read once a snapshot.** The manager opens `begin_snapshot_reads()` on every behaviour before its peer loop and `end_snapshot_reads()` after; inside, `_read_for_send` reads once. Outside a snapshot it reads live, so nothing else sees a stale value.

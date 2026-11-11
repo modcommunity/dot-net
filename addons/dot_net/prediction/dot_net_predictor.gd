@@ -209,7 +209,7 @@ func reconcile(
 			var previous := input_buffer.latest_before(replay_tick)
 			# A hole has inputs on BOTH sides. Past the newest input are ticks this client has not played yet
 			# (a lockstep host reconciles before it records the tick), and replaying those on the last command
-			# predicted them twice: game-arena's headless_net push check went 0.2 m -> 1.5 m off the server.
+			# predicted them twice: game-fatal-contact's headless_net push check went 0.2 m -> 1.5 m off the server.
 			if previous != null and not input_buffer.since(replay_tick + 1).is_empty():
 				input = previous
 

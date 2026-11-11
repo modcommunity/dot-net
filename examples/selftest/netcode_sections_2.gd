@@ -418,7 +418,7 @@ func _check_prediction_holes(
 
 	# And past the newest input is not a hole: those are ticks this client has not played
 	# yet (a lockstep host reconciles before it records the tick). Replayed on the last
-	# command they were predicted twice; game-arena's headless_net caught it at 1.5 m.
+	# command they were predicted twice; game-fatal-contact's headless_net caught it at 1.5 m.
 	var ahead_client := _in_tree(_make_entity(&"player", 2))
 	ahead_client.is_owner = true
 	ahead_client.is_authoritative = false
