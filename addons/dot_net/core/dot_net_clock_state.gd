@@ -148,9 +148,39 @@ const LEAD_EARLY_TICKS := 2
 ## Input ticks whose lead is remembered: far more than a round trip's worth at any rate.
 const LEAD_HISTORY := 512
 
-## Local time, in ticks at this clock's nominal rate: what [method advance] has been handed,
-## never scaled by the drift and including the ticks a stall dropped.
+## Local time, in the server's ticks: what [method advance] has been handed at this clock's rate
+## times the server's [member _pace], never scaled by the drift and including the ticks a stall
+## dropped.
 var _local_ticks: float = 0.0
+
+## How long one window of the server's pace is ([method _measure_pace]), in seconds.
+const PACE_WINDOW_SECONDS := 1.5
+## A pace measured at or above this is nominal: the drift ([constant MAX_DRIFT_RATE]) covers it, and
+## a server holding its rate never changes how this clock runs.
+const PACE_NOMINAL := 0.97
+## A pace followed already is let go only above this, so a server near [constant PACE_NOMINAL] does
+## not switch it on and off.
+const PACE_RELEASE := 0.985
+## The slowest pace followed: a server slower than this is stalled, not slow.
+const PACE_MIN := 0.5
+## Windows the followed pace is the median of: one window across a server stall is not its pace.
+const PACE_WINDOWS := 3
+
+## The share of [member tick_rate] the server has been holding (one that cannot simulate a tick in
+## its time runs fewer of them), as the quickest snapshot arrivals measure it; 1.0 while it is
+## nominal. Local time and both timelines run at it: at the nominal rate against a slower server
+## the input lead and the receive timeline run away until the clock snaps, and every reconcile
+## replays the whole lead.
+var _pace: float = 1.0
+## Local time at the nominal rate, never scaled by [member _pace]: what the pace is measured against.
+var _nominal_ticks: float = 0.0
+## [code]Vector2(nominal ticks, sampled tick less nominal ticks)[/code] of the quickest arrival of
+## the last window ([code]x < 0[/code]: none) and of this one; nominal ticks when this one began.
+var _pace_from := Vector2(-1.0, 0.0)
+var _pace_best := Vector2(-1.0, 0.0)
+var _pace_window_start: float = 0.0
+## The last [constant PACE_WINDOWS] windows' paces.
+var _pace_measured: Array[float] = []
 
 ## For each input tick produced, by [code]tick % LEAD_HISTORY[/code]: the tick, and how far
 ## ahead of [member _local_ticks] it was when it was produced (and sent).

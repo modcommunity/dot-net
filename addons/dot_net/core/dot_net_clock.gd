@@ -59,6 +59,20 @@ func tick_duration() -> float:
 	return 1.0 / float(tick_rate)
 
 
+## Wall seconds one tick takes on this clock: [method tick_duration] stretched by the drift and by
+## the server's pace ([member _pace]). What [member _accumulator] is measured in ticks against.
+func _step_seconds() -> float:
+	if is_authority:
+		return tick_duration()
+	return tick_duration() * _drift_scale / _pace
+
+
+## The share of its nominal rate the server is followed at: below 1.0 while it holds fewer ticks
+## a second than [member tick_rate] (an overloaded server), 1.0 otherwise.
+func server_pace() -> float:
+	return _pace
+
+
 ## Advances by a frame's worth of time and returns how many ticks to simulate. Loop over the return
 ## value: 0 on a short frame, more than 1 after a long one.
 func advance(delta: float, max_ticks: int = 8) -> int:
@@ -73,14 +87,15 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 			# Called outside a physics step, or twice in one: a host driving time by hand.
 			# Forget the reference so that stretch is never credited as a stall.
 			_engine_frame = -1
-		_local_ticks += delta * float(tick_rate)
+		_local_ticks += delta * float(tick_rate) * _pace
+		_nominal_ticks += delta * float(tick_rate)
 		_stepped_ticks += delta * float(tick_rate)
 		if _lead_live and _synced:
 			_steer_lead(delta)
 
 	# The drift scale stretches or compresses a tick, so a client can run slightly
-	# fast or slow without its tick number ever jumping.
-	var step := tick_duration() * (_drift_scale if not is_authority else 1.0)
+	# fast or slow without its tick number ever jumping; the pace, so it runs as many as the server.
+	var step := _step_seconds()
 
 	var steps := 0
 	while _accumulator >= step and steps < max_ticks:
@@ -99,7 +114,7 @@ func advance(delta: float, max_ticks: int = 8) -> int:
 	# that jumped (a snap, a catch-up) is a jump whatever is drawn, so not a slip.
 	if not is_authority:
 		_receive_slip = move_toward(_receive_slip, 0.0, RECEIVE_RECOVERY * float(tick_rate) * delta)
-		_slip_recovery = maxf(SLIP_RECOVERY, 2.0 * absf(1.0 / _drift_scale - 1.0))
+		_slip_recovery = maxf(SLIP_RECOVERY, 2.0 * absf(_pace / _drift_scale - 1.0))
 		_slip = move_toward(_slip, 0.0, _slip_recovery * float(tick_rate) * delta)
 		if steps != 1 and absi(steps - 1) <= 1:
 			# Within 2, not 1: a second slip often lands while the first is still being taken up,
@@ -221,13 +236,14 @@ func _credit_dropped(gap: float) -> void:
 	# The steps that would have carried local time and both timelines never ran. The tick moves
 	# here because nothing steers it before the first report; the receive timeline moves so the
 	# lead cap does not sit the whole stall back.
-	var ticks := lost * float(tick_rate)
+	_nominal_ticks += lost * float(tick_rate)
+	var ticks := lost * float(tick_rate) * _pace
 	_local_ticks += ticks
 	if _synced:
 		var whole := floorf(ticks)
 		tick += int(whole)
 		_received_tick += int(whole)
-		_accumulator += (ticks - whole) * tick_duration() * _drift_scale
+		_accumulator += (ticks - whole) * _step_seconds()
 		# A window of late samples opened before a stall says nothing about the timeline after
 		# it: one that spanned the credit read as samples keeping pace with local time a second
 		# behind, and anchored the timeline back to the backlog (game-g2gfast at 60).
@@ -294,7 +310,7 @@ func floor_count() -> int:
 ##
 ## Not what a renderer wants: it only changes inside [method advance], so it is constant across frames drawn within one physics step. Use [method render_alpha] or the engine's physics fraction.
 func alpha() -> float:
-	return clampf(_accumulator / tick_duration(), 0.0, 1.0)
+	return clampf(_accumulator * _pace / tick_duration(), 0.0, 1.0)
 
 
 ## What to add to [method received_tick] for anything DRAWN on the receive timeline, in ticks: the re-anchoring it has not followed yet, taken up at [constant RECEIVE_RECOVERY].
@@ -343,6 +359,7 @@ func sync_from_server(server_tick: int, rtt_ms: float) -> void:
 	_note_rtt(rtt_ms)
 
 	var first := not _synced or (not _synced_with_rtt and _rtt_ms > 0.0)
+	_measure_pace(server_tick, not _synced)
 	_follow_arrival(server_tick, first)
 	if DotLog.enabled(DotLog.Level.TRACE, CHANNEL):
 		var traced := _state_fields()
@@ -494,6 +511,60 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 		_receive_slip += 1.0
 
 
+## Measures the server's pace ([member _pace]) from one snapshot carrying [param sampled]; a new
+## session ([param anchor]) starts over at the nominal rate.
+##
+## Per window of [constant PACE_WINDOW_SECONDS], the quickest arrival (the sampled tick furthest
+## ahead of nominal local time): a late packet never sets the pace. The pace is the median of the
+## last [constant PACE_WINDOWS] windows' gains between two quickest arrivals, followed below
+## [constant PACE_NOMINAL] until it is back above [constant PACE_RELEASE].
+func _measure_pace(sampled: int, anchor: bool) -> void:
+	var at := Vector2(_nominal_ticks, float(sampled) - _nominal_ticks)
+	if not anchor and _pace_from.x >= 0.0 and absf(at.y - _pace_from.y) > float(snap_threshold_ticks()) \
+			+ (_nominal_ticks - _pace_from.x):
+		# Further off than any pace from PACE_MIN to twice nominal could take it: a different session.
+		anchor = true
+	if anchor:
+		_pace_from = Vector2(-1.0, 0.0)
+		_pace_best = at
+		_pace_window_start = _nominal_ticks
+		_pace_measured.clear()
+		_set_pace(1.0)
+		return
+	if _pace_best.x < 0.0 or at.y > _pace_best.y:
+		_pace_best = at
+	if _nominal_ticks - _pace_window_start < PACE_WINDOW_SECONDS * float(tick_rate):
+		return
+
+	var span := _pace_best.x - _pace_from.x
+	if _pace_from.x >= 0.0 and span >= 0.5 * PACE_WINDOW_SECONDS * float(tick_rate):
+		_pace_measured.append(clampf(1.0 + (_pace_best.y - _pace_from.y) / span, PACE_MIN, 2.0))
+		if _pace_measured.size() > PACE_WINDOWS:
+			_pace_measured.pop_front()
+		if _pace_measured.size() == PACE_WINDOWS:
+			var sorted := _pace_measured.duplicate()
+			sorted.sort()
+			var median: float = sorted[sorted.size() >> 1]
+			if median < PACE_NOMINAL or (_pace < 1.0 and median < PACE_RELEASE):
+				_set_pace(median)
+			else:
+				_set_pace(1.0)
+	_pace_from = _pace_best
+	_pace_best = Vector2(-1.0, 0.0)
+	_pace_window_start = _nominal_ticks
+
+
+func _set_pace(pace: float) -> void:
+	if pace == _pace:
+		return
+	if absf(pace - _pace) >= 0.02 or pace == 1.0 or _pace == 1.0:
+		var fields := _state_fields()
+		fields["pace"] = snappedf(pace, 0.001)
+		fields["was"] = snappedf(_pace, 0.001)
+		DotLog.info(CHANNEL, "clock follows the server's pace", fields)
+	_pace = pace
+
+
 ## What the server said about this client's commands: the one for [param input_tick] was the latest to arrive in the last period, [param arrival_lead] ticks before the server needed it (0 just in time, below 0 late). Called by [method DotNetManager.receive_snapshot].
 ##
 ## Measured against the time the command was sent ([member _lead_at]), less what it arrived with, plus [member lead_slack_ticks]: that already counts every correction since, so a report a round trip old never corrects twice. The downlink is not in it.
@@ -527,7 +598,7 @@ func note_input_lead(input_tick: int, arrival_lead: int) -> void:
 ## a suite asks to see the clock settle.
 func lead_error() -> float:
 	if _lead_live:
-		return _lead_position() - (float(tick) + _accumulator / tick_duration())
+		return _lead_position() - (float(tick) + _accumulator * _pace / tick_duration())
 	return float(server_tick() + _target_lead() - tick)
 
 
@@ -584,7 +655,7 @@ func _note_produced(produced: int) -> void:
 	_lead_tick[slot] = produced
 	# In the units [method _steer_lead] steers: the timeline's continuous position ahead of local
 	# time. The tick alone is up to a tick behind and settled short of the slack.
-	_lead_at[slot] = float(produced) + _accumulator / tick_duration() - _local_ticks
+	_lead_at[slot] = float(produced) + _accumulator * _pace / tick_duration() - _local_ticks
 
 
 ## Steers the input timeline to the reported lead, once a frame: shorter ticks while short of it (up to [constant LEAD_RAISE_RATE]), longer while past it (up to [constant MAX_DRIFT_RATE]), a jump forward for a deficit too big to gain in [constant LEAD_SMOOTH_SECONDS].
@@ -592,7 +663,7 @@ func _note_produced(produced: int) -> void:
 ## The receive timeline is held to real time meanwhile, or it would run ahead of the snapshots; the drift is taken back through [member _receive_slip].
 func _steer_lead(delta: float) -> void:
 	_trim_lead_samples()
-	var at := float(tick) + _accumulator / tick_duration()
+	var at := float(tick) + _accumulator * _pace / tick_duration()
 	var error := _lead_position() - at
 
 	if error > LEAD_RAISE_RATE * LEAD_SMOOTH_SECONDS * float(tick_rate):
@@ -609,7 +680,7 @@ func _steer_lead(delta: float) -> void:
 
 	# Ticks this frame will run beyond real time: delta / (duration * scale) of them against
 	# delta / duration.
-	_receive_excess += delta * float(tick_rate) * (1.0 / _drift_scale - 1.0)
+	_receive_excess += delta * float(tick_rate) * _pace * (1.0 / _drift_scale - 1.0)
 	while _receive_excess >= 1.0:
 		_receive_excess -= 1.0
 		_received_tick -= 1
@@ -647,7 +718,7 @@ func snap_threshold_ticks() -> int:
 ##
 ## Zero until an RTT sample arrives: right on loopback, dangerous elsewhere. See [method sync_from_server].
 func one_way_ticks() -> int:
-	return int(roundf((_rtt_ms * 0.5) / 1000.0 * float(tick_rate)))
+	return int(roundf((_rtt_ms * 0.5) / 1000.0 * float(tick_rate) * _pace))
 
 
 ## How far ahead of the estimated server tick the input timeline should run.
@@ -659,7 +730,7 @@ func _target_lead() -> int:
 	if adaptive_margin:
 		# Cover the jitter as well as the mean. A connection whose latency varies by
 		# 40 ms needs that much extra margin or a fifth of its commands arrive late.
-		var jitter_ticks := int(ceilf(_jitter_ms / 1000.0 * float(tick_rate)))
+		var jitter_ticks := int(ceilf(_jitter_ms / 1000.0 * float(tick_rate) * _pace))
 		margin = maxi(margin, jitter_ticks + 1)
 
 	return one_way_ticks() + margin
@@ -818,6 +889,12 @@ func reset(start_tick: int = 0) -> void:
 	_frame_waits.clear()
 	_settle_local = -1.0
 	_stepped_ticks = 0.0
+	_pace = 1.0
+	_nominal_ticks = 0.0
+	_pace_from = Vector2(-1.0, 0.0)
+	_pace_best = Vector2(-1.0, 0.0)
+	_pace_window_start = 0.0
+	_pace_measured.clear()
 
 
 func describe() -> Dictionary:
@@ -828,6 +905,7 @@ func describe() -> Dictionary:
 		"synced": is_synced(),
 		"server_tick": server_tick(),
 		"received_tick": received_tick(),
+		"server_pace": snappedf(_pace, 0.001),
 		"lead": _target_lead(),
 		"rtt_ms": int(_rtt_ms),
 		"jitter_ms": int(_jitter_ms),
