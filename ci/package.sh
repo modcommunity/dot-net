@@ -9,6 +9,8 @@
 # dylib, packed once as macos-arm64 and once as macos-x86_64.
 #   ci/package.sh --version 0.1.29 --platform windows-x86_64
 set -euo pipefail
+# The Windows runner has python, and python3 may be the store stub there: CI sets PYTHON=python.
+PY="${PYTHON:-python3}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 VERSION=""; PLATFORM=""
 while [ $# -gt 0 ]; do
@@ -24,7 +26,9 @@ VERSION="${VERSION#v}"
 OS="${PLATFORM%-*}"; ARCH="${PLATFORM#*-}"
 NATIVE=addons/dot_net/native
 # "<os>.<debug|release>[.<arch>] = "bin/..."": an arch-less key (macOS universal) serves every arch.
-mapfile -t LIBS < <(sed -nE "s/^$OS\.(debug|release)(\.$ARCH)?[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\3/p" "$NATIVE/dot_net_native.cfg")
+# A read loop, not mapfile: the macOS runner's bash is 3.2.
+LIBS=()
+while IFS= read -r lib; do LIBS+=("$lib"); done < <(sed -nE "s/^$OS\.(debug|release)(\.$ARCH)?[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\3/p" "$NATIVE/dot_net_native.cfg")
 [ "${#LIBS[@]}" -eq 2 ] || { echo "package.sh: dot_net_native.cfg names ${#LIBS[@]} libraries for $PLATFORM, expected debug + release" >&2; exit 1; }
 for lib in "${LIBS[@]}"; do
     [ -s "$NATIVE/$lib" ] || { echo "package.sh: $NATIVE/$lib missing (run $NATIVE/build.sh first)" >&2; exit 1; }
@@ -32,7 +36,7 @@ done
 mkdir -p dist
 ZIP="dist/dot_net_native-$VERSION-$PLATFORM.zip"
 rm -f "$ZIP"
-python3 -I - "$ZIP" "${LIBS[@]/#/$NATIVE/}" <<'PY'
+"$PY" -I - "$ZIP" "${LIBS[@]/#/$NATIVE/}" <<'PY'
 import sys, zipfile
 zip_path, libs = sys.argv[1], sorted(sys.argv[2:])
 with zipfile.ZipFile(zip_path, "w") as z:
@@ -42,9 +46,10 @@ with zipfile.ZipFile(zip_path, "w") as z:
         with open(path, "rb") as f:
             z.writestr(zi, f.read(), zipfile.ZIP_DEFLATED)
 PY
-SUM="$(sha256sum "$ZIP" | cut -d' ' -f1)"
+# macOS has no sha256sum.
+SUM="$("$PY" -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$ZIP")"
 echo "$SUM  $(basename "$ZIP")" >> dist/SHA256SUMS
-python3 -I - "$VERSION" "$PLATFORM" "$(basename "$ZIP")" "$SUM" <<'PY'
+"$PY" -I - "$VERSION" "$PLATFORM" "$(basename "$ZIP")" "$SUM" <<'PY'
 import sys, json, os
 v, plat, f, s = sys.argv[1:5]
 p = "dist/natives.json"

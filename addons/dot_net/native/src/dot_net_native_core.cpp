@@ -11,6 +11,9 @@
 #include <cmath>
 #include <cstring>
 #include <chrono>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 
 using namespace godot;
 using namespace dotnet;
@@ -33,6 +36,24 @@ enum EncKind : uint8_t {
 	E_BYTES,
 	E_PRE,
 };
+
+// MSVC has no __builtin_ctzll / __builtin_popcountll; __popcnt64 would need a POPCNT CPU.
+inline int ctz64(uint64_t m) {
+#if defined(_MSC_VER) && !defined(__clang__)
+	unsigned long i;
+	_BitScanForward64(&i, m);
+	return int(i);
+#else
+	return __builtin_ctzll(m);
+#endif
+}
+
+inline int popcount64(uint64_t m) {
+	m = m - ((m >> 1) & 0x5555555555555555ULL);
+	m = (m & 0x3333333333333333ULL) + ((m >> 2) & 0x3333333333333333ULL);
+	m = (m + (m >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+	return int((m * 0x0101010101010101ULL) >> 56);
+}
 
 int64_t usec_now() {
 	return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -263,7 +284,7 @@ bool native_enc(const Decl &d, const Variant &v, Enc &e) {
 
 void merge(std::vector<Val> &into, uint64_t &has, uint64_t mask, const Reads &reads) {
 	for (uint64_t m = mask; m != 0; m &= m - 1) {
-		int s = __builtin_ctzll(m);
+		int s = ctz64(m);
 		into[s] = reads[s];
 	}
 	has |= mask;
@@ -272,7 +293,7 @@ void merge(std::vector<Val> &into, uint64_t &has, uint64_t mask, const Reads &re
 void rebuild_believed(View &v) {
 	v.believed_has = v.acked_has;
 	for (uint64_t m = v.acked_has; m != 0; m &= m - 1) {
-		int s = __builtin_ctzll(m);
+		int s = ctz64(m);
 		v.believed[s] = v.acked[s];
 	}
 	for (const Entry &e : v.pending) {
@@ -1278,11 +1299,11 @@ void DotNetNativeCore::_write_value(BitWriter &w, const Decl &d, const Enc &e) c
 
 // DotNetBehaviour.write_state: the set, then the record of it.
 void DotNetNativeCore::_write_state(BitWriter &w, View &view, const BehRec &rec, uint64_t mask) const {
-	w.write_uint(__builtin_popcountll(mask), 6);
+	w.write_uint(popcount64(mask), 6);
 	uint64_t slots = 0;
 	uint64_t rated = 0;
 	for (uint64_t m = mask; m != 0; m &= m - 1) {
-		int i = __builtin_ctzll(m);
+		int i = ctz64(m);
 		const Decl &d = rec.decls[i];
 		w.write_uint(i, 6);
 		_write_value(w, d, rec.enc[i]);
@@ -1296,7 +1317,7 @@ void DotNetNativeCore::_write_state(BitWriter &w, View &view, const BehRec &rec,
 	}
 	merge(view.believed, view.believed_has, slots, *rec.reads);
 	for (uint64_t m = rated; m != 0; m &= m - 1) {
-		view.last_sent[__builtin_ctzll(m)] = _now_ms;
+		view.last_sent[ctz64(m)] = _now_ms;
 	}
 	view.sent_has |= rated;
 	if (_tick <= 0) {
@@ -1312,9 +1333,9 @@ int64_t DotNetNativeCore::_state_bits(const BehRec &rec, uint64_t mask, int64_t 
 	if (pad > 0) {
 		w.write_bits(0, pad);
 	}
-	w.write_uint(__builtin_popcountll(mask), 6);
+	w.write_uint(popcount64(mask), 6);
 	for (uint64_t m = mask; m != 0; m &= m - 1) {
-		int i = __builtin_ctzll(m);
+		int i = ctz64(m);
 		w.write_uint(i, 6);
 		_write_value(w, rec.decls[i], rec.enc[i]);
 	}
@@ -1512,7 +1533,7 @@ Dictionary DotNetNativeCore::_view_dict(const View &view, const BehRec &rec) con
 	auto values = [&rec](const std::vector<Val> &vals, uint64_t has) {
 		Dictionary d;
 		for (uint64_t m = has; m != 0; m &= m - 1) {
-			int s = __builtin_ctzll(m);
+			int s = ctz64(m);
 			d[rec.props[s]] = to_variant(vals[s]);
 		}
 		return d;
@@ -1530,14 +1551,14 @@ Dictionary DotNetNativeCore::_view_dict(const View &view, const BehRec &rec) con
 	out["pending"] = entries;
 	Dictionary sent;
 	for (uint64_t m = view.sent_has; m != 0; m &= m - 1) {
-		int s = __builtin_ctzll(m);
+		int s = ctz64(m);
 		sent[rec.props[s]] = view.last_sent[s];
 	}
 	out["last_sent_ms"] = sent;
 	out["last_ack"] = view.last_ack;
 	Dictionary relost;
 	for (uint64_t m = view.relost; m != 0; m &= m - 1) {
-		relost[rec.props[__builtin_ctzll(m)]] = true;
+		relost[rec.props[ctz64(m)]] = true;
 	}
 	out["relost"] = relost;
 	out["strict"] = view.strict;
@@ -1575,8 +1596,8 @@ Dictionary DotNetNativeCore::view_state(Object *behaviour, int64_t peer_id) {
 	}
 	const View &v = *peer->second->views[index];
 	Dictionary out;
-	out["acked"] = __builtin_popcountll(v.acked_has);
-	out["believed"] = __builtin_popcountll(v.believed_has);
+	out["acked"] = popcount64(v.acked_has);
+	out["believed"] = popcount64(v.believed_has);
 	out["pending"] = int64_t(v.pending.size());
 	out["last_ack"] = v.last_ack;
 	out["strict"] = v.strict;
