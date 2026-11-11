@@ -17,8 +17,11 @@ class Track extends RefCounted:
 	var net_id: int
 	## Array of {tick, at_ms, values}
 	var samples: Array[Dictionary] = []
-	## Last values written to the entity, so a change is only applied once.
-	var applied: Dictionary = {}
+	## What [method DotNetInterpolator.apply] writes: the behaviours it was built for, their
+	## declaration counts, and each one's interpolated properties in declaration order.
+	var plan_behaviours: Array = []
+	var plan_sizes := PackedInt32Array()
+	var plan_props: Array = []
 	## What [method DotNetInterpolator.apply] still adds to each position it draws: the
 	## part of a jump out of an extrapolation not yet eased away. property -> Vector3/2.
 	var offsets: Dictionary = {}
@@ -254,12 +257,8 @@ func _adapt() -> void:
 ##
 ## Empty when there is nothing to show yet (one sample cannot be interpolated). [param server_tick] is a float on purpose: a renderer runs between ticks (see [method DotNetManager.interpolate_frame]).
 func sample(net_id: int, server_tick: float) -> Dictionary:
-	if not _tracks.has(net_id):
-		return {}
-
-	var track: Track = _tracks[net_id]
-
-	if track.is_empty():
+	var track: Track = _tracks.get(net_id)
+	if track == null or track.samples.is_empty():
 		return {}
 
 	# Ticks, because [param server_tick] is one. See [member _delay_snapshots].
@@ -272,23 +271,26 @@ func sample(net_id: int, server_tick: float) -> Dictionary:
 
 	# Newer than everything we have: the stream stalled. Extrapolate briefly, then
 	# hold — see _extrapolate.
-	if render_tick >= float(track.newest_tick()):
+	if render_tick >= float(track.samples[track.samples.size() - 1]["tick"]):
 		_stalls += 1
 		return _extrapolate(track, render_tick)
 
 	# Older than everything we have. Happens after a long stall or a clock snap;
 	# the oldest sample is the best available answer.
-	if render_tick <= float(track.oldest_tick()):
+	if render_tick <= float(track.samples[0]["tick"]):
 		return (track.samples[0]["values"] as Dictionary).duplicate()
 
-	for i in range(track.samples.size() - 1):
+	# From the newest back: the render time sits a buffer behind it, a step or two in. The
+	# first sample strictly older is the one a scan from the oldest stopped at, ties included.
+	for i in range(track.samples.size() - 2, -1, -1):
 		var older: Dictionary = track.samples[i]
-		var newer: Dictionary = track.samples[i + 1]
-
 		var older_tick := float(older["tick"])
+		if render_tick <= older_tick:
+			continue
+		var newer: Dictionary = track.samples[i + 1]
 		var newer_tick := float(newer["tick"])
 
-		if render_tick >= older_tick and render_tick <= newer_tick:
+		if render_tick <= newer_tick:
 			var span := newer_tick - older_tick
 			var alpha := 0.0 if span <= 0.0 else (render_tick - older_tick) / span
 			return _blend(
@@ -454,6 +456,7 @@ func _continue(newest: Dictionary, previous: Dictionary, render_tick: float) -> 
 ## Only continuous types are blended; a bool, string or enum jumps at the midpoint (a blended weapon index is no weapon).
 func _blend(older: Dictionary, newer: Dictionary, alpha: float) -> Dictionary:
 	var out := {}
+	var shared := 0
 
 	for property in newer:
 		var to_value: Variant = newer[property]
@@ -462,14 +465,23 @@ func _blend(older: Dictionary, newer: Dictionary, alpha: float) -> Dictionary:
 			out[property] = to_value
 			continue
 
+		shared += 1
 		var from_value: Variant = older[property]
-		out[property] = _blend_value(from_value, to_value, alpha)
+		# The common types inline: this runs per remote entity per frame.
+		var kind := typeof(from_value)
+		if kind == TYPE_FLOAT and typeof(to_value) == TYPE_FLOAT:
+			out[property] = lerpf(from_value, to_value, alpha)
+		elif kind == TYPE_VECTOR3 and typeof(to_value) == TYPE_VECTOR3:
+			out[property] = (from_value as Vector3).lerp(to_value as Vector3, alpha)
+		else:
+			out[property] = _blend_value(from_value, to_value, alpha)
 
 	# Properties present only in the older sample are carried through: a delta only
 	# names what changed, so absence means unchanged.
-	for property in older:
-		if not out.has(property):
-			out[property] = older[property]
+	if shared < older.size():
+		for property in older:
+			if not out.has(property):
+				out[property] = older[property]
 
 	return out
 
@@ -512,19 +524,21 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 	var values := sample(identity.net_id, server_tick)
 	if values.is_empty():
 		return
-	values = _ease_resume(_tracks.get(identity.net_id), values, float(server_tick) - delay_ticks())
+	var track: Track = _tracks.get(identity.net_id)
+	values = _ease_resume(track, values, float(server_tick) - delay_ticks())
 
-	for behaviour in identity.behaviours:
+	var behaviours := identity.behaviours
+	if not _plan_fits(track, behaviours):
+		_build_plan(track, behaviours)
+
+	for b in range(behaviours.size()):
+		var behaviour := behaviours[b]
 		var wrote := false
 
-		for declaration in behaviour.net_vars:
-			if not declaration.interpolate:
+		for property: StringName in track.plan_props[b]:
+			if not values.has(property):
 				continue
-			if not values.has(declaration.property):
-				continue
-			behaviour._net_write_property(
-				declaration.property, values[declaration.property]
-			)
+			behaviour._net_write_property(property, values[property])
 			wrote = true
 
 		# Told, not left in the property: a game that copies replicated state from a hook needs
@@ -532,6 +546,30 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 		# which is a tick number a game may index with.
 		if wrote:
 			behaviour._net_interpolated(int(server_tick))
+
+
+## Whether [param track]'s write plan still matches [param behaviours]: a game with forty
+## replicated properties and four interpolated would otherwise walk all forty per frame.
+static func _plan_fits(track: Track, behaviours: Array[DotNetBehaviour]) -> bool:
+	if track.plan_behaviours.size() != behaviours.size():
+		return false
+	for b in range(behaviours.size()):
+		if track.plan_behaviours[b] != behaviours[b] or track.plan_sizes[b] != behaviours[b].net_vars.size():
+			return false
+	return true
+
+
+static func _build_plan(track: Track, behaviours: Array[DotNetBehaviour]) -> void:
+	track.plan_behaviours = behaviours.duplicate()
+	track.plan_sizes.resize(behaviours.size())
+	track.plan_props = []
+	for b in range(behaviours.size()):
+		track.plan_sizes[b] = behaviours[b].net_vars.size()
+		var props: Array[StringName] = []
+		for declaration in behaviours[b].net_vars:
+			if declaration.interpolate:
+				props.append(declaration.property)
+		track.plan_props.append(props)
 
 
 ## Draws [param values] with what is left of any jump out of an extrapolation added, and notes what this frame extrapolated from. Positions (Vector3, Vector2) only.
