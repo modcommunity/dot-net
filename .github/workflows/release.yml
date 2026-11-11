@@ -32,7 +32,8 @@ jobs:
     # The optional native snapshot core (addons/dot_net/native, see docs/native.md), built per
     # desktop platform and attached as dot_net_native-<version>-<platform>.zip. Only the Linux
     # x86_64 libraries are committed; a game pinned with "# bootstrap-natives: dot-net <tag> native/bin"
-    # fetches the others from here. macOS is one universal dylib built on the Intel runner (the
+    # fetches the others from here. The C++ builds with MSVC as well as GCC/Clang (no GCC builtins).
+    # macOS is one universal dylib built on the Intel runner (the
     # macos-14 arm64 label is refused for this account, see dot-sim's release) and packed twice.
     native:
         needs: validate
@@ -77,11 +78,20 @@ jobs:
               run: |
                   # The committed Linux libraries are rebuilt here so every zip comes from this tag.
                   rm -f addons/dot_net/native/bin/libdot_net_native.*
-                  bash addons/dot_net/native/build.sh all ${{ matrix.scons }}
+                  # Job logs need a login; annotations do not, so a failed build posts its error lines as annotations.
+                  if ! bash addons/dot_net/native/build.sh all ${{ matrix.scons }} 2>&1 | tee build.log; then
+                      grep -iE 'error|fatal|not found' build.log | head -20 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+                      exit 1
+                  fi
             - name: Package
+              env:
+                  PYTHON: python
               run: |
                   for p in ${{ matrix.pack }}; do
-                      bash ci/package.sh --version "${GITHUB_REF_NAME}" --platform "$p"
+                      if ! bash ci/package.sh --version "${GITHUB_REF_NAME}" --platform "$p" 2>&1 | tee package.log; then
+                          tail -5 package.log | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+                          exit 1
+                      fi
                   done
             - uses: actions/upload-artifact@v4
               with:
