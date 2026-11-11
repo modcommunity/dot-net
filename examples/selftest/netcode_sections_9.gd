@@ -427,7 +427,7 @@ func _lossy_lead_run(rate: int, loss: float, batched: bool, seconds: float, seed
 	return out
 
 
-## game-arena's headless_lossy at 22 and 33 Hz: at 20% loss the input tick jumped 2 to 4 ticks
+## game-fatal-contact's headless_lossy at 22 and 33 Hz: at 20% loss the input tick jumped 2 to 4 ticks
 ## several times a window. A command whose packet was lost arrives with a later packet, late by
 ## the loss; measured, the clock read that as a stall. Armed: the per-command control still jumps.
 func _test_lossy_lead() -> void:

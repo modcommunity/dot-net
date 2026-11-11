@@ -246,7 +246,7 @@ func _credit_dropped(gap: float) -> void:
 		_accumulator += (ticks - whole) * _step_seconds()
 		# A window of late samples opened before a stall says nothing about the timeline after
 		# it: one that spanned the credit read as samples keeping pace with local time a second
-		# behind, and anchored the timeline back to the backlog (game-g2gfast at 60).
+		# behind, and anchored the timeline back to the backlog (game-airdrift at 60).
 		if lost > LEAD_SMOOTH_SECONDS:
 			_settle_open = false
 	if ticks >= 1.0:
@@ -266,7 +266,7 @@ func _discount_long_frame(wall_usec: int, seconds: float, sent_after: int) -> vo
 		_frame_waits.pop_front()
 	# The second longest: one frame is not a wait that recurs, two are. The longest let a
 	# three-second stall make the two-second one after it a second later look like the frames
-	# to expect, and its commands asked for two seconds of lead (game-g2gfast's first visit).
+	# to expect, and its commands asked for two seconds of lead (game-airdrift's first visit).
 	var longest := 0.0
 	var second := 0.0
 	for wait in _frame_waits:
