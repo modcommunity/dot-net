@@ -197,10 +197,12 @@ func _apply_entity(
 			# What the server last SENT, not what the property holds: an interpolated property
 			# holds the interpolator's own blend, which would be handed back as the server's word
 			# and freeze the entity part of the way (history.md #17, #18).
-			var received := behaviour.received_values()
+			# Straight from the baseline ([method DotNetBehaviour.received_values] without the
+			# dictionary it builds per entity per snapshot).
+			var baseline := behaviour._baseline
 			for declaration in behaviour.net_vars:
-				if declaration.interpolate and received.has(declaration.property):
-					values[declaration.property] = received[declaration.property]
+				if declaration.interpolate and baseline.has(declaration.property):
+					values[declaration.property] = baseline[declaration.property]
 
 	if identity.is_predicted():
 		if config.reconcile_once_per_frame:
