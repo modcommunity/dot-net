@@ -793,12 +793,17 @@ func read_state(reader: DotNetReader, tick: int, rewind: bool = false) -> DotRes
 
 
 func _apply_read(declaration: DotNetVar, value: Variant) -> void:
-	var previous: Variant = _baseline.get(declaration.property)
-	_net_write_property(declaration.property, value)
-	_baseline[declaration.property] = value
-	_read_now[declaration.property] = true
+	var property := declaration.property
 	if declaration.change_handler.is_valid():
+		var previous: Variant = _baseline.get(property)
+		_net_write_property(property, value)
+		_baseline[property] = value
+		_read_now[property] = true
 		declaration.change_handler.call(previous, value)
+		return
+	_net_write_property(property, value)
+	_baseline[property] = value
+	_read_now[property] = true
 
 
 ## What [method read_state] does for an entity a snapshot listed as unchanged: exactly a read of zero properties (see [code]docs/wire.md#unchanged-entities[/code]), so every consumer downstream sees what it saw for an empty body.
