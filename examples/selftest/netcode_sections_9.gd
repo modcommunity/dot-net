@@ -364,6 +364,47 @@ func _test_idle_snapshots() -> void:
 	_sections_completed += 1
 
 
+## [method DotNetManager.snapshot_due], read before each tick, says whether that tick sends: at
+## 60 Hz with 20 snapshots a second, every third tick; staggered, every tick.
+func _test_snapshot_due() -> void:
+	_sections_entered += 1
+	print("")
+	print("[snapshot due]")
+	for stagger in [false, true]:
+		var host := DotNetManager.new()
+		host.name = "DueHost%s" % ("Stagger" if stagger else "")
+		host.is_server = true
+		host.service_scope = &"snapshot_due"
+		host.local_peer_id = 1
+		host.auto_tick = false
+		host.config_file = ""
+		host.config = DotNetConfig.new()
+		host.config.tick_rate = 60
+		host.config.snapshot_rate = 20
+		host.config.stagger_snapshots = stagger
+		add_child(host)
+		var _ready_now := host.setup()
+		var sent := [0]
+		host.snapshot_sent.connect(func(_tick: int, _peers: int) -> void: sent[0] += 1)
+		host.start()
+		host.add_peer(2)
+		var due_ticks := 0
+		var matched := 0
+		for t in range(1, 13):
+			var due := host.snapshot_due()
+			var before: int = sent[0]
+			host.server_tick(t)
+			due_ticks += int(due)
+			matched += int(due == (sent[0] > before) or stagger)
+		var label := "staggered" if stagger else "every third tick"
+		_check("%s: due on %d of 12 ticks" % [label, due_ticks], due_ticks == (12 if stagger else 4))
+		_check("%s: due exactly on the ticks that send (%d of 12)" % [label, matched], matched == 12)
+		host.stop()
+		remove_child(host)
+		host.free()
+	_sections_completed += 1
+
+
 ## A client clock and a server's input buffer at [param rate] Hz, 55 ms each way, [param loss] of
 ## the packets lost both ways, every packet carrying the last four commands. [param batched] hands
 ## a packet to [code]push_batch[/code], else each command to [code]push[/code]. Seeded, no real time.
