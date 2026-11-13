@@ -76,6 +76,8 @@ var _split := false
 var _native := false
 var _native_interest := false
 var _laps := {}
+var _client := false
+var _client_payloads: Array[PackedByteArray] = []
 
 
 func _ready() -> void:
@@ -102,6 +104,7 @@ func _ready() -> void:
 			"--native": _native = true
 			"--native-interest": _native = true; _native_interest = true
 			"--no-sim-codec": DotNetSimCodec.enabled = false
+			"--client": _client = true
 	_run.call_deferred()
 
 
@@ -152,6 +155,8 @@ func _run() -> void:
 			return
 		sent[0] += 1
 		sent[1] += payload.size()
+		if _client and peer_id == 2:
+			_client_payloads.append(payload)
 		if _hash:
 			var _u := digest.update(PackedByteArray([peer_id & 0xFF, peer_id >> 8]))
 			var _v := digest.update(payload)
@@ -212,8 +217,54 @@ func _run() -> void:
 		row["ph_" + k] = snappedf(float(pc[StringName("snap_%s_usec" % k)]) / 1000.0 / snaps, 0.01)
 	for k: String in _laps:
 		row["lap_" + k] = snappedf(float(_laps[k]) / 1000.0 / times.size(), 0.01)
+	if _client:
+		_client_receive(host, row)
 	print("BENCH %s" % JSON.stringify(row))
 	get_tree().quit(0)
+
+
+## [code]--client[/code]: peer 2's snapshots replayed into a client holding every entity, its own
+## player predicted; [code]client_*[/code] is the receive cost per snapshot after the warm-up.
+func _client_receive(host: DotNetManager, row: Dictionary) -> void:
+	var guest := DotNetManager.new()
+	guest.name = "BenchClient"
+	guest.is_server = false
+	guest.local_peer_id = 2
+	guest.service_scope = &"snapshot_bench_client"
+	guest.auto_tick = false
+	guest.config_file = ""
+	guest.config = DotNetConfig.new()
+	guest.config.tick_rate = 64
+	guest.config.snapshot_rate = 64
+	guest.config.reconcile_once_per_frame = true
+	add_child(guest)
+	var _s := guest.setup()
+	var _t := guest.start()
+	guest.spawner.register_factory(&"player", func(_c: Dictionary) -> Node: return _body(Player.new()))
+	guest.spawner.register_factory(&"npc", func(_c: Dictionary) -> Node: return _body(Npc.new()))
+	for identity in host.registry.all():
+		var _m := guest.spawner.spawn_remote(
+			identity.prefab_id, identity.net_id, identity.owner_peer_id, Transform3D.IDENTITY, 0
+		)
+	var times: Array[float] = []
+	var flushed := 0.0
+	for i in _client_payloads.size():
+		var at := Time.get_ticks_usec()
+		var _r := guest.receive_snapshot(_client_payloads[i])
+		var applied := Time.get_ticks_usec()
+		guest.flush_reconcile()
+		if i >= _warm:
+			times.append(float(applied - at) / 1000.0)
+			flushed += float(Time.get_ticks_usec() - applied) / 1000.0
+	times.sort()
+	var total := 0.0
+	for t in times:
+		total += t
+	row["client_snapshots"] = times.size()
+	row["client_flush_ms"] = snappedf(flushed / maxf(1.0, times.size()), 0.001)
+	row["client_entities"] = guest.registry.all().size()
+	row["client_mean_ms"] = snappedf(total / maxf(1.0, times.size()), 0.001)
+	row["client_p50_ms"] = snappedf(times[times.size() / 2], 0.001) if not times.is_empty() else 0.0
 
 
 ## The manager's inline snapshot path, the same calls, lapped by part (ms per tick in the row).
