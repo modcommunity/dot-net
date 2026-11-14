@@ -330,6 +330,11 @@ func _skip_checks(host: DotNetManager, guests: Array[DotNetManager], moving: Arr
 	var hp := host.perf_counters()
 	_check("the server counts its ticks and their send time (%d ticks, %d us)" % [int(hp[&"server_ticks"]), int(hp[&"server_send_usec"])],
 		int(hp[&"server_ticks"]) == ticks and int(hp[&"server_send_usec"]) > 0)
+	# The sections nest: the history record is part of the send, the registered check part of the sim.
+	_check("server_tick's sections are counted inside their totals (input %d, check %d, history %d us)" % [
+			int(hp[&"server_input_usec"]), int(hp[&"server_check_usec"]), int(hp[&"server_history_usec"])],
+		int(hp[&"server_input_usec"]) >= 0 and int(hp[&"server_check_usec"]) <= int(hp[&"server_sim_usec"])
+		and int(hp[&"server_history_usec"]) <= int(hp[&"server_send_usec"]))
 	var a := guests[0].perf_counters()
 	var b := guests[1].perf_counters()
 	var replayed_a := int(a[&"replayed_ticks"]) - int(before[0][&"replayed_ticks"])

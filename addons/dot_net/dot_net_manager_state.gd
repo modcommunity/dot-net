@@ -158,6 +158,9 @@ var _perf_predict_usec: int = 0
 var _perf_server_ticks: int = 0
 var _perf_server_sim_usec: int = 0
 var _perf_server_send_usec: int = 0
+var _perf_server_input_usec: int = 0
+var _perf_server_check_usec: int = 0
+var _perf_server_history_usec: int = 0
 ## Where a snapshot's time goes, running wall-clock totals in microseconds: freeze and interest prepare, the shared property reads, per-peer relevance and ranking, per-peer build and send, thaw. See [method DotNetManager.perf_counters].
 var _ph_prepare_usec: int = 0
 var _ph_reads_usec: int = 0

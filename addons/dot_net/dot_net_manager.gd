@@ -313,6 +313,7 @@ func server_tick(tick: int) -> void:
 
 	var identities := registry.all()
 
+	var input_started := Time.get_ticks_usec()
 	for peer_id in _peers:
 		var buffer: DotNetInput.Buffer = _input_buffers[peer_id]
 		var input := buffer.take(tick)
@@ -334,6 +335,7 @@ func server_tick(tick: int) -> void:
 	var step := clock.tick_duration()
 	var started := Time.get_ticks_usec()
 	_perf_server_ticks += 1
+	_charge(&"net.input", started - input_started)
 
 	# The list was taken before anything ran and a behaviour can change the world: a round
 	# re-laying its map unregisters entities that this walk would then simulate and send
@@ -348,6 +350,7 @@ func server_tick(tick: int) -> void:
 		for behaviour in identity.behaviours:
 			behaviour._net_simulate(tick, step)
 
+	var check_started := Time.get_ticks_usec()
 	for identity in identities:
 		if changed:
 			break
@@ -358,11 +361,13 @@ func server_tick(tick: int) -> void:
 	var period := config.ticks_per_snapshot()
 	var simulated := Time.get_ticks_usec()
 	_perf_server_sim_usec += simulated - started
+	_charge(&"net.check", simulated - check_started)
 
 	# Staggered: some peers every tick, each on its own phase. See
 	# [member DotNetConfig.stagger_snapshots].
 	if config.stagger_snapshots and period > 1:
 		history.record(identities, tick)
+		_charge(&"net.history", Time.get_ticks_usec() - simulated)
 		_send_snapshots(tick, identities, posmod(tick, period), period)
 		_perf_server_send_usec += Time.get_ticks_usec() - simulated
 		return
@@ -372,8 +377,21 @@ func server_tick(tick: int) -> void:
 	if _ticks_since_snapshot >= period:
 		_ticks_since_snapshot = 0
 		history.record(identities, tick)
+		_charge(&"net.history", Time.get_ticks_usec() - simulated)
 		_send_snapshots(tick, identities)
 		_perf_server_send_usec += Time.get_ticks_usec() - simulated
+
+
+## Adds [param usec] to one of server_tick's own sections (perf_counters' server_input/check/history_usec), and to [DotFrameCost] while a profiler records.
+func _charge(section: StringName, usec: int) -> void:
+	match section:
+		&"net.input":
+			_perf_server_input_usec += usec
+		&"net.check":
+			_perf_server_check_usec += usec
+		&"net.history":
+			_perf_server_history_usec += usec
+	DotFrameCost.add_usec(section, usec)
 
 
 ## Those of [param identities] still registered as themselves. An entity registered during
@@ -456,6 +474,11 @@ func perf_counters() -> Dictionary:
 		&"server_ticks": _perf_server_ticks,
 		&"server_sim_usec": _perf_server_sim_usec,
 		&"server_send_usec": _perf_server_send_usec,
+		# Sections of server_tick: input taken and applied (before server_sim_usec), the
+		# still-registered check (inside server_sim_usec), the rewind history record (inside server_send_usec).
+		&"server_input_usec": _perf_server_input_usec,
+		&"server_check_usec": _perf_server_check_usec,
+		&"server_history_usec": _perf_server_history_usec,
 		# Inside server_send_usec (inline path; the native and pooled paths count prepare, reads
 		# and thaw only): freeze + interest prepare, the shared property reads, per-peer relevance
 		# and ranking, per-peer build + send, thaw.
