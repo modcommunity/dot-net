@@ -1,24 +1,12 @@
-This is the **netcode** asset for TMC's **Dot** collection. It is what makes a game multiplayer, and it is independent enough to drop into a project that uses none of the rest.
+# dot-net
 
-This collection of assets provides modular building blocks for creating games and applications within the TMC ecosystem, ensuring consistency and interoperability across all `dot-*` assets. This includes core functionality, networking, authentication, cloud integration, and more.
+Multiplayer netcode for Godot 4. It keeps clocks in step, packs data tightly, copies game state from the server to clients, smooths what remote players do, predicts your own movement, checks hits fairly despite lag, and sends each player only what they need. It needs only [dot-core](https://github.com/modcommunity/dot-core), so you can use it with [dot-server](https://github.com/modcommunity/dot-server), Godot's own multiplayer, or your own transport. Part of TMC's open source **Dot** collection (MIT licence).
 
-**These assets are COMPLETELY OPEN SOURCE**. You are free to use, modify, and distribute them under the terms of the MIT license. The only thing not open source is the back-end web infrastructure. So if you opt into using your own authentication backend instead of integrating with TMC, you will need to build and integrate your own back-end infrastructure.
-
-## From Maintainer & WARNING
-This asset, along with all the others, was built initially with **Claude Code** and will continue to be maintained and extended using it. This is because I (`gamemann`) cannot build the entire TMC platform alone (I wish I could lol).
-
-**Please treat this as partially tested.** Every asset has its own headless test suite and those suites pass, but very little of this has been in front of real players yet. Expect rough edges, and please report anything you run into.
-
-I intend on reviewing code, testing, and editing documentation regularly. If you're interested in helping out, please let me know!
-
-## Multiplayer Netcode
-Multiplayer netcode for Godot 4. Tick synchronisation, a bit-packed wire format, declarative state replication, snapshot interpolation, client-side prediction with server reconciliation, lag-compensated hit detection, and interest management.
-
-Part of the `dot-*` family alongside [dot-core](https://github.com/modcommunity/dot-core), [dot-server](https://github.com/modcommunity/dot-server), [dot-auth](https://github.com/modcommunity/dot-auth) and [dot-cloud](https://github.com/modcommunity/dot-cloud). It needs only dot-core, so you can use it with dot-server, with Godot's raw multiplayer, or with your own transport.
+> Built with Claude Code. Every addon has a headless test suite and the suites pass, but little of this has met real players yet. Please report rough edges.
 
 ## Install
 
-Copy `addons/dot_core/` and `addons/dot_net/` into your project and enable both in *Project → Project Settings → Plugins*. Requires Godot 4.7+.
+Copy `addons/dot_core/` and `addons/dot_net/` into your project and enable both under **Project > Project Settings > Plugins**. Needs Godot 4.7 or newer.
 
 ## Use
 
@@ -35,7 +23,9 @@ net.send_fn = func(peer, payload, delivery): my_transport.send(peer, payload)
 net.start()
 ```
 
-Make something networked by adding a `DotNetIdentity` and describing what replicates:
+The manager never owns a socket: you give it `send_fn` and feed it what arrives.
+
+Make something networked by adding a `DotNetIdentity` and listing what replicates:
 
 ```gdscript
 class_name PlayerMovement extends DotNetBehaviour
@@ -53,39 +43,81 @@ func _net_simulate(tick: int, delta: float) -> void:
     position += velocity * delta      # runs on the server AND the owning client
 ```
 
-Dirty tracking, quantisation, audience filtering, rate limiting, interpolation and prediction all follow from that declaration.
+Change tracking, quantising, who gets what, rate limiting, interpolation and prediction all follow from that list.
 
-## What it gives you
+## What it does
 
-**A wire format that fits.** Positions quantised to a centimetre over a 4 km world cost 19 bits an axis instead of 32. Rotations use smallest-three: 29 bits instead of 128, accurate to under a degree. Bit packing, varints, per-property deadbands, and a `describe_budget()` that tells you what your settings cost per client per second.
+| Feature | How it works |
+| --- | --- |
+| Compact wire format | Positions are quantised (default step 0.01 m over a 2048 m world), rotations use smallest-three, with bit packing, varints and a per-property deadband. `describe_budget()` reports what your settings cost per client per second. |
+| Prediction | The owning client simulates at once, the server corrects, and the client replays unconfirmed inputs on top. Small errors ease out (0.1 s by default); large ones snap, because easing across a teleport drags you through geometry. |
+| Interpolation | Remote entities render slightly in the past so the bracketing snapshots have arrived. The buffer grows fast under jitter and shrinks slowly. |
+| Lag compensation | The server rewinds other entities to where the shooter saw them, tests the shot, and restores. The rewind is bounded (`max_rewind_sec`), so a client cannot claim any rewind it likes. |
+| Interest management | Distance, a spatial grid, or everything. Subclass `DotNetInterest` for teams, rooms, line of sight or fog of war. Data never sent cannot be drawn by a wallhack. |
+| Bandwidth budget | A per-client byte budget with a priority accumulator: important entities update often, others eventually, and nothing is starved. |
+| Stats that name the cause | A high correction rate points at a determinism bug, starvation at bandwidth, late inputs at the clock. |
 
-**Prediction that converges.** The owning client simulates immediately, the server corrects, and the client replays its unacknowledged inputs on top of the correction. Small errors ease out over a tenth of a second; large ones snap, because easing across a teleport drags you through geometry.
+## Settings
 
-**Interpolation that hides jitter.** Remote entities render slightly in the past, far enough that the bracketing snapshots have arrived. The buffer grows quickly under jitter and shrinks slowly, so a good connection sees less delay than a bad one.
+`DotNetConfig` is layered like every Dot config (defaults, JSON, `DOT_NET_*` environment, command line). The most useful ones:
 
-**Lag compensation.** The server rewinds every other entity to where the shooter saw them, accounting for both their latency and their interpolation buffer, then tests the shot and restores. Bounded, so a client cannot claim an arbitrary rewind.
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `tick_rate` | 60 | Simulation ticks per second. |
+| `snapshot_rate` | 20 | Snapshots per second sent to each client. |
+| `interpolation_buffer` | 2.0 | Snapshots of delay for remote entities. |
+| `max_extrapolation_sec` | 0.25 | How long a remote entity is extrapolated when snapshots stop. |
+| `enable_prediction` | true | Client-side prediction. |
+| `input_history_ticks` | 120 | Inputs kept for replay. |
+| `reconcile_snap_distance` | 2.0 | Error in metres above which the client snaps rather than eases. |
+| `enable_lag_compensation` | true | Rewind for hit tests. |
+| `max_rewind_sec` | 1.0 | Furthest the server will rewind. |
+| `world_extent` | 2048.0 | Half-size of the quantised world in metres. |
+| `position_step` | 0.01 | Position accuracy in metres. |
+| `max_speed` | 100.0 | Fastest an entity may move, for quantising velocity. |
+| `mtu` | 1200 | Largest snapshot packet in bytes; bigger snapshots are split into parts. |
+| `per_client_budget` | 65536 | Bytes per second to one client. 0 = unlimited. |
+| `per_client_packet_rate` | 60 | Packets per second to one client. 0 = unlimited. |
+| `interest_radius` | 200.0 | Metres within which entities always replicate. |
+| `max_entities_per_snapshot` | 4096 | Entities per client per snapshot. 0 = unlimited. |
+| `max_tracked_entities` | 4096 | Entities one client may be told about at once. 0 = unlimited. |
+| `client_message_rate` | 240 | Messages per second a client may send before being throttled. |
+| `max_client_payload` | 4096 | Largest payload accepted from a client, in bytes. |
+| `native` | true | Use the optional native snapshot core when installed; falls back to GDScript. See [docs/native.md](docs/native.md). |
 
-**Interest management you can replace.** Distance, spatial grid, or everything. You can also subclass `DotNetInterest` and implement one method for teams, rooms, line of sight or fog of war. It is the biggest lever on bandwidth and the only anti-cheat that actually works: data never sent cannot be drawn on a wallhack.
-
-**Bandwidth budgeting.** A per-client byte budget with a priority accumulator, so important entities update often, unimportant ones update eventually, and nothing is starved, with an explicit bound on how long "eventually" can be.
-
-**Stats that name the cause.** Netcode fails quietly, and players call every failure "lag". A high correction rate is a determinism bug; high starvation is bandwidth; high late-input counts are the clock. Different fixes.
+The rest (stagger, workers, input margins, reconcile easing, far-entity rates) are in `addons/dot_net/core/dot_net_config.gd`, each with a comment.
 
 ## Extending it
 
-Nothing here should require a fork. Subclass `DotNetBehaviour` for components, `DotNetInput` for controls, `DotNetMessage` for your own messages, `DotNetInterest` for relevance rules. `DotNetVar.Type.CUSTOM` with a write/read pair replicates any type at all. `DotNetManager.send_fn` means it never owns a socket.
+You should not need a fork. Subclass `DotNetBehaviour` for components, `DotNetInput` for controls, `DotNetMessage` for your own messages and `DotNetInterest` for relevance rules. `DotNetVar.Type.CUSTOM` with a write and read pair replicates any type.
 
-## Try it
+## Limits worth knowing
+
+- `_net_simulate` must give the same result on every machine, or reconciliation will not converge. That rules out Godot's physics for anything needing exact agreement. See [docs/prediction.md](docs/prediction.md#determinism-is-a-requirement-not-an-aspiration).
+- A snapshot is split into at most 16 parts (a fixed constant in the code, not a setting). What does not fit waits for a later tick.
+- Rollback netcode, matchmaking and voice are not part of dot-net.
+
+## More documentation
+
+| File | Covers |
+| --- | --- |
+| [docs/wire.md](docs/wire.md) | Bit format, message ids, the schema exchange, snapshot parts. |
+| [docs/replication.md](docs/replication.md) | How state reaches clients and what it costs. |
+| [docs/prediction.md](docs/prediction.md) | Determinism, reconciliation, inputs, lag compensation. |
+| [docs/timelines.md](docs/timelines.md) | The clock and the interpolator. |
+| [docs/native.md](docs/native.md) | The optional native snapshot core. |
+| [docs/security.md](docs/security.md) | Decisions worth not undoing. |
+| [docs/testing.md](docs/testing.md) | The test suites. |
+| [docs/history.md](docs/history.md) | Numbered bug list the code cites. |
+
+## Testing
 
 ```bash
+godot --headless --path . --import
 godot --headless --path . res://examples/netcode_demo.tscn
 ```
 
-125 offline checks: wire round-trips and quantisation accuracy, message direction enforcement and schema-mismatch detection, batching and fragment reassembly, clock convergence and drift correction, replication and dirty tracking, three interest strategies agreeing with each other, budget fairness, interpolation and extrapolation bounds, rewind and restore, and a full server-plus-client run over a loopback with 20% packet loss.
-
-## Honest limits
-
-`_net_simulate` must be deterministic across machines or reconciliation will not converge, which rules out Godot's physics for anything needing exact agreement. See [docs/prediction.md](docs/prediction.md#determinism-is-a-requirement-not-an-aspiration). Rollback netcode, matchmaking and voice are out of scope.
+The demo runs offline checks: wire round trips, schema mismatch detection, batching and fragments, clock convergence, replication, interest strategies, budget fairness, interpolation limits, rewind and restore, and a full server and client over a loopback with packet loss. Other suites are in `examples/`.
 
 ## Licence
 
