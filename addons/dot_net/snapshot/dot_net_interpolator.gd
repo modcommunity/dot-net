@@ -121,11 +121,26 @@ var _lost: Array[bool] = []
 var _last_late_tick: int = -1
 var _late_fed: bool = false
 
+## dot-sim's native twin of the tracks and of [method apply]'s draw, or null: see
+## [member DotNetConfig.sim_interp]. The GDScript tracks are kept as well, for
+## [method value_at], [method bracket_at] and lag compensation.
+const NATIVE_CLASS := &"DotSimInterpolator"
+## Off for a test or a bench that wants the GDScript path in a process with the library.
+static var native_enabled := true
+var _native: Object = null
+
 
 func _init(p_config: DotNetConfig) -> void:
 	config = p_config
 	_delay_snapshots = config.interpolation_buffer
 	_target_snapshots = _delay_snapshots
+	if native_enabled and config.sim_interp and not OS.has_feature("web") and ClassDB.class_exists(NATIVE_CLASS):
+		_native = ClassDB.instantiate(NATIVE_CLASS)
+
+
+## Whether [method apply] draws in dot-sim's library.
+func is_native() -> bool:
+	return _native != null
 
 
 ## Records a snapshot's values for an entity.
@@ -134,6 +149,8 @@ func push(net_id: int, tick: int, values: Dictionary) -> void:
 		_tracks[net_id] = Track.new(net_id)
 
 	(_tracks[net_id] as Track).push(tick, values)
+	if _native != null:
+		_native.push(net_id, tick, values)
 	var at := _timeline.bsearch(tick)
 	if at >= _timeline.size() or _timeline[at] != tick:
 		_timeline.insert(at, tick)
@@ -521,6 +538,12 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 		# interpolated state over it would fight the predictor every frame.
 		return
 
+	if _native != null:
+		_native.apply(identity.net_id, identity.behaviours, server_tick, float(server_tick) - delay_ticks(),
+			_frame_elapsed, config.max_extrapolation_sec * float(config.tick_rate),
+			config.resume_ease_max, config.resume_ease_sec)
+		return
+
 	var values := sample(identity.net_id, server_tick)
 	if values.is_empty():
 		return
@@ -617,10 +640,14 @@ func _ease_resume(track: Track, values: Dictionary, render_tick: float) -> Dicti
 
 func forget(net_id: int) -> void:
 	_tracks.erase(net_id)
+	if _native != null:
+		_native.forget(net_id)
 
 
 func clear() -> void:
 	_tracks.clear()
+	if _native != null:
+		_native.clear()
 	_timeline.clear()
 	_last_arrival_ms = 0
 	_arrival_interval_ms = 0.0
@@ -636,6 +663,8 @@ func prune(live_ids: PackedInt64Array) -> void:
 	for net_id in _tracks.keys():
 		if not live.has(net_id):
 			_tracks.erase(net_id)
+	if _native != null:
+		_native.prune(live_ids)
 
 
 ## The buffer in snapshots: what [member DotNetConfig.interpolation_buffer] sets and what
@@ -662,17 +691,17 @@ func _snapshot_ticks() -> float:
 
 ## Calls to [method sample] with at least two samples to choose between.
 func sample_count() -> int:
-	return _samples
+	return _samples + (_native.sample_count() as int if _native != null else 0)
 
 
 ## Of those, how many rendered at or past the newest snapshot.
 func stall_count() -> int:
-	return _stalls
+	return _stalls + (_native.stall_count() as int if _native != null else 0)
 
 
 ## Of the stalls, how many guessed past the newest snapshot rather than holding it.
 func extrapolation_count() -> int:
-	return _extrapolations
+	return _extrapolations + (_native.extrapolation_count() as int if _native != null else 0)
 
 
 ## Zeroes the counters above, so a probe can measure one window of its own.
@@ -680,6 +709,8 @@ func reset_counts() -> void:
 	_samples = 0
 	_stalls = 0
 	_extrapolations = 0
+	if _native != null:
+		_native.reset_counts()
 
 
 func track_count() -> int:
@@ -697,7 +728,8 @@ func describe() -> Dictionary:
 		"delay_ms": int(delay_ms()),
 		"arrival_ms": int(_arrival_interval_ms),
 		"jitter_ms": int(_arrival_jitter_ms),
-		"samples": _samples,
-		"stalls": _stalls,
-		"extrapolations": _extrapolations,
+		"samples": sample_count(),
+		"stalls": stall_count(),
+		"extrapolations": extrapolation_count(),
+		"native": _native != null,
 	}

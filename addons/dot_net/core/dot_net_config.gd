@@ -54,6 +54,12 @@ extends DotConfig
 ## turns it off.
 @export var sim_codec: bool = true
 
+## Draw remote entities in dot-sim's native interpolator ([code]DotSimInterpolator[/code]) when the
+## dot-sim library is loaded: the same values written, cheaper per frame. [DotNetInterpolator]'s
+## GDScript otherwise, and always on the web. Environment [code]DOT_NET_SIM_INTERP=0[/code] or
+## [code]--net-sim-interp=false[/code] turns it off.
+@export var sim_interp: bool = true
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.
