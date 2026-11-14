@@ -745,9 +745,14 @@ void DotNetNativeCore::begin_snapshot(const Array &identities, const PackedInt64
 	}
 	_sweep();
 	_set_workers(std::max(0, std::min(workers, 64)));
-	_jobs.clear();
-	_next_job = 0;
-	_done_jobs = 0;
+	{
+		// Under the lock: a worker re-reads _next_job and _jobs in its wait predicate the moment it
+		// finishes a job, and an unlocked reset could hand it a freed Job (a garbage Peer, SIGFPE).
+		std::lock_guard<std::mutex> lock(_mutex);
+		_jobs.clear();
+		_next_job = 0;
+		_done_jobs = 0;
+	}
 	_open = true;
 	_last_build_usec = 0;
 	_last_read_usec = usec_now() - started;
@@ -1141,7 +1146,16 @@ Array DotNetNativeCore::finish_snapshot() {
 		_done_cv.wait(lock, [this] { return _done_jobs >= _jobs.size(); });
 	}
 	_last_wait_usec = usec_now() - started;
-	for (auto &jp : _jobs) {
+	// Taken out under the lock, see begin_snapshot: a worker that has just counted its last job
+	// still reads _next_job and _jobs.size() in its wait predicate.
+	std::vector<std::unique_ptr<Job>> jobs;
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+		jobs.swap(_jobs);
+		_next_job = 0;
+		_done_jobs = 0;
+	}
+	for (auto &jp : jobs) {
 		Job *job = jp.get();
 		_last_build_usec += job->usec;
 		Array payloads;
@@ -1172,9 +1186,6 @@ Array DotNetNativeCore::finish_snapshot() {
 		r.push_back(job->cap_count);
 		out.push_back(r);
 	}
-	_jobs.clear();
-	_next_job = 0;
-	_done_jobs = 0;
 	_open = false;
 	return out;
 }
