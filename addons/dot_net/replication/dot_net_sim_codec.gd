@@ -55,7 +55,7 @@ static func spec_row(declaration: DotNetVar, slot: int) -> PackedFloat64Array:
 		1.0 if declaration.on_spawn_only else 0.0, declaration.bit_width,
 		declaration.min_value, declaration.max_value, declaration._extent(),
 		declaration._position_bits(), declaration._max_speed(), declaration._velocity_bits(),
-		declaration._rotation_bits(), slot,
+		declaration._rotation_bits(), slot, declaration.length,
 	])
 
 

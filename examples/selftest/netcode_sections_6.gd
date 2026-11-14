@@ -195,6 +195,66 @@ func _native_encode_shortcuts() -> void:
 	ident.free()
 
 
+## [constant DotNetVar.Type.PACKED_FLOAT32] writes exactly what a custom codec of a flag and
+## [code]length[/code] float32s writes (FC's net_exact was one), at every start bit, and reads it
+## back the same: NaNs, signed zeros, infinities, denormals, a wrong size or a wrong type.
+func _packed_float32_wire() -> void:
+	const N := 14
+	var write_old := func(w: DotNetWriter, value: Variant) -> void:
+		var a: PackedFloat32Array = value if value is PackedFloat32Array else PackedFloat32Array()
+		w.write_bool(a.size() == N)
+		if a.size() == N:
+			for f in a:
+				w.write_float32(f)
+	var read_old := func(r: DotNetReader) -> Variant:
+		var a := PackedFloat32Array()
+		if r.read_bool():
+			a.resize(N)
+			for i in N:
+				a[i] = r.read_float32()
+		return a
+	var old := DotNetVar.make(&"x", DotNetVar.Type.CUSTOM).codec(write_old, read_old)
+	var packed := DotNetVar.make(&"x", DotNetVar.Type.FLOAT).of_length(N)
+	var odd := PackedFloat32Array([NAN, -0.0, INF, -INF, 1.0e-45, -1.0e-40, 3.4e38, 1.0e39, 0.1, -7.25, 1.0, 0.0, 65504.0, -1.0e-30])
+	var values: Array = [odd, PackedFloat32Array(), PackedFloat32Array([1.0, 2.0]), null, 3.5, [1.0], PackedFloat64Array([1.0])]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 14
+	for n in 40:
+		var a := PackedFloat32Array()
+		a.resize(N)
+		for i in N:
+			a[i] = rng.randf_range(-5000.0, 5000.0)
+		values.append(a)
+	var bytes_differ := 0
+	var reads_differ := 0
+	for value: Variant in values:
+		for pad in 8:
+			var wa := DotNetWriter.new()
+			var wb := DotNetWriter.new()
+			wa.write_uint(0, pad + 1)
+			wb.write_uint(0, pad + 1)
+			old.write(wa, value)
+			packed.write(wb, value)
+			if wa.to_bytes() != wb.to_bytes() or wa.bit_length() != wb.bit_length():
+				bytes_differ += 1
+				continue
+			var ra := DotNetReader.new(wa.to_bytes())
+			var rb := DotNetReader.new(wb.to_bytes())
+			ra.seek_bits(pad + 1)
+			rb.seek_bits(pad + 1)
+			if var_to_bytes(old.read(ra)) != var_to_bytes(packed.read(rb)) or ra._bit_pos != rb._bit_pos:
+				reads_differ += 1
+	_check("PACKED_FLOAT32: %d values at 8 start bits write a custom codec's bytes (%d differ) and read alike (%d differ)" % [
+			values.size(), bytes_differ, reads_differ],
+		packed.type == DotNetVar.Type.PACKED_FLOAT32 and bytes_differ == 0 and reads_differ == 0)
+	_check("PACKED_FLOAT32: not aligned, %d estimated bits, matches a round trip" % packed.estimated_bits(),
+		not packed.may_align() and packed.estimated_bits() == 1 + 32 * N
+			and packed.matches(odd.duplicate(), packed.wire_value(odd)) == old.matches(odd.duplicate(), old.wire_value(odd))
+			and packed.matches(PackedFloat32Array([1.0]), PackedFloat32Array()))
+	_check("PACKED_FLOAT32: the spec row carries the length",
+		DotNetSimCodec.spec_row(packed, 3).size() == 15 and int(DotNetSimCodec.spec_row(packed, 3)[14]) == N)
+
+
 ## The optional native core ([DotNetNative]) against the GDScript path: each encoder bit for bit
 ## at every pad, and whole scripted games byte for byte, inline and on workers. Without the
 ## library built every check reads as the fallback's: GDScript sends, and says why.
@@ -206,6 +266,7 @@ func _test_native() -> void:
 
 	_native_encoders_match(loaded)
 	_native_encode_shortcuts()
+	_packed_float32_wire()
 
 	for variant: String in ["", "coded", "thin", "grid"]:
 		var serial: Dictionary = _threads_scenario("Native" + variant + "Off", 0, false, variant)

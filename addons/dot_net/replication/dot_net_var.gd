@@ -35,6 +35,10 @@ enum Type {
 	BYTES,
 	## Your own codec. See [method codec].
 	CUSTOM,
+	## A [PackedFloat32Array] of exactly [member length] floats, each sent whole (32 bits): a
+	## flag bit (1 when the array has [member length] entries), then the floats. Any other value
+	## sends the flag alone and reads back as an empty array. See [method of_length].
+	PACKED_FLOAT32,
 }
 
 ## Who receives a property.
@@ -88,6 +92,9 @@ enum Audience {
 ## writes (a score, a challenge's progress): a predicted entity takes the server's value as it arrives,
 ## and the comparison that lets [member DotNetConfig.skip_matching_replays] skip a replay ignores it.
 @export var client_predicts: bool = true
+
+## Entries in a [constant Type.PACKED_FLOAT32] array. See [method of_length].
+@export var length: int = 0
 
 ## Called on a receiving client when the value changes.
 ##
@@ -171,6 +178,17 @@ func on_change(handler: Callable) -> DotNetVar:
 	return self
 
 
+## Makes this a [constant Type.PACKED_FLOAT32] of [param count] floats. dot-sim's snapshot codec
+## writes and reads it natively; byte for byte the script's, which is the fallback.
+func of_length(count: int) -> DotNetVar:
+	if count < 0:
+		push_error("DotNetVar '%s': of_length(%d) is negative." % [property, count])
+		return self
+	type = Type.PACKED_FLOAT32
+	length = count
+	return self
+
+
 ## Supplies a codec for [constant Type.CUSTOM]. The escape hatch that makes any type replicable.
 func codec(writer_fn: Callable, reader_fn: Callable) -> DotNetVar:
 	type = Type.CUSTOM
@@ -244,6 +262,14 @@ func write(writer: DotNetWriter, value: Variant) -> void:
 					"DotNetVar '%s' is CUSTOM but has no codec." % property
 				)
 
+		Type.PACKED_FLOAT32:
+			var floats: PackedFloat32Array = value if value is PackedFloat32Array else PackedFloat32Array()
+			var whole := floats.size() == length
+			writer.write_bool(whole)
+			if whole:
+				for f in floats:
+					writer.write_float32(f)
+
 
 ## Reads a value according to this declaration.
 func read(reader: DotNetReader) -> Variant:
@@ -297,6 +323,14 @@ func read(reader: DotNetReader) -> Variant:
 				return read_fn.call(reader)
 			push_error("DotNetVar '%s' is CUSTOM but has no codec." % property)
 			return null
+
+		Type.PACKED_FLOAT32:
+			var floats := PackedFloat32Array()
+			if reader.read_bool():
+				floats.resize(length)
+				for i in length:
+					floats[i] = reader.read_float32()
+			return floats
 
 	return null
 
@@ -390,8 +424,8 @@ func matches(predicted: Variant, received: Variant) -> bool:
 			return (predicted as Quaternion).normalized().angle_to(received as Quaternion) <= slack * 4.0
 		Type.STRING, Type.BYTES:
 			return _values_equal(predicted, received)
-		Type.CUSTOM:
-			if not write_fn.is_valid() or not read_fn.is_valid():
+		Type.CUSTOM, Type.PACKED_FLOAT32:
+			if type == Type.CUSTOM and (not write_fn.is_valid() or not read_fn.is_valid()):
 				return false
 			var w := DotNetWriter.new()
 			write(w, predicted)
@@ -462,6 +496,7 @@ func estimated_bits() -> int:
 		Type.STRING: return 128
 		Type.BYTES: return 256
 		Type.CUSTOM: return 64
+		Type.PACKED_FLOAT32: return 1 + 32 * length
 	return 32
 
 
