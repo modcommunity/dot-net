@@ -3,8 +3,8 @@ extends RefCounted
 ## dot-sim's native snapshot codec ([code]DotSimSnapshotCodec[/code], the [code]snapshot[/code]
 ## module): [method DotNetBehaviour._encode] and [method DotNetBehaviour.read_state] in Rust,
 ## bit for bit the bytes [DotNetVar] writes and the values it reads. Optional: with no dot-sim
-## library, on the web, with [member DotNetConfig.sim_codec] off or [member enabled] false, the
-## GDScript codec runs, and a value the native one cannot reproduce exactly (a custom codec, a
+## library loaded (a plain web export, or a dlink one without dot-sim's side module), with
+## [member DotNetConfig.sim_codec] off or [member enabled] false, the GDScript codec runs, and a value the native one cannot reproduce exactly (a custom codec, a
 ## string, a value of the wrong type) is still written and read by the script. See
 ## docs/native.md.
 
@@ -23,9 +23,10 @@ const SCRIPT := 5
 static var enabled := true
 
 
-## Whether the native codec can run in this process at all.
+## Whether the native codec can run in this process at all: the class exists only once dot-sim's
+## library has loaded, on the web too (a dlink export with its side module, dot-sim docs/web.md).
 static func available() -> bool:
-	return enabled and not OS.has_feature("web") and ClassDB.class_exists(CLASS)
+	return enabled and ClassDB.class_exists(CLASS)
 
 
 ## A codec for [param net_vars] (one behaviour's declarations, bound to their config), or null
