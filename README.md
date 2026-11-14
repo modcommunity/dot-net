@@ -76,6 +76,7 @@ Change tracking, quantising, who gets what, rate limiting, interpolation and pre
 | `position_step` | 0.01 | Position accuracy in metres. |
 | `max_speed` | 100.0 | Fastest an entity may move, for quantising velocity. |
 | `mtu` | 1200 | Largest snapshot packet in bytes; bigger snapshots are split into parts. |
+| `max_snapshot_parts` | 16 | Most parts one snapshot is cut into. Default 16, 0 = the wire's maximum (16; the part trailer is four bits a field). Over 16 or negative is refused by `validate()`. |
 | `per_client_budget` | 65536 | Bytes per second to one client. 0 = unlimited. |
 | `per_client_packet_rate` | 60 | Packets per second to one client. 0 = unlimited. |
 | `interest_radius` | 200.0 | Metres within which entities always replicate. |

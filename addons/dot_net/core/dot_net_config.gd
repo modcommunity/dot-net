@@ -191,6 +191,12 @@ extends DotConfig
 ## without the others, so a lost part loses only what was in it (docs/wire.md#snapshot-parts).
 @export_range(256, 8192, 64) var mtu: int = 1200
 
+## The most parts one snapshot is cut into; what does not fit waits for the next snapshot. Default 16,
+## and 0 means the most the wire carries (also 16): the part trailer is four bits a field
+## ([constant DotNetManager.MAX_SNAPSHOT_PARTS]), so more would be a new wire format. A negative or a
+## value over 16 fails [method validate] instead of being clamped. (API 21.)
+@export var max_snapshot_parts: int = 16
+
 ## Bytes per second sent to one client. 0 is unlimited. The budget interest management and
 ## prioritisation work within.
 @export var per_client_budget: int = 65536
@@ -251,6 +257,13 @@ func cli_prefix() -> String:
 
 
 func validate() -> DotResult:
+	if max_snapshot_parts < 0 or max_snapshot_parts > 16:
+		return DotResult.fail(
+			DotError.CODE_INVALID,
+			"max_snapshot_parts must be 0 (the wire's 16) or 1..16; the part trailer is four bits a field.",
+			str(max_snapshot_parts)
+		)
+
 	if snapshot_workers < -1:
 		return DotResult.fail(
 			DotError.CODE_INVALID,
@@ -376,6 +389,11 @@ func describe_budget() -> PackedStringArray:
 		])
 
 	return out
+
+
+## [member max_snapshot_parts] as a count: 0 is the wire's [constant DotNetManager.MAX_SNAPSHOT_PARTS].
+func snapshot_part_cap() -> int:
+	return DotNetManager.MAX_SNAPSHOT_PARTS if max_snapshot_parts <= 0 else mini(max_snapshot_parts, DotNetManager.MAX_SNAPSHOT_PARTS)
 
 
 ## The most entities one snapshot may name: the tighter of [member max_entities_per_snapshot] and

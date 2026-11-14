@@ -590,6 +590,17 @@ func _test_config_sizing() -> void:
 		"and its input history has been raised to cover it",
 		config.input_history_ticks >= int(config.max_rewind_sec * 128.0) * 2
 	)
+	var parts := DotNetConfig.new()
+	_check("max_snapshot_parts defaults to 16 and 0 means the wire's 16",
+		parts.max_snapshot_parts == 16 and parts.snapshot_part_cap() == 16 and parts.validate().ok)
+	parts.max_snapshot_parts = 0
+	_check("max_snapshot_parts 0 is valid, the wire's 16", parts.validate().ok and parts.snapshot_part_cap() == 16)
+	parts.max_snapshot_parts = 4
+	_check("max_snapshot_parts 4 is 4", parts.validate().ok and parts.snapshot_part_cap() == 4)
+	parts.max_snapshot_parts = 17
+	_check("max_snapshot_parts 17 is refused, not clamped", not parts.validate().ok and parts.max_snapshot_parts == 17)
+	parts.max_snapshot_parts = -1
+	_check("max_snapshot_parts -1 is refused", not parts.validate().ok)
 
 
 ## The spawner's prefab table lets a spawn message name an id instead of a scene path, so a peer

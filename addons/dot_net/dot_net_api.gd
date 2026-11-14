@@ -7,5 +7,6 @@ extends RefCounted
 # velocity_property, tick) and DotNetConfig.remote_extrapolation_sec. 17: DotNetVar.server_driven()
 # / client_predicts. 18: DotNetInput.Buffer.push_batch(inputs), the lead measured per packet.
 # 19: DotNetManager.snapshot_due(). 20: DotNetVar.Type.PACKED_FLOAT32 and of_length(count).
-const LEVEL := 20
+# 21: DotNetConfig.max_snapshot_parts.
+const LEVEL := 21
 const OLDEST := 1

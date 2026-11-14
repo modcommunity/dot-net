@@ -142,7 +142,7 @@ func _send_to_peer(
 		if counts[counts.size() - 1] > 0 \
 				and writer.bit_length() + estimated * 16 + 256 > limit_bits \
 				and _entity_end_bit(writer.bit_length(), identity, dirties) > limit_bits:
-			if parts.size() >= MAX_SNAPSHOT_PARTS:
+			if parts.size() >= config.snapshot_part_cap():
 				# Out of parts: what does not fit waits, exactly as the budget makes it wait,
 				# and the accumulator puts it at the front next time.
 				_warn_parts_exhausted(peer_id, relevant.size())
@@ -201,7 +201,7 @@ func _send_to_peer(
 		var tail_bits := _unchanged_tail_bits(runs)
 		if parts[parts.size() - 1].bit_length() + tail_bits <= limit_bits + SNAPSHOT_PART_TRAILER_BITS:
 			tail_part = parts.size() - 1
-		elif parts.size() < MAX_SNAPSHOT_PARTS:
+		elif parts.size() < config.snapshot_part_cap():
 			parts.append(_begin_snapshot_part(tick))
 			counts.append(0)
 			tail_part = parts.size() - 1
@@ -397,7 +397,7 @@ func _build_peer(
 		if counts[counts.size() - 1] > 0 \
 				and writer.bit_length() + estimated * 16 + 256 > limit_bits \
 				and _entity_end_bit_cached(writer.bit_length(), identity, dirties, entity_caches) > limit_bits:
-			if parts.size() >= MAX_SNAPSHOT_PARTS:
+			if parts.size() >= config.snapshot_part_cap():
 				# Out of parts: what does not fit waits, exactly as the budget makes it wait,
 				# and the accumulator puts it at the front next time.
 				build.parts_exhausted = relevant.size()
@@ -455,7 +455,7 @@ func _build_peer(
 		var tail_bits := _unchanged_tail_bits(runs)
 		if parts[parts.size() - 1].bit_length() + tail_bits <= limit_bits + SNAPSHOT_PART_TRAILER_BITS:
 			tail_part = parts.size() - 1
-		elif parts.size() < MAX_SNAPSHOT_PARTS:
+		elif parts.size() < config.snapshot_part_cap():
 			parts.append(_begin_snapshot_part(tick))
 			counts.append(0)
 			tail_part = parts.size() - 1
@@ -515,7 +515,7 @@ func _warn_parts_exhausted(peer_id: int, view_size: int) -> void:
 		return
 	_warned_parts = true
 	DotLog.warn(CHANNEL, "a snapshot filled all its parts; the rest of the view waits for later ticks", {
-		"peer": peer_id, "view": view_size, "parts": MAX_SNAPSHOT_PARTS, "mtu": config.mtu,
+		"peer": peer_id, "view": view_size, "parts": config.snapshot_part_cap(), "mtu": config.mtu,
 	})
 
 
