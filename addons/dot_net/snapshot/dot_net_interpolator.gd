@@ -571,6 +571,31 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 			behaviour._net_interpolated(int(server_tick))
 
 
+## [method apply] for every entity in [param identities], one frame. What [method apply] works
+## out per call (the render tick, the extrapolation cap, the ease settings) is the same for the
+## whole frame, so the native path works it out once and goes straight to the library per entity;
+## the GDScript path calls [method apply] per entity. Draws the same as calling [method apply]
+## for each in turn. [method DotNetManager.interpolate_frame] calls this.
+func apply_frame(identities: Array[DotNetIdentity], server_tick: float) -> void:
+	if _native == null:
+		for identity in identities:
+			apply(identity, server_tick)
+		return
+
+	var native := _native
+	var render := server_tick - delay_ticks()
+	var elapsed := _frame_elapsed
+	var max_ticks := config.max_extrapolation_sec * float(config.tick_rate)
+	var ease_max := config.resume_ease_max
+	var ease_sec := config.resume_ease_sec
+	for identity in identities:
+		# As apply: a predicted entity is the predictor's.
+		if identity == null or identity.is_predicted():
+			continue
+		native.apply(identity.net_id, identity.behaviours, server_tick, render, elapsed, max_ticks,
+			ease_max, ease_sec)
+
+
 ## Whether [param track]'s write plan still matches [param behaviours]: a game with forty
 ## replicated properties and four interpolated would otherwise walk all forty per frame.
 static func _plan_fits(track: Track, behaviours: Array[DotNetBehaviour]) -> bool:

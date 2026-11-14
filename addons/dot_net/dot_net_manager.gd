@@ -522,8 +522,7 @@ func interpolate_frame(alpha: float = -1.0) -> void:
 	var server_tick_now := float(clock.received_tick()) + clampf(alpha, -1.0, 2.0) \
 		+ clock.receive_slip()
 
-	for identity in registry.all():
-		interpolator.apply(identity, server_tick_now)
+	interpolator.apply_frame(registry.all(), server_tick_now)
 
 
 ## Applies a snapshot payload. Client side.
