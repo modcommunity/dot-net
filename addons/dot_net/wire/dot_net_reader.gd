@@ -15,6 +15,9 @@ var exhausted: bool = false
 ## Where reading stops, in bits. The whole buffer unless [method limit_bits] set less.
 var _end_bits: int = -1
 
+## [method read_float32]'s four bytes, sized on first use.
+var _f32 := PackedByteArray()
+
 
 func _init(data: PackedByteArray) -> void:
 	_bytes = data
@@ -42,9 +45,29 @@ func read_bits(bits: int) -> int:
 	if exhausted:
 		return 0
 
-	if _bit_pos + bits > _end():
+	var pos := _bit_pos
+	if pos + bits > (_end_bits if _end_bits >= 0 else _bytes.size() << 3):
 		exhausted = true
 		return 0
+
+	# The bytes the field spans gathered into one int and shifted down once, rather than a
+	# masked chunk per byte: a snapshot reads thousands of fields a frame, and the per-byte
+	# loop with its static mask call was most of what the script reader cost. Fits whenever
+	# the field and its offset span at most 8 bytes, which is every field but a 57..64-bit one
+	# at an odd offset. An arithmetic shift of a top byte >= 0x80 fills bits the mask drops.
+	var offset := pos & 7
+	if offset + bits <= 64:
+		var index := pos >> 3
+		var acc := 0
+		var shift := 0
+		while shift < offset + bits:
+			acc |= _bytes[index] << shift
+			index += 1
+			shift += 8
+		_bit_pos = pos + bits
+		if bits >= 64:
+			return acc
+		return (acc >> offset) & ((1 << bits) - 1)
 
 	var result := 0
 	var written := 0
@@ -142,6 +165,13 @@ func read_angle(bits: int = 9) -> float:
 
 
 func read_float32() -> float:
+	# One 32-bit read into a kept scratch buffer when the whole value is there; a truncated one
+	# keeps the byte-at-a-time read, so the position it leaves is what it always was.
+	if not exhausted and _bit_pos + 32 <= _end():
+		if _f32.is_empty():
+			_f32.resize(4)
+		_f32.encode_u32(0, read_bits(32))
+		return _f32.decode_float(0)
 	var buffer := PackedByteArray()
 	buffer.resize(4)
 	for i in range(4):

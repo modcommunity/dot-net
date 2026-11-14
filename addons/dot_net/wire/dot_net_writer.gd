@@ -158,8 +158,9 @@ func write_float32(value: float) -> void:
 	var buffer := PackedByteArray()
 	buffer.resize(4)
 	buffer.encode_float(0, value)
-	for i in range(4):
-		write_bits(buffer[i], 8)
+	# The four bytes as one little-endian field: the same bits, low byte first, as four 8-bit
+	# writes, in one call.
+	write_bits(buffer.decode_u32(0), 32)
 
 
 func write_vector2_range(

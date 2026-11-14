@@ -48,6 +48,70 @@ func _test_wire() -> void:
 	var refused := hostile_reader.read_bytes(1024)
 	_check("oversized length refused", refused.is_empty() and not hostile_reader.ok())
 
+	_test_wire_bits_reference()
+
+
+## The reader's whole-field read against a bit-at-a-time reference: seeded fields of every width
+## 1..64 at every offset, float32 bytes and values, and where a truncated float32 leaves the reader.
+func _test_wire_bits_reference() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7_202_611
+	var widths: Array[int] = []
+	var values: Array[int] = []
+	var w := DotNetWriter.new()
+	for i in range(4000):
+		var bits: int = 1 + (i % 64) if i < 640 else rng.randi_range(1, 64)
+		var value := (rng.randi() << 32) | rng.randi()
+		if bits < 64:
+			value &= (1 << bits) - 1
+		widths.append(bits)
+		values.append(value)
+		w.write_bits(value, bits)
+
+	var data := w.to_bytes()
+	var r := DotNetReader.new(data)
+	var pos := 0
+	var same := true
+	for i in range(widths.size()):
+		var reference := 0
+		for b in range(widths[i]):
+			reference |= ((data[(pos + b) >> 3] >> ((pos + b) & 7)) & 1) << b
+		pos += widths[i]
+		var got := r.read_bits(widths[i])
+		if got != reference or got != values[i] or r.bit_position() != pos:
+			same = false
+			break
+	_check("read_bits equals the bit-by-bit reference (4000 fields, widths 1..64)", same and r.ok())
+
+	var fw := DotNetWriter.new()
+	var floats := PackedFloat32Array([0.0, -0.0, 1.5, -3.25e-41, 3.4e38, INF, -INF, 0.1])
+	for pad in range(8):
+		if pad > 0:
+			fw.write_bits(0, pad)
+		for f in floats:
+			fw.write_float32(f)
+	var fr := fw.to_reader()
+	var floats_same := true
+	for pad in range(8):
+		if pad > 0:
+			fr.read_bits(pad)
+		for f in floats:
+			var expect := PackedByteArray()
+			expect.resize(4)
+			expect.encode_float(0, f)
+			var got := PackedByteArray()
+			got.resize(4)
+			got.encode_float(0, fr.read_float32())
+			floats_same = floats_same and got == expect
+	_check("float32 round-trips bit for bit at every offset", floats_same and fr.ok())
+
+	# Two bits in, 24 bits of buffer: the byte reads stop at bit 18, as they always did.
+	var cut := DotNetReader.new(PackedByteArray([0xFF, 0xFF, 0xFF]))
+	cut.read_bits(2)
+	var cut_value := cut.read_float32()
+	_check("truncated float32 reads 0.0 and stops where the byte reads stopped",
+		cut_value == 0.0 and not cut.ok() and cut.bit_position() == 18)
+
 
 ## A run of bits encoded once and laid into another writer at every bit offset, with a string
 ## in it: a string is byte-aligned, so state laid in at another offset reads back as garbage
