@@ -357,10 +357,56 @@ func differs(old_value: Variant, new_value: Variant) -> bool:
 
 ## [param value] as a receiver reads it after the wire: written and read back, exactly.
 ## What a server collides or rewinds against when a client predicts from the received copy.
+##
+## The range kinds (FLOAT_RANGE and the VECTOR3 ones) and BOOL are snapped directly, with the
+## writer's and reader's own arithmetic and no buffer: a server calls this per neighbour per tick
+## when it rewinds. Every other kind is written and read back.
 func wire_value(value: Variant) -> Variant:
+	match type:
+		Type.BOOL:
+			return bool(value)
+		Type.FLOAT_RANGE:
+			if _range_direct(min_value, max_value, bit_width):
+				return _snap_range(float(value), min_value, max_value, bit_width)
+		Type.VECTOR3_POSITION:
+			var extent := _extent()
+			var bits := _position_bits()
+			if _range_direct(-extent, extent, bits):
+				return _snap_vector3(value as Vector3, -extent, extent, bits)
+		Type.VECTOR3_VELOCITY:
+			var speed := _max_speed()
+			var bits := _velocity_bits()
+			if _range_direct(-speed, speed, bits):
+				return _snap_vector3(value as Vector3, -speed, speed, bits)
+		Type.VECTOR3_RANGE:
+			if _range_direct(min_value, max_value, bit_width):
+				return _snap_vector3(value as Vector3, min_value, max_value, bit_width)
 	var writer := DotNetWriter.new(32)
 	write(writer, value)
 	return read(DotNetReader.new(writer.to_bytes()))
+
+
+## Whether a range can be snapped without the buffers: a valid range and a width whose mask is
+## positive. Anything else takes the buffer path, so its errors and edge cases stay the wire's.
+static func _range_direct(p_min: float, p_max: float, bits: int) -> bool:
+	return p_max > p_min and bits >= 1 and bits <= 62
+
+
+## DotNetWriter.write_float_range then DotNetReader.read_float_range, the same operations in the
+## same order, so the result is the same to the bit.
+static func _snap_range(value: float, p_min: float, p_max: float, bits: int) -> float:
+	var mask := (1 << bits) - 1
+	var normalised := clampf((value - p_min) / (p_max - p_min), 0.0, 1.0)
+	var quantised := int(roundf(normalised * float(mask))) & mask
+	return p_min + float(quantised) / float(mask) * (p_max - p_min)
+
+
+static func _snap_vector3(value: Vector3, p_min: float, p_max: float, bits: int) -> Vector3:
+	return Vector3(
+		_snap_range(value.x, p_min, p_max, bits),
+		_snap_range(value.y, p_min, p_max, bits),
+		_snap_range(value.z, p_min, p_max, bits)
+	)
 
 
 ## The step between two values the wire can carry for this property: what a value moves

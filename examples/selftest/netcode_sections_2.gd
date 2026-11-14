@@ -718,6 +718,42 @@ func _interpolation_value_at(interpolator: DotNetInterpolator) -> void:
 	var round_trip := DotNetWriter.new()
 	wire_spec.write(round_trip, Vector3(1.2345, -0.004, 7.0))
 	_check("wire_value is the value a receiver reads, to the bit", on_wire == wire_spec.read(DotNetReader.new(round_trip.to_bytes())) and on_wire != Vector3(1.2345, -0.004, 7.0))
+	_check("wire_value snaps every range kind to exactly what the wire reads back", _wire_value_parity())
+
+
+## wire_value snaps the range kinds without buffers; it must agree with a real write and read to
+## the bit, in range, out of range, on the edges and at odd widths.
+func _wire_value_parity() -> bool:
+	var specs: Array[DotNetVar] = [
+		DotNetVar.make(&"p", DotNetVar.Type.VECTOR3_POSITION),
+		DotNetVar.make(&"v", DotNetVar.Type.VECTOR3_VELOCITY),
+		DotNetVar.make(&"r", DotNetVar.Type.VECTOR3_RANGE).range_of(-3.0, 5.5).bits(11),
+		DotNetVar.make(&"f", DotNetVar.Type.FLOAT_RANGE).range_of(0.0, 100.0).bits(7),
+		DotNetVar.make(&"g", DotNetVar.Type.FLOAT_RANGE).range_of(-1.0, 1.0).bits(1),
+		DotNetVar.make(&"h", DotNetVar.Type.FLOAT_RANGE).range_of(-2.0, 2.0).bits(40),
+		DotNetVar.make(&"b", DotNetVar.Type.BOOL),
+	]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 715
+	for spec in specs:
+		for i in range(400):
+			var scale := 10.0 if i < 200 else 3000.0
+			var value: Variant
+			match spec.type:
+				DotNetVar.Type.FLOAT_RANGE:
+					value = rng.randf_range(-scale, scale) if i > 3 else [0.0, 100.0, -1.0, 2.0][i]
+				DotNetVar.Type.BOOL:
+					value = i % 2 == 0
+				_:
+					value = Vector3(rng.randf_range(-scale, scale), rng.randf_range(-scale, scale), rng.randf_range(-scale, scale))
+			var writer := DotNetWriter.new()
+			spec.write(writer, value)
+			var expected: Variant = spec.read(DotNetReader.new(writer.to_bytes()))
+			var got: Variant = spec.wire_value(value)
+			if typeof(got) != typeof(expected) or got != expected:
+				push_error("wire_value parity: %s %s -> %s, wire reads %s" % [spec.property, value, got, expected])
+				return false
+	return true
 
 
 func _test_interpolation() -> void:
