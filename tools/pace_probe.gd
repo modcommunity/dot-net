@@ -100,7 +100,18 @@ func _run(label: String, frame: float, jitter: float, cost: float, spikes: float
 	# Ticks per wall second over the last 20 s, and a jump started 25 s in, integrated per tick.
 	var from := t_produced.bsearch(seconds - 20.0)
 	var tps := float(t_produced.size() - from) / 20.0
-	var at := t_produced.bsearch(25.0)
+	var jump := _jump_times(t_produced, t_produced.bsearch(25.0))
+	var apex := jump[0]
+	var land := jump[1]
+	print("%-26s server behind %.1f s of %d, client slowed %.1f s" % [label, slow_server, int(seconds), slow_client])
+	print("%-26s pace %.3f  server %.1f ticks/s  client %.1f ticks/s  apex %d ms land %d ms (ideal %d / %d)" % [
+		label, clock.server_pace(), float(server_tick) / wall, tps, int(apex * 1000.0), int(land * 1000.0),
+		int(JUMP_V / GRAVITY * 1000.0), int(2.0 * JUMP_V / GRAVITY * 1000.0)])
+
+
+## Seconds from the jump's start to its apex [0] and landing [1], integrated over the ticks
+## produced from index at; -1 where the run ended first.
+static func _jump_times(t_produced: Array[float], at: int) -> PackedFloat64Array:
 	var y := 0.0
 	var v := JUMP_V
 	var apex := -1.0
@@ -115,7 +126,4 @@ func _run(label: String, frame: float, jitter: float, cost: float, spikes: float
 			land = t_produced[i] - t_produced[at]
 			break
 		i += 1
-	print("%-26s server behind %.1f s of %d, client slowed %.1f s" % [label, slow_server, int(seconds), slow_client])
-	print("%-26s pace %.3f  server %.1f ticks/s  client %.1f ticks/s  apex %d ms land %d ms (ideal %d / %d)" % [
-		label, clock.server_pace(), float(server_tick) / wall, tps, int(apex * 1000.0), int(land * 1000.0),
-		int(JUMP_V / GRAVITY * 1000.0), int(2.0 * JUMP_V / GRAVITY * 1000.0)])
+	return PackedFloat64Array([apex, land])
