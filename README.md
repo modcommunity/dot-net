@@ -57,7 +57,7 @@ Change tracking, quantising, who gets what, rate limiting, interpolation and pre
 
 ## Settings
 
-`DotNetConfig` is layered like every Dot config (defaults, JSON, `DOT_NET_*` environment, command line). The most useful ones:
+`DotNetConfig` is layered like every Gamespice config (defaults, JSON, `DOT_NET_*` environment, command line). The most useful ones:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
