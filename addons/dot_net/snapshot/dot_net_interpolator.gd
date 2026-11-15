@@ -128,6 +128,9 @@ const NATIVE_CLASS := &"DotSimInterpolator"
 ## Off for a test or a bench that wants the GDScript path in a process with the library.
 static var native_enabled := true
 var _native: Object = null
+## Whether the library takes a whole frame in one call ([code]apply_all[/code]); an older build
+## only has the per-entity [code]apply[/code].
+var _native_all := false
 
 
 func _init(p_config: DotNetConfig) -> void:
@@ -136,6 +139,7 @@ func _init(p_config: DotNetConfig) -> void:
 	_target_snapshots = _delay_snapshots
 	if native_enabled and config.sim_interp and not OS.has_feature("web") and ClassDB.class_exists(NATIVE_CLASS):
 		_native = ClassDB.instantiate(NATIVE_CLASS)
+		_native_all = ClassDB.class_has_method(NATIVE_CLASS, &"apply_all")
 
 
 ## Whether [method apply] draws in dot-sim's library.
@@ -573,7 +577,7 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 
 ## [method apply] for every entity in [param identities], one frame. What [method apply] works
 ## out per call (the render tick, the extrapolation cap, the ease settings) is the same for the
-## whole frame, so the native path works it out once and goes straight to the library per entity;
+## whole frame, so the native path works it out once and hands the library the whole frame;
 ## the GDScript path calls [method apply] per entity. Draws the same as calling [method apply]
 ## for each in turn. [method DotNetManager.interpolate_frame] calls this.
 func apply_frame(identities: Array[DotNetIdentity], server_tick: float) -> void:
@@ -588,6 +592,10 @@ func apply_frame(identities: Array[DotNetIdentity], server_tick: float) -> void:
 	var max_ticks := config.max_extrapolation_sec * float(config.tick_rate)
 	var ease_max := config.resume_ease_max
 	var ease_sec := config.resume_ease_sec
+	if _native_all:
+		# The loop below, predicted check included, in the library: one call a frame.
+		native.apply_all(identities, server_tick, render, elapsed, max_ticks, ease_max, ease_sec)
+		return
 	for identity in identities:
 		# As apply: a predicted entity is the predictor's.
 		if identity == null or identity.is_predicted():
