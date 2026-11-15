@@ -4,7 +4,7 @@ extends Node
 ## Run: [code]godot --headless --path . res://examples/profile_link_demo.tscn[/code]
 
 const SECTIONS := 6
-const CHECKS := 39
+const CHECKS := 42
 const BASE := "user://profile_link_demo"
 
 var _passed := 0
@@ -239,6 +239,16 @@ func _test_bad_requests() -> void:
 	_check(_health(w["rt"]) == 50, "nothing was applied")
 	var tiny := link.handle_from_peer(11, DotNetProfileLink.encode_body({}))
 	_check(not tiny.ok, "an empty request is refused")
+	DotNetProfileLink.max_request_bytes = 16
+	var big := w["clients"][11]["link"].submit(_req("set", "health", 77)) as DotResult
+	_check(not big.ok and big.error.message.contains("max_request_bytes"), "a request past max_request_bytes is refused, naming the setting")
+	DotNetProfileLink.max_request_bytes = DotNetProfileLink.MAX_REQUEST
+	var lat := DotNetLatency.new()
+	lat.requested = 9.0
+	_check(lat.requested == DotNetLatency.MAX_SECONDS, "a latency past max_seconds is held to it (with a warning)")
+	lat.max_seconds = 0.0
+	lat.requested = 9.0
+	_check(lat.requested == 9.0, "and max_seconds 0 is unlimited")
 
 
 func _test_off_by_default() -> void:

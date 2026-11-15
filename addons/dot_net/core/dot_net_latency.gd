@@ -7,8 +7,12 @@ extends RefCounted
 
 const CVAR_BASELINE := "cl_latency_baseline"
 const CVAR_ALLOW := "sv_allow_client_latency"
-## Longest baseline accepted, seconds.
+## Default for [member max_seconds].
 const MAX_SECONDS := 5.0
+const CHANNEL := "net.latency"
+
+## Longest baseline accepted, seconds; 0 = unlimited. A larger request is held to it with a warning.
+var max_seconds: float = MAX_SECONDS
 
 ## Emitted when [method effective] changes.
 signal changed(seconds: float)
@@ -16,7 +20,11 @@ signal changed(seconds: float)
 ## What the player asked for, seconds.
 var requested: float = 0.0:
 	set(value):
-		requested = clampf(value, 0.0, MAX_SECONDS)
+		requested = maxf(value, 0.0)
+		if max_seconds > 0.0 and requested > max_seconds:
+			DotLog.warn(CHANNEL, "%s held to max_seconds (0 = unlimited)" % CVAR_BASELINE,
+				{"requested": value, "max_seconds": max_seconds})
+			requested = max_seconds
 		_refresh()
 
 ## Whether the server lets a client add latency.

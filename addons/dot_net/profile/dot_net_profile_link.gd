@@ -11,9 +11,21 @@ const TYPE_ROW := &"profile.row"
 const TYPE_REPLY := &"profile.reply"
 ## The server's peer id in Godot's multiplayer numbering.
 const SERVER_PEER := 1
-## A request must fit a client payload (4096 by default); a row is the server's own.
+## Defaults for [member max_request_bytes] and [member max_row_bytes].
 const MAX_REQUEST := 2048
 const MAX_ROW := 8192
+
+## Longest request body; it must fit a client payload (4096 by default). 0 = unlimited (up to
+## the writer's runaway guard). Both ends must agree: the reader refuses a longer one.
+static var max_request_bytes: int = MAX_REQUEST
+## Longest row body, the server's own. 0 = unlimited. A longer row is not sent, with an error,
+## rather than truncated into JSON the client cannot read.
+static var max_row_bytes: int = MAX_ROW
+
+
+## The wire bound for a [param setting] of 0 = unlimited.
+static func wire_bound(setting: int) -> int:
+	return setting if setting > 0 else DotNetWriter.MAX_BYTES
 
 ## A server's answer to the peer that made a request.
 signal reply(ok: bool, text: String)
@@ -72,8 +84,10 @@ func submit(req: Dictionary) -> DotResult:
 		return runtime.handle_request(local_actor, req)
 	var msg := RequestMessage.new()
 	var body := encode_body(req)
-	if body.to_utf8_buffer().size() > MAX_REQUEST:
-		return DotResult.fail(DotError.CODE_INVALID, "profile request too large")
+	var size := body.to_utf8_buffer().size()
+	if size > wire_bound(max_request_bytes):
+		return DotResult.fail(DotError.CODE_INVALID, "profile request too large (max_request_bytes, 0 = unlimited)",
+			"%d > %d" % [size, wire_bound(max_request_bytes)])
 	msg.body = body
 	var sent := manager.send(msg, SERVER_PEER)
 	return sent if not sent.ok else DotResult.success(true)
@@ -139,6 +153,11 @@ static func _plain(node: Variant, depth: int) -> bool:
 func _send_row(peer_id: int, row: Dictionary) -> void:
 	var msg := RowMessage.new()
 	msg.body = encode_body(row)
+	var size := msg.body.to_utf8_buffer().size()
+	if size > wire_bound(max_row_bytes):
+		DotLog.error(CHANNEL, "profile row not sent: too large (raise max_row_bytes, 0 = unlimited)",
+			{"bytes": size, "max_row_bytes": max_row_bytes, "peer": peer_id})
+		return
 	manager.send(msg, peer_id)
 
 
@@ -151,7 +170,9 @@ func _on_row(msg: DotNetMessage) -> void:
 	if manager.is_server:
 		return
 	var decoded := decode_body((msg as RowMessage).body)
-	if decoded.ok:
+	if not decoded.ok:
+		DotLog.warn(CHANNEL, "bad profile row", {"why": decoded.error.message})
+	else:
 		var applied := runtime.apply_row(decoded.value)
 		if not applied.ok:
 			DotLog.warn(CHANNEL, "bad profile row", {"why": applied.error.message})
@@ -166,16 +187,16 @@ class RequestMessage extends DotNetMessage:
 	var body := ""
 
 	func _type_name() -> StringName: return DotNetProfileLink.TYPE_REQUEST
-	func _write(w: DotNetWriter) -> void: w.write_string(body, DotNetProfileLink.MAX_REQUEST)
-	func _read(r: DotNetReader) -> void: body = r.read_string(DotNetProfileLink.MAX_REQUEST)
+	func _write(w: DotNetWriter) -> void: w.write_string(body, DotNetProfileLink.wire_bound(DotNetProfileLink.max_request_bytes))
+	func _read(r: DotNetReader) -> void: body = r.read_string(DotNetProfileLink.wire_bound(DotNetProfileLink.max_request_bytes))
 
 
 class RowMessage extends DotNetMessage:
 	var body := ""
 
 	func _type_name() -> StringName: return DotNetProfileLink.TYPE_ROW
-	func _write(w: DotNetWriter) -> void: w.write_string(body, DotNetProfileLink.MAX_ROW)
-	func _read(r: DotNetReader) -> void: body = r.read_string(DotNetProfileLink.MAX_ROW)
+	func _write(w: DotNetWriter) -> void: w.write_string(body, DotNetProfileLink.wire_bound(DotNetProfileLink.max_row_bytes))
+	func _read(r: DotNetReader) -> void: body = r.read_string(DotNetProfileLink.wire_bound(DotNetProfileLink.max_row_bytes))
 
 
 class ReplyMessage extends DotNetMessage:
