@@ -702,60 +702,6 @@ static func _worst_step_change(timeline: Array[float]) -> float:
 	return worst
 
 
-## A runner on a 4 m circle at 9 m/s, its snapshots stalled for ten ticks and then all
-## arriving at once, drawn through `apply` at 144 Hz: the largest change between one frame's
-## step and the next. [param frames] drives `advance`, which is what turns the easing on.
-func _resume_steps(config: DotNetConfig, frames: bool) -> float:
-	var watcher := Interpolated.new()
-	watcher.name = "Net"
-	var host := Node3D.new()
-	host.name = "Resumed"
-	add_child(host)
-	host.add_child(watcher)
-	var identity := DotNetIdentity.new()
-	identity.name = "Identity"
-	identity.owner_peer_id = 5
-	host.add_child(identity)
-	var registry := DotNetRegistry.new(false, 1)
-	registry.register(identity, 91, 0, config)
-
-	var interpolator := DotNetInterpolator.new(config)
-	var omega := 9.0 / 4.0 / 64.0
-	var at := func(tick: int) -> Vector3:
-		return Vector3(cos(float(tick) * omega), 0.0, sin(float(tick) * omega)) * 4.0
-	var pushed := -2
-	var positions: Array[Vector3] = []
-	for i in range(144 * 3):
-		var now := float(i) * 64.0 / 144.0
-		var stalled := now >= 120.0 and now < 130.0
-		while not stalled and pushed + 2 <= int(now):
-			pushed += 2
-			interpolator.push(91, pushed, {"position": at.call(pushed)})
-		if frames:
-			interpolator.advance(1.0 / 144.0)
-		interpolator.apply(identity, now)
-		positions.append(watcher.rendered)
-
-	host.queue_free()
-	var worst := 0.0
-	for i in range(144, positions.size()):
-		worst = maxf(worst, ((positions[i] - positions[i - 1]) - (positions[i - 1] - positions[i - 2])).length())
-	return worst
-
-
-## The buffer a link that is always on time settles to, in ticks.
-func _settled_delay(config: DotNetConfig) -> float:
-	var interpolator := DotNetInterpolator.new(config)
-	var period := config.ticks_per_snapshot()
-	# Ten seconds: the buffer gives time back at 1% an arrival, by design.
-	for now in range(0, 128 * 10):
-		if now % period == 0:
-			interpolator.note_lateness(now, now)
-		interpolator.advance(1.0 / 128.0)
-	# The shrink is slow by design; ask where it is heading.
-	return float(interpolator.describe()["target_snapshots"]) * float(period)
-
-
 ## A bump-test entity: a [Pacer] the server owns, or a [Bumper] its owner predicts.
 func _build_bump(_context: Dictionary, prefab: StringName, speed: float) -> Node:
 	var body := Node3D.new()

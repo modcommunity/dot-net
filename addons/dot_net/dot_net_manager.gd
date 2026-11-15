@@ -430,9 +430,7 @@ func client_tick(tick: int) -> void:
 
 
 ## One predicted tick for a host that records its own command and simulates it: the snapshots read since the last tick are reconciled first ([method flush_reconcile]), then every predicted entity is handed [param input] and simulated for [param tick].
-##
 ## Through the predictor, not around it: otherwise [member DotNetConfig.skip_matching_replays] has nothing to match and [method perf_counters] reports no predict time. (API 10.)
-##
 ## [param input] is only rounded to what the server decodes ([method DotNetInput.round_trip]), never neutralised: the prediction hold predicts on a copy, so the input may be sent before or after this call and the server, the buffered history and every replay run the same command.
 func predict_tick(tick: int, input: DotNetInput = null) -> void:
 	if not clock.is_synced():
