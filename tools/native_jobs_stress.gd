@@ -1,15 +1,8 @@
 extends Node
 
-## Hammers the native core's job pool: many begin_snapshot / submit_peer / finish_snapshot rounds
-## with tiny jobs and several workers, so a worker that has just finished its last job races the
-## main thread's reset for the next round. Before that reset was taken under the pool's lock it
-## could hand a worker a freed Job (a garbage Peer: SIGFPE in the interest pass, or a finish that
-## returned early with too few results).
-## Run: [code]res://tools/native_jobs_stress.tscn -- --rounds=300000 --workers=32 --peers=2[/code]
-## (more workers than cores, so a worker is preempted inside that window: the old build crashed
-## so on the PH build VM, the fixed one runs clean);
-## [code]--cfg=/abs/x.cfg[/code] loads another build of the library. Prints [code]STRESS {json}[/code],
-## exits 1 on any round with the wrong number of results.
+## Hammers the native core's job pool with tiny jobs on many workers, so a worker finishing its last job races the main thread's reset for the
+## next round (unlocked, that reset once handed a worker a freed Job). Run: [code]res://tools/native_jobs_stress.tscn -- --rounds=300000 --workers=32
+## --peers=2[/code] (more workers than cores); [code]--cfg=/abs/x.cfg[/code] loads another build. Prints [code]STRESS {json}[/code], exits 1 on a bad round.
 
 
 func _ready() -> void:

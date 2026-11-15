@@ -50,11 +50,9 @@ func read_bits(bits: int) -> int:
 		exhausted = true
 		return 0
 
-	# The bytes the field spans gathered into one int and shifted down once, rather than a
-	# masked chunk per byte: a snapshot reads thousands of fields a frame, and the per-byte
-	# loop with its static mask call was most of what the script reader cost. Fits whenever
-	# the field and its offset span at most 8 bytes, which is every field but a 57..64-bit one
-	# at an odd offset. An arithmetic shift of a top byte >= 0x80 fills bits the mask drops.
+	# The field's bytes gathered into one int and shifted down once, not a masked chunk per byte (that loop was most of the script reader's
+	# cost at thousands of fields a frame). Fits whenever field plus offset span at most 8 bytes: every field but a 57..64-bit one at an odd
+	# offset. An arithmetic shift of a top byte >= 0x80 fills bits the mask drops.
 	var offset := pos & 7
 	if offset + bits <= 64:
 		var index := pos >> 3

@@ -19,10 +19,9 @@ extends DotNetInterest
 ## subclass overrides the comparison in a way that needs real distances.
 @export var use_squared: bool = true
 
-## The map's potentially visible set: an entity in range is dropped when the map says nothing in the
-## observer's cluster could see anything in its cluster. Null (the default) is distance only. Owned and always-relevant
-## entities and [member always_tags] are never dropped. Cuts what a wall hides, which on an indoor map
-## smaller than [member radius] is the only thing that cuts anything. [method invalidate]s on change.
+## The map's potentially visible set: an in-range entity is dropped when nothing in the observer's cluster could see its cluster; null is
+## distance only. Owned, always-relevant and [member always_tags] entities are never dropped. Cuts what a wall hides (on an indoor map smaller
+## than [member radius] the only cut); [method invalidate]s on change.
 @export var visibility: DotNetVisibility = null:
 	set(value):
 		visibility = value
@@ -207,10 +206,9 @@ func scores_for(observer: DotNetIdentity, entities: Array, context: Dictionary) 
 	return out
 
 
-## Only this class itself with plain squared distances and no always-on tags: the cases the native
-## core ports line for line.
-## With [member visibility] on, only a core that has it ([code]DotNetNativeCore.visibility_supported[/code]);
-## an older binary leaves interest to GDScript rather than ignoring the walls.
+## Only this class itself with plain squared distances and no always-on tags: the cases the native core ports line for line. With
+## [member visibility] on, only a core that has it ([code]DotNetNativeCore.visibility_supported[/code]); an older binary leaves interest
+## to GDScript rather than ignoring the walls.
 func native_interest_ok() -> bool:
 	if not (_exact() and use_squared and always_tags.is_empty()):
 		return false

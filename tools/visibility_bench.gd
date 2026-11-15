@@ -1,11 +1,8 @@
 extends "res://tools/snapshot_bench.gd"
 
-## [code]snapshot_bench[/code] on a real map: every player and NPC walks between standing positions
-## sampled from the map, and [code]--vis=on[/code] gives the distance interest the map's
-## [DotNetVisibility]. The map comes from [code]tools/bsp_vis_export.py[/code]:
-## [code]res://tools/visibility_bench.tscn -- --map=/path/orange_x3_vis.json --vis=on --radius=200[/code].
-## Extra knob: [code]--audible=8[/code]. Prints [code]VIS {json}[/code] (the bake and
-## the share of position pairs it culls) before the bench's [code]BENCH {json}[/code].
+## [code]snapshot_bench[/code] on a real map: players and NPCs walk between sampled positions; [code]--vis=on[/code] adds the map's [DotNetVisibility]
+## (from tools/bsp_vis_export.py). Run: [code]res://tools/visibility_bench.tscn -- --map=/path/orange_x3_vis.json --vis=on --radius=200[/code]
+## [code]--audible=8[/code]. Prints [code]VIS {json}[/code] (bake, share culled) before [code]BENCH {json}[/code].
 
 var _map_path := ""
 var _vis_on := false

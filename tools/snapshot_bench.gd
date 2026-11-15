@@ -1,9 +1,8 @@
 extends Node
 
-## Snapshot cost on a scripted server: N peers each owning a predicted player, plus NPCs, moving
-## every tick. Run: [code]res://tools/snapshot_bench.tscn -- --peers=100 --npcs=213[/code]; [code]--hash[/code]
-## prints a digest of every payload sent, [code]BENCH {json}[/code] the result. [code]--no-sim-codec[/code]
-## keeps dot-sim's native state codec ([DotNetSimCodec]) off, for a with/without comparison.
+## Snapshot cost on a scripted server: N peers each owning a predicted player, plus NPCs, moving every tick. Run: [code]res://tools/snapshot_bench.tscn
+## -- --peers=100 --npcs=213[/code]; [code]--hash[/code] prints a digest of every payload, [code]BENCH {json}[/code] the result;
+## [code]--no-sim-codec[/code] keeps [DotNetSimCodec] off for a with/without comparison.
 
 class Player extends DotNetBehaviour:
 	var position := Vector3.ZERO

@@ -1,12 +1,8 @@
 class_name DotNetSimCodec
 extends RefCounted
-## dot-sim's native snapshot codec ([code]DotSimSnapshotCodec[/code], the [code]snapshot[/code]
-## module): [method DotNetBehaviour._encode] and [method DotNetBehaviour.read_state] in Rust,
-## bit for bit the bytes [DotNetVar] writes and the values it reads. Optional: with no dot-sim
-## library loaded (a plain web export, or a dlink one without dot-sim's side module), with
-## [member DotNetConfig.sim_codec] off or [member enabled] false, the GDScript codec runs, and a value the native one cannot reproduce exactly (a custom codec, a
-## string, a value of the wrong type) is still written and read by the script. See
-## docs/native.md.
+## dot-sim's native snapshot codec ([code]DotSimSnapshotCodec[/code]): [method DotNetBehaviour._encode] and [method DotNetBehaviour.read_state] in Rust,
+## bit for bit [DotNetVar]'s bytes and values. Optional: without dot-sim, with [member DotNetConfig.sim_codec] off or [member enabled] false the
+## GDScript codec runs, and a value the native one cannot reproduce (custom codec, string, wrong type) still goes through the script. docs/native.md.
 
 const CLASS := &"DotSimSnapshotCodec"
 
@@ -59,10 +55,9 @@ static func spec_row(declaration: DotNetVar, slot: int) -> PackedFloat64Array:
 	])
 
 
-## [method DotNetBehaviour._encode] for [param behaviour] in its codec: the same
-## [code][bytes, end bit, recorded, rate-limited properties][/code], or empty for the script to
-## encode (a value only the script writes, or a snapshot worker thread: workers can encode one
-## behaviour for two peers at once, and a codec has one scratch buffer).
+## [method DotNetBehaviour._encode] for [param behaviour] in its codec: the same [code][bytes, end bit, recorded, rate-limited properties][/code],
+## or empty for the script to encode (a value only the script writes, or a snapshot worker: workers can encode one behaviour for two peers
+## at once, and a codec has one scratch buffer).
 static func encode(behaviour: DotNetBehaviour, declarations: Array[DotNetVar], pad: int) -> Array:
 	if OS.get_thread_caller_id() != OS.get_main_thread_id():
 		return []

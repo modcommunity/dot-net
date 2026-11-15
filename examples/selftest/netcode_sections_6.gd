@@ -726,3 +726,41 @@ func _cover_stalls_ping() -> void:
 		burst.rtt_rejected() == 1)
 
 
+## A server holding fewer ticks than its rate (one whose ticks take longer than their time): the
+## client runs as many as it does, so the input lead and every replay stay short.
+func _check_server_pace() -> void:
+	var slow := _paced_run(0.75)
+	_check("against a server holding 75%% of its rate the clock follows its pace (%.3f)" % float(slow["pace"]),
+		absf(float(slow["pace"]) - 0.75) <= 0.02)
+	_check("and the input lead stays short (at most %d ticks ahead, %d snaps)" % [int(slow["lead_max"]), int(slow["snaps"])],
+		int(slow["lead_max"]) <= 12 and int(slow["snaps"]) == 0)
+	var nominal := _paced_run(1.0)
+	_check("a server holding its rate leaves the clock at the nominal pace (%.3f, at most %d ahead)"
+			% [float(nominal["pace"]), int(nominal["lead_max"])],
+		float(nominal["pace"]) == 1.0 and int(nominal["lead_max"]) <= 12)
+
+
+## 40 s of a hand-driven 60 Hz clock against a server ticking [param pace] of that, a snapshot per server tick echoing the latest command at once.
+## Returns the pace, the most ticks ahead of the server in the last 10 s, and the snaps after the first 10 s. The lead run up before the pace is
+## measured is given back at [constant DotNetClock.LEAD_RAISE_RATE]; at the nominal rate it never stops growing and snaps.
+func _paced_run(pace: float) -> Dictionary:
+	var clock := DotNetClock.new(60)
+	clock.follow_engine_time = false
+	clock.sync_from_server(100, 20.0)
+	var server_at := 100.0
+	var lead_max := 0
+	var snaps_at := 0
+	for f in 2400:
+		var _ticks := clock.advance(1.0 / 60.0)
+		if f == 600:
+			snaps_at = int(clock.describe()["snaps"])
+		var before := int(server_at)
+		server_at += pace
+		if int(server_at) == before:
+			continue
+		clock.sync_from_server(int(server_at), 20.0)
+		clock.note_input_lead(clock.tick, clock.tick - int(server_at))
+		if f > 1800:
+			lead_max = maxi(lead_max, clock.tick - int(server_at))
+	return {"pace": clock.server_pace(), "lead_max": lead_max,
+		"snaps": int(clock.describe()["snaps"]) - snaps_at}

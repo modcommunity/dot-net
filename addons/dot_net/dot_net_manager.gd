@@ -293,10 +293,9 @@ func step(delta: float) -> void:
 		ticked.emit(clock.tick)
 
 
-## Server side, read during a tick's simulate: whether this [method server_tick] ends by recording
-## history and sending a snapshot. Always true when snapshots are staggered (some peer is sent
-## every tick). A behaviour whose networked values only matter when they are sent can skip
-## writing them on the ticks this is false: dot-net reads them only when it records and sends.
+## Server side, read during a tick's simulate: whether this [method server_tick] ends by recording history and sending a snapshot (always
+## true when snapshots are staggered). A behaviour whose networked values only matter when sent can skip writing them on ticks this is
+## false: dot-net reads them only when it records and sends.
 func snapshot_due() -> bool:
 	var period := config.ticks_per_snapshot()
 	if config.stagger_snapshots and period > 1:

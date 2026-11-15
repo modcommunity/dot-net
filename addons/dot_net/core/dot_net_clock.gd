@@ -511,13 +511,9 @@ func _follow_arrival(sampled: int, anchor: bool) -> void:
 		_receive_slip += 1.0
 
 
-## Measures the server's pace ([member _pace]) from one snapshot carrying [param sampled]; a new
-## session ([param anchor]) starts over at the nominal rate.
-##
-## Per window of [constant PACE_WINDOW_SECONDS], the quickest arrival (the sampled tick furthest
-## ahead of nominal local time): a late packet never sets the pace. The pace is the median of the
-## last [constant PACE_WINDOWS] windows' gains between two quickest arrivals, followed below
-## [constant PACE_NOMINAL] until it is back above [constant PACE_RELEASE].
+## Measures the server's pace ([member _pace]) from one snapshot carrying [param sampled]; a new session ([param anchor]) starts at nominal.
+## Per [constant PACE_WINDOW_SECONDS] window, the quickest arrival (furthest ahead of nominal local time), so a late packet never sets it; the pace is
+## the median of the last [constant PACE_WINDOWS] windows' gains, followed below [constant PACE_NOMINAL] until back above [constant PACE_RELEASE].
 func _measure_pace(sampled: int, anchor: bool) -> void:
 	var at := Vector2(_nominal_ticks, float(sampled) - _nominal_ticks)
 	if not anchor and _pace_from.x >= 0.0 and absf(at.y - _pace_from.y) > float(snap_threshold_ticks()) \

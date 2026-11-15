@@ -1,10 +1,7 @@
 extends Node
 
-## [DotNetVisibility] and [DotNetInterestDistance] with it: the PVS row codec, hand-made rooms, a
-## one-plane BSP baked, the conservative answers (outside the bounds, inside solid, no data), the
-## tree and what the native core is handed, the per-snapshot cluster cache, the pins (owner, always-relevant, always_tags) and the audible radius, the switch, the
-## fast and the generic interest paths agreeing, and a save/load round trip. The native core's
-## agreement is checked by hash in [code]tools/visibility_bench.tscn[/code] (docs/testing.md).
+## [DotNetVisibility] and [DotNetInterestDistance] with it: PVS row codec, hand-made rooms, a one-plane BSP, conservative answers, the tree and native
+## hand-off, the cluster cache, pins and audible radius, the switch, fast vs generic paths, save/load. Native agreement: tools/visibility_bench.tscn.
 ## Run: [code]godot --headless --path . res://examples/visibility_selftest.tscn[/code]
 
 const SECTIONS := 7

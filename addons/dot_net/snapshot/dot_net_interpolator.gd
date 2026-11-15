@@ -575,11 +575,9 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 			behaviour._net_interpolated(int(server_tick))
 
 
-## [method apply] for every entity in [param identities], one frame. What [method apply] works
-## out per call (the render tick, the extrapolation cap, the ease settings) is the same for the
-## whole frame, so the native path works it out once and hands the library the whole frame;
-## the GDScript path calls [method apply] per entity. Draws the same as calling [method apply]
-## for each in turn. [method DotNetManager.interpolate_frame] calls this.
+## [method apply] for every entity in [param identities], one frame, drawing the same as calling it per entity. What [method apply] works out per call
+## (the render tick, the extrapolation cap, the ease settings) is the same for the whole frame, so the native path works it out once and hands the library
+## the whole frame; the GDScript path calls [method apply] per entity. [method DotNetManager.interpolate_frame] calls this.
 func apply_frame(identities: Array[DotNetIdentity], server_tick: float) -> void:
 	if _native == null:
 		for identity in identities:

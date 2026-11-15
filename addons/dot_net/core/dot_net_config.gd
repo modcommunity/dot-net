@@ -47,16 +47,13 @@ extends DotConfig
 ## Environment [code]DOT_NET_NATIVE_INTEREST=0[/code] or [code]--net-native-interest=false[/code] turns it off.
 @export var native_interest: bool = true
 
-## Encode and decode snapshot states in dot-sim's native codec ([DotNetSimCodec]) when the dot-sim
-## library is loaded: the same bytes and values, cheaper. The GDScript codec otherwise, and always on
-## the web. Covers what [member native] does not: a client's decode, and a server without dot-net's
-## own library. Environment [code]DOT_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code]
-## turns it off.
+## Encode and decode snapshot states in dot-sim's native codec ([DotNetSimCodec]) when dot-sim is loaded: same bytes and values, cheaper;
+## the GDScript codec otherwise and always on the web. Covers what [member native] does not (a client's decode, a server without dot-net's
+## library). [code]DOT_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code] turns it off.
 @export var sim_codec: bool = true
 
-## Draw remote entities in dot-sim's native interpolator ([code]DotSimInterpolator[/code]) when the
-## dot-sim library is loaded: the same values written, cheaper per frame. [DotNetInterpolator]'s
-## GDScript otherwise, and always on the web. Environment [code]DOT_NET_SIM_INTERP=0[/code] or
+## Draw remote entities in dot-sim's native interpolator ([code]DotSimInterpolator[/code]) when dot-sim is loaded: same values, cheaper
+## per frame; [DotNetInterpolator]'s GDScript otherwise and always on the web. [code]DOT_NET_SIM_INTERP=0[/code] or
 ## [code]--net-sim-interp=false[/code] turns it off.
 @export var sim_interp: bool = true
 
@@ -191,10 +188,9 @@ extends DotConfig
 ## without the others, so a lost part loses only what was in it (docs/wire.md#snapshot-parts).
 @export_range(256, 8192, 64) var mtu: int = 1200
 
-## The most parts one snapshot is cut into; what does not fit waits for the next snapshot. Default 16,
-## and 0 means the most the wire carries (also 16): the part trailer is four bits a field
-## ([constant DotNetManager.MAX_SNAPSHOT_PARTS]), so more would be a new wire format. A negative or a
-## value over 16 fails [method validate] instead of being clamped. (API 21.)
+## The most parts one snapshot is cut into; what does not fit waits for the next. 0 means the wire's most (16): the part trailer is four bits a
+## field ([constant DotNetManager.MAX_SNAPSHOT_PARTS]), so more would be a new wire format. A negative or over-16 value fails [method validate]
+## rather than being clamped. (API 21.)
 @export var max_snapshot_parts: int = 16
 
 ## Bytes per second sent to one client. 0 is unlimited. The budget interest management and

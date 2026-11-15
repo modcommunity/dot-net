@@ -355,12 +355,9 @@ func differs(old_value: Variant, new_value: Variant) -> bool:
 	return not _values_equal(old_value, new_value)
 
 
-## [param value] as a receiver reads it after the wire: written and read back, exactly.
-## What a server collides or rewinds against when a client predicts from the received copy.
-##
-## The range kinds (FLOAT_RANGE and the VECTOR3 ones) and BOOL are snapped directly, with the
-## writer's and reader's own arithmetic and no buffer: a server calls this per neighbour per tick
-## when it rewinds. Every other kind is written and read back.
+## [param value] as a receiver reads it after the wire, exactly: what a server collides or rewinds against when a client predicts from it.
+## The range kinds (FLOAT_RANGE, the VECTOR3 ones) and BOOL are snapped directly with the writer's and reader's own arithmetic and no buffer
+## (a server calls this per neighbour per tick when it rewinds); every other kind is written and read back.
 func wire_value(value: Variant) -> Variant:
 	match type:
 		Type.BOOL:

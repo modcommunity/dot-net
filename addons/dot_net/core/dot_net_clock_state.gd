@@ -166,11 +166,9 @@ const PACE_MIN := 0.5
 ## Windows the followed pace is the median of: one window across a server stall is not its pace.
 const PACE_WINDOWS := 3
 
-## The share of [member tick_rate] the server has been holding (one that cannot simulate a tick in
-## its time runs fewer of them), as the quickest snapshot arrivals measure it; 1.0 while it is
-## nominal. Local time and both timelines run at it: at the nominal rate against a slower server
-## the input lead and the receive timeline run away until the clock snaps, and every reconcile
-## replays the whole lead.
+## The share of [member tick_rate] the server has been holding (one that cannot simulate a tick in time runs fewer), as the quickest
+## snapshot arrivals measure it; 1.0 while nominal. Local time and both timelines run at it: at nominal against a slower server the
+## input lead and receive timeline run away until the clock snaps, and every reconcile replays the whole lead.
 var _pace: float = 1.0
 ## Local time at the nominal rate, never scaled by [member _pace]: what the pace is measured against.
 var _nominal_ticks: float = 0.0

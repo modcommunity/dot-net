@@ -2,20 +2,9 @@
 class_name DotNetVisibility
 extends Resource
 
-## A map's potentially visible set for snapshot interest: "could anything in the cluster at A see
-## anything in the cluster at B". A point's cluster is a walk down the map's BSP tree (one plane test
-## per level, about twenty on a mid-size map); the answer is one bit of a decoded PVS row.
-## [br][br]
-## [b]Conservative.[/b] The PVS is computed for whole clusters, so it only drops what no position in
-## either cluster can see. A point inside solid (cluster -1), outside [member bounds], or with no data
-## answers [code]true[/code]; the interest adds an audible radius on top
-## ([member DotNetInterestDistance.visibility_audible_radius]). Doors (area portals) are not modelled:
-## a closed door is treated as open. Server-side selection only: the wire format and the clients are
-## untouched.
-## [br][br]
-## From a BSP's visibility ([method bake_bsp], [method from_dot_map_mesh]) or hand-made rooms
-## ([method from_cells]); saved like any resource ([code]ResourceSaver[/code]). Read only once built, so
-## safe on the snapshot workers. Assign to [member DotNetInterestDistance.visibility].
+## A map's PVS for snapshot interest: could anything in A's cluster see anything in B's (a BSP walk, ~20 plane tests, then one bit of a PVS row).
+## [b]Conservative:[/b] only drops what no position in either cluster sees; solid, out of [member bounds] or no data answers true; doors count as open.
+## Server-side only. Built by [method bake_bsp], [method from_dot_map_mesh] or [method from_cells]; read-only once built (worker safe); a resource.
 
 ## Per plane nx, ny, nz, d in metres and Godot axes: a point is in front when n.p - d >= 0.
 @export var planes: PackedFloat32Array = PackedFloat32Array()
@@ -116,11 +105,9 @@ func describe() -> Dictionary:
 	}
 
 
-## Hand-made rooms on a grid: [param cell_cluster] is each cell's cluster (x fastest, then y, then z;
-## -1 solid), [param sees] per cluster the clusters it can see (an [code]Array[/code] or
-## [code]PackedInt32Array[/code] each; a cluster always sees itself, and seeing is made mutual). Builds a
-## tree that halves the grid along its longest side down to single cells; outside the grid answers
-## visible. For tests and for games that lay out their own rooms.
+## Hand-made rooms on a grid: [param cell_cluster] per cell (x fastest, then y, then z; -1 solid), [param sees] per cluster the clusters it
+## sees (Array or PackedInt32Array; itself always, made mutual). Builds a tree halving the grid's longest side down to cells; outside answers
+## visible. For tests and games that lay out their own rooms.
 static func from_cells(
 	grid_origin: Vector3, size: float, grid_dims: Vector3i, cell_cluster: PackedInt32Array, sees: Array
 ) -> DotNetVisibility:
@@ -174,11 +161,9 @@ func _split(grid_origin: Vector3, size: float, grid_dims: Vector3i, lo: Vector3i
 	return index
 
 
-## From a BSP's visibility, the arrays [code]DotMapBspMesh[/code]'s [code]vis[/code] record holds (metres,
-## Godot axes): [param map_planes] nx, ny, nz, d per plane, [param map_nodes] plane, front, back per node,
-## [param map_leaf_cluster] per leaf, [param pvs] the rows Quake-compressed (a zero byte, then how many
-## zero bytes) at [param pvs_offsets] per cluster (-1: sees everything), [param map_head] the root.
-## Milliseconds: the rows are decoded once, nothing is baked per position.
+## From a BSP's visibility, the arrays of [code]DotMapBspMesh[/code]'s [code]vis[/code] record (metres, Godot axes): [param map_planes] nx ny nz d,
+## [param map_nodes] plane front back, [param map_leaf_cluster] per leaf, [param pvs] Quake-compressed rows at [param pvs_offsets] (-1 sees all),
+## [param map_head] the root. Milliseconds: rows decoded once, nothing baked per position.
 static func bake_bsp(
 	map_planes: PackedFloat32Array, map_nodes: PackedInt32Array, map_leaf_cluster: PackedInt32Array,
 	cluster_count: int, pvs_offsets: PackedInt32Array, pvs: PackedByteArray, map_head: int,
