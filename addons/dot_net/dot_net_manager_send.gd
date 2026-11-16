@@ -239,7 +239,8 @@ func _send_snapshots_native(
 			job.acked_tick = int(_acks.get(peer_id, 0))
 			job.strict = bool(_ack_wired.get(peer_id, false))
 			job.remaining_bytes = budget.remaining(peer_id)
-			job.peer_budget = budget.for_peer(peer_id)
+			# Not for_peer: the core keeps this budget between snapshots (see the submit below).
+			job.peer_budget = budget.record(peer_id)
 			jobs.append(job)
 	elif workers > 0 and send_fn.is_valid():
 		for peer_id in _peers:
@@ -297,8 +298,16 @@ func _send_snapshots_native(
 			job.remaining_bytes, 1 if job.send_lead else 0, job.lead.x, job.lead.y,
 		])
 		if core_interest:
+			# The core keeps the budget from one snapshot to the next and loads it from the two
+			# dictionaries only when it does not hold it already; for_peer writes it back.
+			var peer_budget := job.peer_budget
+			var fresh := peer_budget._native != core
+			if fresh and peer_budget._native != null:
+				budget.for_peer(job.peer_id)
+			peer_budget._native = core
+			info.append(1 if fresh else 0)
 			core.submit_peer_interest(job.observer, info,
-				job.peer_budget.accumulators, job.peer_budget.starved_ticks)
+				peer_budget.accumulators, peer_budget.starved_ticks)
 		else:
 			core.submit_peer(job.ordered, info,
 				job.peer_budget.accumulators, job.peer_budget.starved_ticks)

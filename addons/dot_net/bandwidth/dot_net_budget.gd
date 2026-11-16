@@ -33,6 +33,11 @@ class PeerBudget extends RefCounted:
 	## edges rather than the condition. See [method DotNetBudget.begin_tick].
 	var was_starving: bool = false
 
+	## The DotNetNativeCore holding newer [member accumulators] and [member starved_ticks] than these
+	## two dictionaries (its native-interest builds keep them between snapshots), or null.
+	## [method DotNetBudget.for_peer] writes them back first.
+	var _native: Object = null
+
 	func _init(p_peer_id: int) -> void:
 		peer_id = p_peer_id
 		window_started_ms = Time.get_ticks_msec()
@@ -48,10 +53,24 @@ func _init(p_config: DotNetConfig) -> void:
 	config = p_config
 
 
+## The peer's record, with [member PeerBudget.accumulators] and [member PeerBudget.starved_ticks]
+## current (written back from the native core if it holds them).
 func for_peer(peer_id: int) -> PeerBudget:
-	if not _peers.has(peer_id):
-		_peers[peer_id] = PeerBudget.new(peer_id)
-	return _peers[peer_id]
+	var budget := record(peer_id)
+	if budget._native != null:
+		budget._native.export_budget(peer_id, budget.accumulators, budget.starved_ticks)
+		budget._native = null
+	return budget
+
+
+## The peer's record without writing the native core's budget back: for the counters only.
+## Its two dictionaries may be stale (see [member PeerBudget._native]).
+func record(peer_id: int) -> PeerBudget:
+	var budget: PeerBudget = _peers.get(peer_id)
+	if budget == null:
+		budget = PeerBudget.new(peer_id)
+		_peers[peer_id] = budget
+	return budget
 
 
 func forget_peer(peer_id: int) -> void:
@@ -186,7 +205,7 @@ func note_sent(peer_id: int, net_id: int, bytes: int) -> void:
 
 ## Records an entity that could not be sent this tick.
 func note_starved(peer_id: int) -> void:
-	var budget := for_peer(peer_id)
+	var budget := record(peer_id)
 	budget.starved_this_tick += 1
 	budget.total_starved += 1
 
@@ -196,7 +215,7 @@ func can_spend(peer_id: int, bytes: int) -> bool:
 	if config.per_client_budget <= 0:
 		return true
 
-	var budget := for_peer(peer_id)
+	var budget := record(peer_id)
 	_roll_window(budget)
 
 	return budget.bytes_this_second + bytes <= config.per_client_budget
@@ -209,7 +228,7 @@ func remaining(peer_id: int) -> int:
 		# megabyte is effectively unlimited for a single tick.
 		return 1 << 20
 
-	var budget := for_peer(peer_id)
+	var budget := record(peer_id)
 	_roll_window(budget)
 
 	return maxi(0, config.per_client_budget - budget.bytes_this_second)
@@ -220,14 +239,14 @@ func can_send_packet(peer_id: int) -> bool:
 	if config.per_client_packet_rate <= 0:
 		return true
 
-	var budget := for_peer(peer_id)
+	var budget := record(peer_id)
 	_roll_window(budget)
 
 	return budget.packets_this_second < config.per_client_packet_rate
 
 
 func note_packet(peer_id: int, bytes: int) -> void:
-	var budget := for_peer(peer_id)
+	var budget := record(peer_id)
 	_roll_window(budget)
 
 	budget.packets_this_second += 1
@@ -255,7 +274,7 @@ func _roll_window(budget: PeerBudget) -> void:
 
 ## Clears the per-tick starvation counter. Call at the start of each snapshot.
 func begin_tick(peer_id: int) -> void:
-	var budget := for_peer(peer_id)
+	var budget := record(peer_id)
 	var starving := budget.starved_this_tick > 0
 
 	if starving != budget.was_starving:
@@ -288,7 +307,7 @@ func describe_peer(peer_id: int) -> Dictionary:
 	if not _peers.has(peer_id):
 		return {}
 
-	var budget: PeerBudget = _peers[peer_id]
+	var budget := for_peer(peer_id)
 	_roll_window(budget)
 
 	return {

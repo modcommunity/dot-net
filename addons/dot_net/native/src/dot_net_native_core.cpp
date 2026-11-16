@@ -436,7 +436,7 @@ DotNetNativeCore::~DotNetNativeCore() {
 }
 
 int64_t DotNetNativeCore::abi_version() {
-	return 2;
+	return 3;
 }
 
 void DotNetNativeCore::_set_workers(int workers) {
@@ -770,6 +770,49 @@ Peer *DotNetNativeCore::_peer_for(int64_t peer_id) {
 	return it->second.get();
 }
 
+bool DotNetNativeCore::_load_budget(BudgetStore &store, const Dictionary &accumulators, const Dictionary &starved_ticks) {
+	store.clear();
+	store.loaded = true;
+	bool ok = true;
+	const Array acc_keys = accumulators.keys();
+	const Array acc_values = accumulators.values();
+	for (int64_t i = 0; i < acc_keys.size(); i++) {
+		const Variant &k = acc_keys[i];
+		if (k.get_type() != Variant::INT) {
+			ok = false;
+			continue;
+		}
+		store.set_acc(store.slot(int64_t(k)), double(acc_values[i]));
+	}
+	const Array starved_keys = starved_ticks.keys();
+	const Array starved_values = starved_ticks.values();
+	for (int64_t i = 0; i < starved_keys.size(); i++) {
+		const Variant &k = starved_keys[i];
+		if (k.get_type() != Variant::INT) {
+			ok = false;
+			continue;
+		}
+		store.set_starved(store.slot(int64_t(k)), int64_t(starved_values[i]));
+	}
+	return ok;
+}
+
+void DotNetNativeCore::export_budget(int64_t peer_id, Dictionary accumulators, Dictionary starved_ticks) {
+	ERR_FAIL_COND_MSG(_open, "DotNetNativeCore.export_budget inside a snapshot: the build threads are writing it.");
+	auto it = _peers.find(peer_id);
+	ERR_FAIL_COND_MSG(it == _peers.end() || !it->second->budget.loaded,
+			"DotNetNativeCore.export_budget: that peer's budget was never loaded here (forgotten, or another core holds it).");
+	const BudgetStore &store = it->second->budget;
+	accumulators.clear();
+	for (size_t s : store.acc_order) {
+		accumulators[store.ids[s]] = store.acc[s];
+	}
+	starved_ticks.clear();
+	for (size_t s : store.starved_order) {
+		starved_ticks[store.ids[s]] = store.starved[s];
+	}
+}
+
 void DotNetNativeCore::_queue(std::unique_ptr<Job> job) {
 	if (_workers == 0) {
 		_run_job(job.get());
@@ -817,7 +860,7 @@ void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array
 void DotNetNativeCore::submit_peer_interest(const Variant &observer, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks) {
 	ERR_FAIL_COND_MSG(!_open, "DotNetNativeCore.submit_peer_interest outside begin_snapshot/finish_snapshot.");
 	ERR_FAIL_COND_MSG(!_icfg.on, "DotNetNativeCore.submit_peer_interest without set_interest.");
-	ERR_FAIL_COND(info.size() < 8);
+	ERR_FAIL_COND_MSG(info.size() < 9, "DotNetNativeCore.submit_peer_interest: info needs the budget load flag (ABI 3).");
 	auto job = std::make_unique<Job>();
 	job->peer = _peer_for(info[0]);
 	job->acked_tick = info[1];
@@ -827,8 +870,17 @@ void DotNetNativeCore::submit_peer_interest(const Variant &observer, const Packe
 	job->send_lead = info[5] != 0;
 	job->lead_x = info[6];
 	job->lead_y = info[7];
-	job->accumulators = accumulators;
-	job->starved_ticks = starved_ticks;
+	BudgetStore &store = job->peer->budget;
+	if (info[8] != 0) {
+		if (!_load_budget(store, accumulators, starved_ticks)) {
+			// Queued all the same, so finish_snapshot still returns one result per submit.
+			ERR_PRINT("DotNetNativeCore.submit_peer_interest: a budget key is not an int net_id; that peer's budget starts empty.");
+		}
+	} else if (!store.loaded) {
+		ERR_PRINT("DotNetNativeCore.submit_peer_interest: load = 0 for a peer whose budget was never loaded (forgotten?); loading it now from dictionaries that may be stale.");
+		_load_budget(store, accumulators, starved_ticks);
+	}
+	job->store = &store;
 	job->interest = true;
 	Object *obs = observer;
 	if (obs != nullptr) {
@@ -1090,6 +1142,7 @@ void DotNetNativeCore::_interest_job(Job *job) {
 
 	const size_t count = relevant.size();
 	std::vector<int64_t> keys(count);
+	BudgetStore &store = *job->store;
 	{
 		int index_bits = 1;
 		while ((int64_t(1) << index_bits) < int64_t(count)) {
@@ -1098,15 +1151,15 @@ void DotNetNativeCore::_interest_job(Job *job) {
 		const int64_t low = (int64_t(1) << index_bits) - 1;
 		for (size_t i = 0; i < count; i++) {
 			IdRec *r = relevant[i];
-			Variant id = r->net_id;
-			int64_t waited = int64_t(job->starved_ticks.get(id, int64_t(0))) + 1;
-			job->starved_ticks[id] = waited;
-			double total = double(job->accumulators.get(id, 0.0)) + std::max(0.0, scores[i]);
+			const size_t s = store.slot(r->net_id);
+			int64_t waited = store.get_starved(s) + 1;
+			store.set_starved(s, waited);
+			double total = store.get_acc(s) + std::max(0.0, scores[i]);
 			if (waited > c.starvation_ticks) {
 				double over = double(waited - c.starvation_ticks);
 				total += over * over * c.starvation_weight;
 			}
-			job->accumulators[id] = total;
+			store.set_acc(s, total);
 			double value = std::max(0.0, total);
 			int64_t bits;
 			std::memcpy(&bits, &value, sizeof(bits));
@@ -1382,6 +1435,19 @@ void DotNetNativeCore::_run_job(Job *job) {
 	std::vector<View *> views;
 	const Variant zero_f = 0.0;
 	const Variant zero_i = int64_t(0);
+	BudgetStore *store = job->store;
+	// DotNetBudget.note_sent's two writes, into the store or the peer's dictionaries.
+	auto reset = [&](int64_t net_id) {
+		if (store != nullptr) {
+			const size_t s = store->slot(net_id);
+			store->set_acc(s, 0.0);
+			store->set_starved(s, 0);
+		} else {
+			const Variant key = net_id;
+			job->accumulators[key] = zero_f;
+			job->starved_ticks[key] = zero_i;
+		}
+	};
 
 	for (IdRec *identity : job->relevant) {
 		const bool predicted = identity->owner == peer_id && identity->shared;
@@ -1405,12 +1471,10 @@ void DotNetNativeCore::_run_job(Job *job) {
 			views.push_back(v);
 			anything = anything || m != 0;
 		}
-		const Variant key = identity->net_id;
 		if (job->compact && !anything) {
 			unchanged.push_back(identity->net_id);
 			unchanged_header_bits += ID_BITS + 6 + 6 * int64_t(identity->behaviours.size());
-			job->accumulators[key] = zero_f;
-			job->starved_ticks[key] = zero_i;
+			reset(identity->net_id);
 			continue;
 		}
 		int64_t estimated = 0;
@@ -1451,8 +1515,7 @@ void DotNetNativeCore::_run_job(Job *job) {
 		const int64_t spent = w->byte_length() - before;
 		remaining -= spent;
 		job->spent += spent;
-		job->accumulators[key] = zero_f;
-		job->starved_ticks[key] = zero_i;
+		reset(identity->net_id);
 		counts.back()++;
 		written++;
 	}
@@ -1672,6 +1735,7 @@ void DotNetNativeCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("submit_peer_interest", "observer", "info", "accumulators", "starved_ticks"), &DotNetNativeCore::submit_peer_interest);
 	ClassDB::bind_method(D_METHOD("finish_snapshot"), &DotNetNativeCore::finish_snapshot);
 	ClassDB::bind_method(D_METHOD("forget_peer", "peer_id"), &DotNetNativeCore::forget_peer);
+	ClassDB::bind_method(D_METHOD("export_budget", "peer_id", "accumulators", "starved_ticks"), &DotNetNativeCore::export_budget);
 	ClassDB::bind_method(D_METHOD("forget_view", "behaviour", "peer_id"), &DotNetNativeCore::forget_view);
 	ClassDB::bind_method(D_METHOD("view_snapshot", "behaviour", "peer_id"), &DotNetNativeCore::view_snapshot);
 	ClassDB::bind_method(D_METHOD("view_state", "behaviour", "peer_id"), &DotNetNativeCore::view_state);

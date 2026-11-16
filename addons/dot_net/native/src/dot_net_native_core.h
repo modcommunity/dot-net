@@ -213,9 +213,63 @@ struct View {
 	}
 };
 
+// A peer's DotNetBudget.PeerBudget accumulators and starved_ticks, held here between snapshots of the
+// native-interest path so the build threads read and write plain numbers instead of Godot Dictionaries.
+// Each key keeps its first insertion's place, as a Dictionary does, so export() rebuilds the same
+// dictionaries the GDScript path would hold. A key read but never set is not exported (Dictionary.get).
+struct BudgetStore {
+	enum : uint8_t { HAS_ACC = 1, HAS_STARVED = 2 };
+	std::unordered_map<int64_t, size_t> slots;
+	std::vector<int64_t> ids;
+	std::vector<double> acc;
+	std::vector<int64_t> starved;
+	std::vector<uint8_t> has;
+	std::vector<size_t> acc_order;
+	std::vector<size_t> starved_order;
+	// Whether the GDScript side handed this store its dictionaries (submit's load flag) since it was made.
+	bool loaded = false;
+
+	void clear() {
+		slots.clear();
+		ids.clear();
+		acc.clear();
+		starved.clear();
+		has.clear();
+		acc_order.clear();
+		starved_order.clear();
+	}
+	size_t slot(int64_t id) {
+		auto [it, inserted] = slots.try_emplace(id, ids.size());
+		if (inserted) {
+			ids.push_back(id);
+			acc.push_back(0.0);
+			starved.push_back(0);
+			has.push_back(0);
+		}
+		return it->second;
+	}
+	double get_acc(size_t s) const { return (has[s] & HAS_ACC) ? acc[s] : 0.0; }
+	int64_t get_starved(size_t s) const { return (has[s] & HAS_STARVED) ? starved[s] : 0; }
+	void set_acc(size_t s, double v) {
+		if (!(has[s] & HAS_ACC)) {
+			has[s] |= HAS_ACC;
+			acc_order.push_back(s);
+		}
+		acc[s] = v;
+	}
+	void set_starved(size_t s, int64_t v) {
+		if (!(has[s] & HAS_STARVED)) {
+			has[s] |= HAS_STARVED;
+			starved_order.push_back(s);
+		}
+		starved[s] = v;
+	}
+};
+
 struct Peer {
 	int64_t id = 0;
 	PeerInterest interest;
+	BudgetStore budget;
 	std::vector<std::unique_ptr<View>> views;
 	View *view(int index) {
 		if (index >= int(views.size())) {
@@ -240,6 +294,8 @@ struct Job {
 	int64_t lead_y = 0;
 	godot::Dictionary accumulators;
 	godot::Dictionary starved_ticks;
+	// The peer's BudgetStore, which replaces the two dictionaries (native interest only), or null.
+	BudgetStore *store = nullptr;
 	// Native interest: the build ranks its own candidates (see DotNetNativeCore::_interest_job).
 	bool interest = false;
 	bool has_observer = false;
@@ -320,6 +376,7 @@ class DotNetNativeCore : public RefCounted {
 	void _interest_job(dotnet::Job *job);
 	static std::shared_ptr<const dotnet::VisTree> _vis_tree(const Dictionary &d, const std::shared_ptr<const dotnet::VisTree> &kept);
 	dotnet::Peer *_peer_for(int64_t peer_id);
+	static bool _load_budget(dotnet::BudgetStore &store, const Dictionary &accumulators, const Dictionary &starved_ticks);
 	void _queue(std::unique_ptr<dotnet::Job> job);
 	bool _take_and_run();
 
@@ -354,8 +411,13 @@ public:
 	/// Marks every peer's cached relevance as old (what a test does to DotNetInterest._cache's at_ms).
 	void expire_interest();
 	/// submit_peer for a peer whose candidates the library works out: [param observer] is its entity or null,
-	/// [param info] as submit_peer's.
+	/// [param info] as submit_peer's plus a load flag. The budget lives in the library between snapshots:
+	/// with load = 1 it is read from the two dictionaries first; with 0 the library's copy is newer than them
+	/// and they are not touched (export_budget writes them back).
 	void submit_peer_interest(const Variant &observer, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks);
+	/// Rewrites [param accumulators] and [param starved_ticks] with the library's budget of [param peer_id],
+	/// keys in the order the dictionaries would have them. Outside a snapshot only.
+	void export_budget(int64_t peer_id, Dictionary accumulators, Dictionary starved_ticks);
 	/// Waits for every queued build and returns one result per peer, in submission order:
 	/// [peer_id, payloads, entity counts, starved, spent, split, unchanged_listed, unchanged_saved,
 	/// leads_sent, oversize net id or -1, oversize bytes, entities relevant before the cap].

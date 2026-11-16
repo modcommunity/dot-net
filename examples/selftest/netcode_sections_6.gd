@@ -286,7 +286,8 @@ func _test_native() -> void:
 
 	# Interest in the library too (DotNetConfig.native_interest): the same entities chosen, ranked and
 	# thinned for every peer (a payload carries exactly the chosen entities, in order), the same budgets.
-	for variant: String in ["", "coded", "thin", "cache"]:
+	# "held" reads the budgets every tenth tick only, so the library keeps them across ticks between.
+	for variant: String in ["", "coded", "thin", "cache", "held"]:
 		var serial: Dictionary = _threads_scenario("NativeInterest" + variant + "Off", 0, false, variant)
 		var name := variant if variant != "" else "base"
 		for run: Array in [["inline", 0], ["three workers", 3]]:
@@ -300,11 +301,16 @@ func _test_native() -> void:
 					and _first_difference(serial["payloads"], other["payloads"]) == ""
 					and _first_difference(serial["normal_states"], other["normal_states"]) == "")
 
-	for workers: int in [0, 3]:
+	# With interest in the library as well, the budgets it held are handed back when it is turned off.
+	for run: Array in [[0, false], [3, false], [0, true], [3, true]]:
+		var workers: int = run[0]
+		var with_interest: bool = run[1]
 		var forgot: Dictionary = _threads_scenario("NativeToggleOff%d" % workers, workers, false, "toggle")
-		var toggled: Dictionary = _threads_scenario("NativeToggleOn%d" % workers, workers, false, "toggle", true)
-		_check("native on and off mid-game, %d workers: everything resent at each switch %s" % [
-				workers, _first_difference(forgot["payloads"], toggled["payloads"])],
+		var toggled: Dictionary = _threads_scenario(
+			"NativeToggleOn%d%s" % [workers, "i" if with_interest else ""], workers, false, "toggle", true, with_interest)
+		_check("native%s on and off mid-game, %d workers: everything resent at each switch %s" % [
+				" with interest" if with_interest else "", workers,
+				_first_difference(forgot["payloads"], toggled["payloads"])],
 			not loaded or (_first_difference(forgot["payloads"], toggled["payloads"]) == ""
 				and _first_difference(forgot["normal_states"], toggled["normal_states"]) == ""))
 

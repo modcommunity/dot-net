@@ -679,8 +679,11 @@ func _threads_scenario(
 
 		# The budget's window is a wall-clock second, which one run can cross at a different
 		# tick from another; hold it open and roll it every ten ticks instead.
+		# "held" leaves the accumulators where they are (a native core keeps them across ticks
+		# until for_peer asks) and reads them every tenth tick only.
+		var held := variant == "held"
 		for i in PEERS:
-			var w := host.budget.for_peer(2 + i)
+			var w := host.budget.record(2 + i) if held else host.budget.for_peer(2 + i)
 			w.window_started_ms = Time.get_ticks_msec()
 			if tick % 10 == 1:
 				w.bytes_this_second = 0
@@ -714,6 +717,12 @@ func _threads_scenario(
 		var state := []
 		var normal := []
 		for i in PEERS:
+			if held and tick % 10 != 0:
+				var r := host.budget.record(2 + i)
+				starved += r.starved_this_tick
+				state.append([r.starved_this_tick, r.bytes_this_second])
+				normal.append([r.starved_this_tick, r.bytes_this_second])
+				continue
 			var b := host.budget.for_peer(2 + i)
 			starved += b.starved_this_tick
 			state.append([b.accumulators, b.starved_ticks, b.bytes_this_second])
