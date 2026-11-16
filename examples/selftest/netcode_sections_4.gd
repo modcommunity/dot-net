@@ -1,4 +1,4 @@
-extends "netcode_sections_3.gd"
+extends "netcode_remote_bump_checks.gd"
 
 ## Sections of netcode_demo.gd, moved unchanged; part 4 of 7.
 
