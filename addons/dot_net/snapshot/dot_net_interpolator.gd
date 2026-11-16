@@ -28,6 +28,10 @@ class Track extends RefCounted:
 	## The two samples the last drawn frame extrapolated from, or empty when it was
 	## between two samples. See [method DotNetInterpolator._ease_resume].
 	var ahead_from: Array[Dictionary] = []
+	## The settled skip's reference ([member DotNetConfig.skip_settled_interp]): the draw written in
+	## [member drawn_frame], emptied by [method push] (its snapshot hooks may have written over it).
+	var drawn: Dictionary = {}
+	var drawn_frame: int = -1
 
 	func _init(p_net_id: int) -> void:
 		net_id = p_net_id
@@ -36,6 +40,7 @@ class Track extends RefCounted:
 		# Out-of-order arrivals are normal on an unreliable channel. Inserting in
 		# tick order rather than appending means the bracket search stays a simple
 		# scan, and a late packet still contributes rather than being discarded.
+		drawn = {}
 		var entry := {
 			"tick": tick,
 			"at_ms": Time.get_ticks_msec(),
@@ -132,6 +137,10 @@ var _native: Object = null
 ## only has the per-entity [code]apply[/code].
 var _native_all := false
 
+## [method apply_frame] calls, for [member DotNetConfig.skip_settled_interp]; and the entities it left alone.
+var _frame: int = 0
+var _settled: int = 0
+
 
 func _init(p_config: DotNetConfig) -> void:
 	config = p_config
@@ -140,6 +149,8 @@ func _init(p_config: DotNetConfig) -> void:
 	if native_enabled and config.sim_interp and not OS.has_feature("web") and ClassDB.class_exists(NATIVE_CLASS):
 		_native = ClassDB.instantiate(NATIVE_CLASS)
 		_native_all = ClassDB.class_has_method(NATIVE_CLASS, &"apply_all")
+		if config.skip_settled_interp and ClassDB.class_has_method(NATIVE_CLASS, &"set_settled_skip"):
+			_native.set_settled_skip(true)
 
 
 ## Whether [method apply] draws in dot-sim's library.
@@ -537,6 +548,11 @@ static func _blend_value(from_value: Variant, to_value: Variant, alpha: float) -
 ##
 ## Only properties declared [member DotNetVar.interpolate] are written here; the rest were applied when the snapshot arrived.
 func apply(identity: DotNetIdentity, server_tick: float) -> void:
+	_apply(identity, server_tick, -1)
+
+
+## [method apply]; with [param frame] at or above 0, the settled skip of [member DotNetConfig.skip_settled_interp].
+func _apply(identity: DotNetIdentity, server_tick: float, frame: int) -> void:
 	if identity == null or identity.is_predicted():
 		# A predicted entity is driven by prediction, not by interpolation. Writing
 		# interpolated state over it would fight the predictor every frame.
@@ -557,6 +573,12 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 	var behaviours := identity.behaviours
 	if not _plan_fits(track, behaviours):
 		_build_plan(track, behaviours)
+	elif frame >= 0 and track.drawn_frame == frame - 1 and not track.drawn.is_empty() and track.drawn == values:
+		track.drawn_frame = frame
+		_settled += 1
+		return
+	track.drawn = values if frame >= 0 else {}
+	track.drawn_frame = frame
 
 	for b in range(behaviours.size()):
 		var behaviour := behaviours[b]
@@ -579,9 +601,13 @@ func apply(identity: DotNetIdentity, server_tick: float) -> void:
 ## (the render tick, the extrapolation cap, the ease settings) is the same for the whole frame, so the native path works it out once and hands the library
 ## the whole frame; the GDScript path calls [method apply] per entity. [method DotNetManager.interpolate_frame] calls this.
 func apply_frame(identities: Array[DotNetIdentity], server_tick: float) -> void:
+	var frame := -1
+	if config.skip_settled_interp:
+		_frame += 1
+		frame = _frame
 	if _native == null:
 		for identity in identities:
-			apply(identity, server_tick)
+			_apply(identity, server_tick, frame)
 		return
 
 	var native := _native
@@ -735,11 +761,17 @@ func extrapolation_count() -> int:
 	return _extrapolations + (_native.extrapolation_count() as int if _native != null else 0)
 
 
+## Entities [method apply_frame] left alone as settled ([member DotNetConfig.skip_settled_interp]).
+func settled_count() -> int:
+	return _settled + (_native.settled_count() as int if _native != null and _native.has_method(&"settled_count") else 0)
+
+
 ## Zeroes the counters above, so a probe can measure one window of its own.
 func reset_counts() -> void:
 	_samples = 0
 	_stalls = 0
 	_extrapolations = 0
+	_settled = 0
 	if _native != null:
 		_native.reset_counts()
 

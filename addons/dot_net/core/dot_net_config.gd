@@ -57,6 +57,11 @@ extends DotConfig
 ## [code]--net-sim-interp=false[/code] turns it off.
 @export var sim_interp: bool = true
 
+## Leave a remote entity alone for a frame when its interpolated draw equals what was written the frame before and no
+## snapshot arrived since: no writes, no [method DotNetBehaviour._net_interpolated]. Only for games whose hook just
+## copies the interpolated values (an idle crowd stops costing per frame). Off by default.
+@export var skip_settled_interp: bool = false
+
 ## Ticks a client's input timeline runs ahead of the server, beyond half the RTT.
 ##
 ## See [DotNetClock]. Higher costs input latency and reduces late commands.

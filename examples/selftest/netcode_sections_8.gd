@@ -144,6 +144,53 @@ func _interpolation_notifies() -> void:
 	)
 
 
+func _interpolation_settled_skip() -> void:
+	# DotNetConfig.skip_settled_interp: a draw equal to last frame's is not written again, until a snapshot
+	# arrives or a frame is missed. Off, every frame writes, as before.
+	var was_native := DotNetInterpolator.native_enabled
+	DotNetInterpolator.native_enabled = false
+	for skip: bool in [false, true]:
+		var config := DotNetConfig.new()
+		config.adaptive_interpolation = false
+		config.interpolation_buffer = 2.0
+		config.skip_settled_interp = skip
+		var watcher := Interpolated.new()
+		watcher.name = "Net"
+		var host := Node3D.new()
+		host.name = "Settled%s" % skip
+		add_child(host)
+		host.add_child(watcher)
+		var watched := DotNetIdentity.new()
+		watched.name = "Identity"
+		watched.owner_peer_id = 5
+		host.add_child(watched)
+		DotNetRegistry.new(false, 1).register(watched, 78, 0, config)
+		var live := DotNetInterpolator.new(config)
+		live.push(78, 100, {"position": Vector3(3, 0, 0)})
+		live.push(78, 110, {"position": Vector3(3, 0, 0)})
+		var frame: Array[DotNetIdentity] = [watched]
+		live.apply_frame(frame, 107.0)
+		live.apply_frame(frame, 108.0)
+		live.apply_frame(frame, 109.0)
+		var held := watcher.notifications
+		_check("settled skip %s: a still entity is written %d of 3 frames" % [skip, held], held == (1 if skip else 3))
+		_check("settled skip %s: counted (%d)" % [skip, live.settled_count()], live.settled_count() == (2 if skip else 0))
+		watcher.position = Vector3(9, 9, 9)
+		live.push(78, 120, {"position": Vector3(3, 0, 0)})
+		live.apply_frame(frame, 110.0)
+		_check("settled skip %s: a snapshot wakes it (x=%.1f)" % [skip, watcher.position.x], watcher.position == Vector3(3, 0, 0))
+		live.push(78, 130, {"position": Vector3(13, 0, 0)})
+		live.apply_frame(frame, 131.0)
+		var moved := watcher.position
+		live.apply_frame(frame, 133.0)
+		_check("settled skip %s: a moving entity is written every frame" % skip, watcher.position != moved)
+		watcher.position = Vector3(9, 9, 9)
+		live.apply(watched, 133.0)
+		_check("settled skip %s: apply always writes" % skip, watcher.position != Vector3(9, 9, 9))
+		host.queue_free()
+	DotNetInterpolator.native_enabled = was_native
+
+
 func _interpolation_value_at(interpolator: DotNetInterpolator) -> void:
 	# value_at: the drawn value at an absolute render tick, counting nothing, never extrapolating.
 	var counted := interpolator.sample_count()
@@ -274,6 +321,7 @@ func _test_interpolation() -> void:
 	)
 
 	_interpolation_notifies()
+	_interpolation_settled_skip()
 
 	_check_render_timeline()
 

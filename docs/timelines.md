@@ -111,6 +111,8 @@ A client's timelines move in whole ticks in three places, and anything drawn fro
 
 It deliberately carries none of `_net_state_applied`'s bookkeeping: its tick is a render tick, and recording it as the newest state applied would make reconciliation rewind to a tick the server never sent. A predicted entity is never notified, because writing interpolated state over a prediction fights the predictor every frame.
 
+**`DotNetConfig.skip_settled_interp` skips a settled entity** (off by default). With it on, `apply_frame` (GDScript or dot-sim) skips both the writes and `_net_interpolated` for an entity whose drawn values equal the ones it wrote on the frame before, which is the case for one standing still. Any push clears the record, and the receive path pushes after `_net_state_applied`. A direct `apply` always writes. Turn it on only when every `_net_interpolated` merely copies the interpolated properties onto the node and nothing else writes that node between frames. `settled_count()` counts the skips.
+
 ## Open: jitter and loss
 
 Found by game-fatal-contact's `headless_lossy` through the UDP relay, not fixed:
