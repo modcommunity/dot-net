@@ -489,12 +489,15 @@ void DotNetNativeCore::_worker_loop() {
 			job = _jobs[_next_job++].get();
 		}
 		_run_job(job);
-		{
-			std::lock_guard<std::mutex> lock(_mutex);
-			_done_jobs++;
-		}
+		_mark_done(job);
 		_done_cv.notify_all();
 	}
+}
+
+void DotNetNativeCore::_mark_done(Job *job) {
+	std::lock_guard<std::mutex> lock(_mutex);
+	job->done = true;
+	_done_jobs++;
 }
 
 bool DotNetNativeCore::_take_and_run() {
@@ -507,10 +510,7 @@ bool DotNetNativeCore::_take_and_run() {
 		job = _jobs[_next_job++].get();
 	}
 	_run_job(job);
-	{
-		std::lock_guard<std::mutex> lock(_mutex);
-		_done_jobs++;
-	}
+	_mark_done(job);
 	return true;
 }
 
@@ -769,9 +769,11 @@ void DotNetNativeCore::begin_snapshot(const Array &identities, const PackedInt64
 		_jobs.clear();
 		_next_job = 0;
 		_done_jobs = 0;
+		_taken = 0;
 	}
 	_open = true;
 	_last_build_usec = 0;
+	_last_wait_usec = 0;
 	_last_read_usec = usec_now() - started;
 }
 
@@ -833,6 +835,7 @@ void DotNetNativeCore::export_budget(int64_t peer_id, Dictionary accumulators, D
 void DotNetNativeCore::_queue(std::unique_ptr<Job> job) {
 	if (_workers == 0) {
 		_run_job(job.get());
+		job->done = true;
 		std::lock_guard<std::mutex> lock(_mutex);
 		_jobs.push_back(std::move(job));
 		_next_job = _jobs.size();
@@ -1214,6 +1217,70 @@ void DotNetNativeCore::_interest_job(Job *job) {
 	job->relevant = std::move(relevant);
 }
 
+Array DotNetNativeCore::_result(Job *job) {
+	_last_build_usec += job->usec;
+	Array payloads;
+	for (const std::vector<uint8_t> &p : job->payloads) {
+		PackedByteArray bytes;
+		bytes.resize(int64_t(p.size()));
+		if (!p.empty()) {
+			memcpy(bytes.ptrw(), p.data(), p.size());
+		}
+		payloads.push_back(bytes);
+	}
+	PackedInt32Array counts;
+	for (int32_t c : job->counts) {
+		counts.push_back(c);
+	}
+	Array r;
+	r.push_back(job->peer->id);
+	r.push_back(payloads);
+	r.push_back(counts);
+	r.push_back(job->starved);
+	r.push_back(job->spent);
+	r.push_back(job->split);
+	r.push_back(job->unchanged_listed);
+	r.push_back(job->unchanged_saved);
+	r.push_back(job->leads_sent);
+	r.push_back(job->oversize_id);
+	r.push_back(job->oversize_bytes);
+	r.push_back(job->cap_count);
+	return r;
+}
+
+Array DotNetNativeCore::take_ready() {
+	Array out;
+	ERR_FAIL_COND_V_MSG(!_open, out, "DotNetNativeCore.take_ready outside begin_snapshot/finish_snapshot.");
+	const int64_t started = usec_now();
+	std::vector<Job *> ready;
+	while (true) {
+		{
+			std::lock_guard<std::mutex> lock(_mutex);
+			if (_taken >= _jobs.size() || _jobs[_taken]->done) {
+				break;
+			}
+		}
+		// The next peer is still being built: build a later one here meanwhile, or wait for it.
+		if (!_take_and_run()) {
+			std::unique_lock<std::mutex> lock(_mutex);
+			_done_cv.wait(lock, [this] { return _jobs[_taken]->done; });
+			break;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+		while (_taken < _jobs.size() && _jobs[_taken]->done) {
+			ready.push_back(_jobs[_taken++].get());
+		}
+	}
+	_last_wait_usec += usec_now() - started;
+	// Each job is final once done and no worker touches it again, so it is read outside the lock.
+	for (Job *job : ready) {
+		out.push_back(_result(job));
+	}
+	return out;
+}
+
 Array DotNetNativeCore::finish_snapshot() {
 	Array out;
 	if (!_open) {
@@ -1226,46 +1293,22 @@ Array DotNetNativeCore::finish_snapshot() {
 		std::unique_lock<std::mutex> lock(_mutex);
 		_done_cv.wait(lock, [this] { return _done_jobs >= _jobs.size(); });
 	}
-	_last_wait_usec = usec_now() - started;
+	_last_wait_usec += usec_now() - started;
 	// Taken out under the lock, see begin_snapshot: a worker that has just counted its last job
 	// still reads _next_job and _jobs.size() in its wait predicate.
 	std::vector<std::unique_ptr<Job>> jobs;
+	size_t taken = 0;
 	{
 		std::lock_guard<std::mutex> lock(_mutex);
 		jobs.swap(_jobs);
+		taken = _taken;
 		_next_job = 0;
 		_done_jobs = 0;
+		_taken = 0;
 	}
-	for (auto &jp : jobs) {
-		Job *job = jp.get();
-		_last_build_usec += job->usec;
-		Array payloads;
-		for (const std::vector<uint8_t> &p : job->payloads) {
-			PackedByteArray bytes;
-			bytes.resize(int64_t(p.size()));
-			if (!p.empty()) {
-				memcpy(bytes.ptrw(), p.data(), p.size());
-			}
-			payloads.push_back(bytes);
-		}
-		PackedInt32Array counts;
-		for (int32_t c : job->counts) {
-			counts.push_back(c);
-		}
-		Array r;
-		r.push_back(job->peer->id);
-		r.push_back(payloads);
-		r.push_back(counts);
-		r.push_back(job->starved);
-		r.push_back(job->spent);
-		r.push_back(job->split);
-		r.push_back(job->unchanged_listed);
-		r.push_back(job->unchanged_saved);
-		r.push_back(job->leads_sent);
-		r.push_back(job->oversize_id);
-		r.push_back(job->oversize_bytes);
-		r.push_back(job->cap_count);
-		out.push_back(r);
+	// The peers take_ready has not handed back already.
+	for (size_t i = taken; i < jobs.size(); i++) {
+		out.push_back(_result(jobs[i].get()));
 	}
 	_open = false;
 	return out;
@@ -1762,6 +1805,7 @@ void DotNetNativeCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("expire_interest"), &DotNetNativeCore::expire_interest);
 	ClassDB::bind_method(D_METHOD("submit_peer_interest", "observer", "info", "accumulators", "starved_ticks"), &DotNetNativeCore::submit_peer_interest);
 	ClassDB::bind_method(D_METHOD("finish_snapshot"), &DotNetNativeCore::finish_snapshot);
+	ClassDB::bind_method(D_METHOD("take_ready"), &DotNetNativeCore::take_ready);
 	ClassDB::bind_method(D_METHOD("forget_peer", "peer_id"), &DotNetNativeCore::forget_peer);
 	ClassDB::bind_method(D_METHOD("export_budget", "peer_id", "accumulators", "starved_ticks"), &DotNetNativeCore::export_budget);
 	ClassDB::bind_method(D_METHOD("forget_view", "behaviour", "peer_id"), &DotNetNativeCore::forget_view);

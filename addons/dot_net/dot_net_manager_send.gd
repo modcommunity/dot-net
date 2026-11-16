@@ -240,7 +240,7 @@ func _send_snapshots_native(
 			job.acked_ring = acked_ring(peer_id)
 			job.strict = bool(_ack_wired.get(peer_id, false))
 			job.remaining_bytes = budget.remaining(peer_id)
-			# Not for_peer: the core keeps this budget between snapshots (see the submit below).
+			# Not for_peer: the core keeps this budget between snapshots (see _submit_native).
 			job.peer_budget = budget.record(peer_id)
 			jobs.append(job)
 	elif workers > 0 and send_fn.is_valid():
@@ -295,68 +295,94 @@ func _send_snapshots_native(
 	var submit_started := Time.get_ticks_usec()
 	_snapshot_interest_usec_total += submit_started - interest_started
 	for job in jobs:
-		var info := PackedInt64Array([
-			job.peer_id, job.acked_tick, 1 if job.strict else 0, 1 if job.compact else 0,
-			job.remaining_bytes, 1 if job.send_lead else 0, job.lead.x, job.lead.y,
-		])
-		if core_interest:
-			# The core keeps the budget from one snapshot to the next and loads it from the two
-			# dictionaries only when it does not hold it already; for_peer writes it back.
-			var peer_budget := job.peer_budget
-			var fresh := peer_budget._native != core
-			if fresh and peer_budget._native != null:
-				budget.for_peer(job.peer_id)
-			peer_budget._native = core
-			info.append(1 if fresh else 0)
-			_append_ring(info, job.acked_ring)
-			core.submit_peer_interest(job.observer, info,
-				peer_budget.accumulators, peer_budget.starved_ticks)
-		else:
-			_append_ring(info, job.acked_ring)
-			core.submit_peer(job.ordered, info,
-				job.peer_budget.accumulators, job.peer_budget.starved_ticks)
+		_submit_native(core, job, core_interest)
 	var started := Time.get_ticks_usec()
 	_snapshot_submit_usec_total += started - submit_started
-	var results: Array = core.finish_snapshot()
-	_snapshot_join_usec = Time.get_ticks_usec() - started
-	_snapshot_join_usec_total += _snapshot_join_usec
-
+	var applied := 0
+	var apply_usec := 0
+	_snapshot_join_usec = 0
+	if workers > 0 and core.has_method(&"take_ready"):
+		# Each peer is sent as soon as it and every peer before it are built, so the sends overlap
+		# the later peers' builds; the order and the bytes are those of the one-batch path below.
+		while applied < jobs.size():
+			var ready: Array = core.take_ready()
+			var got_at := Time.get_ticks_usec()
+			_snapshot_join_usec += got_at - started
+			if ready.is_empty():
+				break
+			for r: Array in ready:
+				_apply_native_result(jobs[applied], r, core_interest, context)
+				applied += 1
+			started = Time.get_ticks_usec()
+			apply_usec += started - got_at
+	# Closes the snapshot: every result take_ready did not hand back (all of them without workers).
+	var rest: Array = core.finish_snapshot()
 	var applying := Time.get_ticks_usec()
-	for i in results.size():
-		var job := jobs[i]
-		var r: Array = results[i]
-		var peer_id := job.peer_id
+	_snapshot_join_usec += applying - started
+	_snapshot_join_usec_total += _snapshot_join_usec
+	for r: Array in rest:
+		_apply_native_result(jobs[applied], r, core_interest, context)
+		applied += 1
+	_snapshot_apply_usec_total += apply_usec + Time.get_ticks_usec() - applying
+	return applied
+
+
+## Queues one peer's build in the native core (built at once without workers).
+func _submit_native(core: Object, job: SnapshotJob, core_interest: bool) -> void:
+	var info := PackedInt64Array([
+		job.peer_id, job.acked_tick, 1 if job.strict else 0, 1 if job.compact else 0,
+		job.remaining_bytes, 1 if job.send_lead else 0, job.lead.x, job.lead.y,
+	])
+	if core_interest:
+		# The core keeps the budget from one snapshot to the next and loads it from the two
+		# dictionaries only when it does not hold it already; for_peer writes it back.
 		var peer_budget := job.peer_budget
-		if core_interest:
-			interest.note_cap(peer_id, int(r[11]), config.entity_cap(), context)
-		elif not job.answer.is_empty():
-			interest.commit_relevance(peer_id, job.answer)
-			interest.note_cap(peer_id, job.cap_count, config.entity_cap(), context)
-		peer_budget.starved_this_tick += int(r[3])
-		peer_budget.total_starved += int(r[3])
-		peer_budget.bytes_this_second += int(r[4])
-		if bool(r[5]):
-			snapshots_split += 1
-		unchanged_listed += int(r[6])
-		unchanged_bytes_saved += int(r[7])
-		input_leads_sent += int(r[8])
-		if not _warned_oversize and int(r[9]) >= 0:
-			_warned_oversize = true
-			var big := registry.get_identity(int(r[9]))
-			DotLog.warn(CHANNEL, "an entity's state alone is bigger than the snapshot MTU; it is sent oversized", {
-				"net_id": int(r[9]), "prefab": str(big.prefab_id) if big != null else "",
-				"bytes": int(r[10]), "mtu": config.mtu,
-			})
-		var payloads: Array = r[1]
-		var counts: PackedInt32Array = r[2]
-		for index in payloads.size():
-			var payload: PackedByteArray = payloads[index]
-			send_fn.call(peer_id, payload, DotNetMessage.Delivery.UNRELIABLE)
-			largest_part_bytes = maxi(largest_part_bytes, payload.size())
-			budget.note_packet(peer_id, payload.size())
-			stats.note_sent(payload.size(), counts[index])
-	_snapshot_apply_usec_total += Time.get_ticks_usec() - applying
-	return results.size()
+		var fresh := peer_budget._native != core
+		if fresh and peer_budget._native != null:
+			budget.for_peer(job.peer_id)
+		peer_budget._native = core
+		info.append(1 if fresh else 0)
+		_append_ring(info, job.acked_ring)
+		core.submit_peer_interest(job.observer, info,
+			peer_budget.accumulators, peer_budget.starved_ticks)
+	else:
+		_append_ring(info, job.acked_ring)
+		core.submit_peer(job.ordered, info,
+			job.peer_budget.accumulators, job.peer_budget.starved_ticks)
+
+
+## Sends one peer's native build result and records it, as [method _send_snapshots_native] gets them.
+func _apply_native_result(job: SnapshotJob, r: Array, core_interest: bool, context: Dictionary) -> void:
+	var peer_id := job.peer_id
+	var peer_budget := job.peer_budget
+	if core_interest:
+		interest.note_cap(peer_id, int(r[11]), config.entity_cap(), context)
+	elif not job.answer.is_empty():
+		interest.commit_relevance(peer_id, job.answer)
+		interest.note_cap(peer_id, job.cap_count, config.entity_cap(), context)
+	peer_budget.starved_this_tick += int(r[3])
+	peer_budget.total_starved += int(r[3])
+	peer_budget.bytes_this_second += int(r[4])
+	if bool(r[5]):
+		snapshots_split += 1
+	unchanged_listed += int(r[6])
+	unchanged_bytes_saved += int(r[7])
+	input_leads_sent += int(r[8])
+	if not _warned_oversize and int(r[9]) >= 0:
+		_warned_oversize = true
+		var big := registry.get_identity(int(r[9]))
+		DotLog.warn(CHANNEL, "an entity's state alone is bigger than the snapshot MTU; it is sent oversized", {
+			"net_id": int(r[9]), "prefab": str(big.prefab_id) if big != null else "",
+			"bytes": int(r[10]), "mtu": config.mtu,
+		})
+	var payloads: Array = r[1]
+	var counts: PackedInt32Array = r[2]
+	for index in payloads.size():
+		var payload: PackedByteArray = payloads[index]
+		send_fn.call(peer_id, payload, DotNetMessage.Delivery.UNRELIABLE)
+		largest_part_bytes = maxi(largest_part_bytes, payload.size())
+		budget.note_packet(peer_id, payload.size())
+		stats.note_sent(payload.size(), counts[index])
 
 
 ## Snapshots for every peer on this phase, built on [param workers] threads and sent from here in

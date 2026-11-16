@@ -320,6 +320,8 @@ struct Job {
 	int64_t oversize_id = -1;
 	int64_t oversize_bytes = 0;
 	int64_t usec = 0;
+	// Built: set under DotNetNativeCore::_mutex once the payloads above are final.
+	bool done = false;
 };
 
 } // namespace dotnet
@@ -350,6 +352,8 @@ class DotNetNativeCore : public RefCounted {
 	std::vector<std::unique_ptr<dotnet::Job>> _jobs;
 	size_t _next_job = 0;
 	size_t _done_jobs = 0;
+	// Jobs already handed back by take_ready, a prefix of _jobs.
+	size_t _taken = 0;
 	std::mutex _mutex;
 	std::condition_variable _work_cv;
 	std::condition_variable _done_cv;
@@ -385,6 +389,8 @@ class DotNetNativeCore : public RefCounted {
 	static bool _load_budget(dotnet::BudgetStore &store, const Dictionary &accumulators, const Dictionary &starved_ticks);
 	void _queue(std::unique_ptr<dotnet::Job> job);
 	bool _take_and_run();
+	void _mark_done(dotnet::Job *job);
+	Array _result(dotnet::Job *job);
 
 	uint64_t _collect(dotnet::View &view, const dotnet::BehRec &rec, int64_t peer_id, bool until_acked) const;
 	void _write_state(dotnet::BitWriter &w, dotnet::View &view, const dotnet::BehRec &rec, uint64_t mask) const;
@@ -430,6 +436,12 @@ public:
 	/// [peer_id, payloads, entity counts, starved, spent, split, unchanged_listed, unchanged_saved,
 	/// leads_sent, oversize net id or -1, oversize bytes, entities relevant before the cap].
 	Array finish_snapshot();
+	/// The results of the next built peers in submission order, as finish_snapshot gives them: waits
+	/// (building one itself meanwhile) until the first peer not yet taken is built, then returns it and
+	/// every peer after it that is built too. Empty once every peer is taken. Lets the caller send
+	/// earlier peers while the workers build later ones; finish_snapshot still closes the snapshot and
+	/// returns whatever is left.
+	Array take_ready();
 
 	void forget_peer(int64_t peer_id);
 	/// Forgets one behaviour's record of one peer (-1: every peer).
