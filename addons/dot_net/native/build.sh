@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds the optional native snapshot core into bin/. Usage: ./build.sh [debug|release|all] [extra scons args]
-# Needs git, python3 and a C++17 compiler. DOT_NET_NATIVE_CACHE (default ~/.cache/dot-net-native) holds godot-cpp and objects.
+# Needs git, python3 and a C++17 compiler. GS_NET_NATIVE_CACHE (default ~/.cache/dot-net-native) holds godot-cpp and objects.
 set -euo pipefail
 GODOT_CPP_COMMIT=8070599885b6df675fcad033dd032ce44be2b850
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cache="${DOT_NET_NATIVE_CACHE:-$HOME/.cache/dot-net-native}"
+cache="${GS_NET_NATIVE_CACHE:-${DOT_NET_NATIVE_CACHE:-$HOME/.cache/dot-net-native}}"
 which="${1:-all}"; shift || true
 mkdir -p "$cache"
 if [ ! -d "$cache/godot-cpp/.git" ]; then
@@ -26,7 +26,7 @@ case "$which" in
 	all) ;;
 	*) echo "usage: $0 [debug|release|all] [scons args]" >&2; exit 2 ;;
 esac
-jobs="${DOT_NET_NATIVE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
+jobs="${GS_NET_NATIVE_JOBS:-${DOT_NET_NATIVE_JOBS:-$(nproc 2>/dev/null || echo 2)}}"
 for target in "${targets[@]}"; do
 	"$scons_bin" -C "$here" -j"$jobs" target="$target" godot_cpp="$cache/godot-cpp" build_dir="$cache/obj" \
 		build_profile="$here/build_profile.json" "$@"

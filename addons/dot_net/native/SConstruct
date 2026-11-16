@@ -2,8 +2,8 @@
 # Builds the optional server-side snapshot core. Run through build.sh, which fetches the pinned godot-cpp.
 import os
 
-godot_cpp = ARGUMENTS.pop("godot_cpp", os.environ.get("DOT_NET_GODOT_CPP", "godot-cpp"))
-build_dir = ARGUMENTS.pop("build_dir", os.environ.get("DOT_NET_BUILD_DIR", "build"))
+godot_cpp = ARGUMENTS.pop("godot_cpp", os.environ.get("GS_NET_GODOT_CPP", os.environ.get("DOT_NET_GODOT_CPP", "godot-cpp")))
+build_dir = ARGUMENTS.pop("build_dir", os.environ.get("GS_NET_BUILD_DIR", os.environ.get("DOT_NET_BUILD_DIR", "build")))
 env = SConscript(os.path.join(godot_cpp, "SConstruct"), {"api_version": "4.7"})
 
 # Bit-exact floats against GDScript: no fused multiply-add, no host-specific instruction sets.

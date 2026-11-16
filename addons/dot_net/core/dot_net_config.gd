@@ -34,26 +34,26 @@ extends DotConfig
 
 ## Build server snapshots in the optional native library ([DotNetNative]): the same bytes, several
 ## times cheaper; falls back to GDScript where it cannot load. See docs/native.md.
-## Environment [code]DOT_NET_NATIVE[/code], command line [code]--net-native[/code].
+## Environment [code]GS_NET_NATIVE[/code], command line [code]--net-native[/code].
 @export var native: bool = true
 
 ## Where the native library's [code].cfg[/code] is; empty is the addon's own
 ## ([code]addons/dot_net/native/dot_net_native.cfg[/code]), then [code]dot_net_native/[/code] next
-## to the executable. Environment [code]DOT_NET_NATIVE_PATH[/code].
+## to the executable. Environment [code]GS_NET_NATIVE_PATH[/code].
 @export var native_path: String = ""
 
 ## With [member native], also run [DotNetInterestDistance]'s selection and the budget's ordering in
 ## the library: the same bytes, a third of the tick at 100 clients. Ignored for any other strategy.
-## Environment [code]DOT_NET_NATIVE_INTEREST=0[/code] or [code]--net-native-interest=false[/code] turns it off.
+## Environment [code]GS_NET_NATIVE_INTEREST=0[/code] or [code]--net-native-interest=false[/code] turns it off.
 @export var native_interest: bool = true
 
 ## Encode and decode snapshot states in dot-sim's native codec ([DotNetSimCodec]) when dot-sim is loaded: same bytes and values, cheaper;
 ## the GDScript codec otherwise and always on the web. Covers what [member native] does not (a client's decode, a server without dot-net's
-## library). [code]DOT_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code] turns it off.
+## library). [code]GS_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code] turns it off.
 @export var sim_codec: bool = true
 
 ## Draw remote entities in dot-sim's native interpolator ([code]DotSimInterpolator[/code]) when dot-sim is loaded: same values, cheaper
-## per frame; [DotNetInterpolator]'s GDScript otherwise and always on the web. [code]DOT_NET_SIM_INTERP=0[/code] or
+## per frame; [DotNetInterpolator]'s GDScript otherwise and always on the web. [code]GS_NET_SIM_INTERP=0[/code] or
 ## [code]--net-sim-interp=false[/code] turns it off.
 @export var sim_interp: bool = true
 

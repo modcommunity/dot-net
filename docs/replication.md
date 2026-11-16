@@ -99,7 +99,7 @@ What is left after that is the game half of the tick, not the network.
 
 ## Snapshots on worker threads
 
-`DotNetConfig.snapshot_workers` (default 0, off; -1 is the processor count less one, at most eight; environment `DOT_NET_SNAPSHOT_WORKERS`, command line `--net-snapshot-workers`) builds each peer's snapshot on dot-core's `DotParallel`, a fork/join on the engine's worker pool that returns inside the tick. Most of a big server's snapshot time is per peer and independent, so it divides by the workers; everything else in the tick stays on the main thread.
+`DotNetConfig.snapshot_workers` (default 0, off; -1 is the processor count less one, at most eight; environment `GS_NET_SNAPSHOT_WORKERS`, command line `--net-snapshot-workers`) builds each peer's snapshot on dot-core's `DotParallel`, a fork/join on the engine's worker pool that returns inside the tick. Most of a big server's snapshot time is per peer and independent, so it divides by the workers; everything else in the tick stays on the main thread.
 
 How it stays the same answer:
 
