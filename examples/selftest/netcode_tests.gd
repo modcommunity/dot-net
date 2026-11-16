@@ -372,6 +372,22 @@ func _check_interest_thinning(config: DotNetConfig, observer: DotNetIdentity, al
 		_check("far_coherent %s: two peers %s the same far turns" % [coherent, "share" if coherent else "stagger"],
 			same == coherent)
 
+	# Aim cone: band 2 (4, at 9000 m along +x) keeps band 1's rate while the observer looks at it.
+	thin.aim_cone_deg = 5.0
+	for aim: Vector3 in [Vector3.RIGHT, Vector3.LEFT, Vector3.ZERO]:
+		observer.interest_aim = aim
+		seen = {}
+		for snap in 8:
+			var ctx := {"tick": snap * config.ticks_per_snapshot(), "config": config}
+			var kept: Array = []
+			thin.thin_into(kept, observer, thin.relevant_for(observer, all, 1, ctx), 1, ctx)
+			for identity: DotNetIdentity in kept:
+				seen[identity.net_id] = int(seen.get(identity.net_id, 0)) + 1
+		var looked := aim == Vector3.RIGHT
+		_check("aim cone, aim %s: band 2 one in %d, band 1 still one in 4 (%s)" % [aim, 4 if looked else 8, seen],
+			int(seen.get(2, 0)) == 8 and int(seen.get(3, 0)) == 2 and int(seen.get(4, 0)) == (2 if looked else 1))
+	thin.aim_cone_deg = 0.0
+
 
 ## The two entity caps combine to the tighter one.
 func _check_entity_caps() -> void:

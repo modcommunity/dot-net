@@ -65,6 +65,11 @@ signal became_owner()
 ## replicate props to spectators".
 @export var interest_tags: PackedStringArray = PackedStringArray()
 
+## Where this identity looks, as a unit vector, when it observes: inside
+## [member DotNetInterest.aim_cone_deg] of it, far entities keep the first band's rate. The game
+## sets it on its observers each tick (a player's view); zero is no aim.
+var interest_aim: Vector3 = Vector3.ZERO
+
 ## Relative priority when bandwidth is short. Higher is sent first.
 @export_range(0.0, 100.0, 0.5) var priority: float = 1.0
 

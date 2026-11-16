@@ -225,6 +225,7 @@ func native_config(config: DotNetConfig) -> Dictionary:
 		"on": true, "radius": radius, "radius_by_tag": radius_by_tag,
 		"interval": evaluation_interval_sec, "far_every": far_every, "far_distance": far_distance,
 		"far_by_tag": far_distance_by_tag, "far_coherent": far_coherent, "far_tiers": far_tiers,
+		"aim_cone_deg": aim_cone_deg,
 		"ticks_per_snapshot": config.ticks_per_snapshot(), "cap": config.entity_cap(),
 		"send_budget": config.peer_send_budget, "invalidation": invalidation_serial,
 		"vis": visibility.native_dict() if _visibility_on() else {},

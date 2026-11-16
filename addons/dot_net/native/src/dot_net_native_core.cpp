@@ -453,7 +453,7 @@ DotNetNativeCore::~DotNetNativeCore() {
 }
 
 int64_t DotNetNativeCore::abi_version() {
-	return 4;
+	return 5;
 }
 
 void DotNetNativeCore::_set_workers(int workers) {
@@ -907,6 +907,7 @@ void DotNetNativeCore::submit_peer_interest(const Variant &observer, const Packe
 		job->has_observer = true;
 		job->obs_pos = Vector3(obs->call("world_position"));
 		job->obs_owner = obs->get("owner_peer_id");
+		job->obs_aim = Vector3(obs->get("interest_aim"));
 	}
 	_queue(std::move(job));
 }
@@ -933,6 +934,8 @@ void DotNetNativeCore::set_interest(const Dictionary &cfg) {
 		c.far_distance = double(cfg.get("far_distance", 0.0));
 		c.far_coherent = bool(cfg.get("far_coherent", false));
 		c.far_tiers = int64_t(cfg.get("far_tiers", 1));
+		const double cone = double(cfg.get("aim_cone_deg", 0.0));
+		c.aim_cos = cone > 0.0 ? std::cos(cone * M_PI / 180.0) : 1.0;
 		c.ticks_per_snapshot = std::max<int64_t>(1, int64_t(cfg.get("ticks_per_snapshot", 1)));
 		c.cap = int64_t(cfg.get("cap", 0));
 		c.send_budget = int64_t(cfg.get("send_budget", 0));
@@ -1096,6 +1099,7 @@ void DotNetNativeCore::_interest_job(Job *job) {
 		if (!c.far_coherent) {
 			index += job->peer->id;
 		}
+		const bool aimed = c.aim_cos < 1.0 && job->obs_aim != Vector3();
 		std::vector<IdRec *> kept;
 		kept.reserve(relevant.size());
 		for (IdRec *r : relevant) {
@@ -1118,6 +1122,11 @@ void DotNetNativeCore::_interest_job(Job *job) {
 					break;
 				}
 				every <<= 1;
+			}
+			// Inside the observer's aim cone a far entity keeps the first band's rate.
+			if (every > c.far_every && aimed
+					&& double(job->obs_aim.dot(r->pos - job->obs_pos)) >= c.aim_cos * std::sqrt(d2)) {
+				every = c.far_every;
 			}
 			if (turn % every == 0) {
 				kept.push_back(r);

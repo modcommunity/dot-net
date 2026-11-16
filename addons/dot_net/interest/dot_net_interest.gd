@@ -36,6 +36,11 @@ const CHANNEL := "net.interest"
 ## With a power-of-two [member far_every] and [member far_coherent] the bands nest, so they still share.
 @export_range(1, 4, 1) var far_tiers: int = 1
 
+## Degrees either side of the observer's [member DotNetIdentity.interest_aim] inside which a far
+## entity never drops past the first band: it still goes every [member far_every], however far.
+## What a scoped shooter looks at keeps enough samples for lag compensation. 0 is off.
+@export_range(0.0, 180.0, 0.5) var aim_cone_deg: float = 0.0
+
 ## How fast the default [method _score] falls with distance: [code]priority / (1 + d * this)[/code].
 ## Under [member DotNetConfig.peer_send_budget] an entity's share of snapshots follows its score,
 ## so 0.1 sends one 100 m away about a tenth as often as one at your feet.
@@ -123,6 +128,8 @@ func thin_into(out: Array, observer: DotNetIdentity, relevant: Array, peer_id: i
 	if not far_coherent:
 		index += peer_id
 	var here := observer.world_position()
+	var aim := observer.interest_aim
+	var aim_cos := cos(deg_to_rad(aim_cone_deg)) if aim_cone_deg > 0.0 and aim != Vector3.ZERO else 1.0
 	for identity: DotNetIdentity in relevant:
 		var turn := index + identity.net_id
 		if identity.owner_peer_id == observer.owner_peer_id or turn % far_every == 0 and far_tiers == 1:
@@ -140,8 +147,16 @@ func thin_into(out: Array, observer: DotNetIdentity, relevant: Array, peer_id: i
 			if d2 <= limit:
 				break
 			every <<= 1
+		if every > far_every and aim_cos < 1.0 and _in_cone(here, aim, aim_cos, identity.world_position(), d2):
+			every = far_every
 		if turn % every == 0:
 			out.append(identity)
+
+
+## Whether [param there] lies within the cone of cosine [param cos_limit] around the unit
+## [param aim] from [param here], [param d2] being their squared distance apart.
+static func _in_cone(here: Vector3, aim: Vector3, cos_limit: float, there: Vector3, d2: float) -> bool:
+	return aim.dot(there - here) >= cos_limit * sqrt(d2)
 
 
 func _far_distance_for(entity: DotNetIdentity) -> float:
@@ -523,6 +538,7 @@ func describe() -> Dictionary:
 		"far_distance": far_distance,
 		"far_coherent": far_coherent,
 		"far_tiers": far_tiers,
+		"aim_cone_deg": aim_cone_deg,
 		"cached_observers": _cache.size(),
 		"capped_observers": _cap_state.values().filter(
 			func(state: Dictionary) -> bool: return state["capped"]

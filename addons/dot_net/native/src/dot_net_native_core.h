@@ -171,6 +171,8 @@ struct InterestCfg {
 	std::vector<std::pair<godot::String, double>> far_by_tag;
 	bool far_coherent = false;
 	int64_t far_tiers = 1;
+	// cos of DotNetInterest.aim_cone_deg; 1 is off.
+	double aim_cos = 1.0;
 	int64_t ticks_per_snapshot = 1;
 	int64_t cap = 0;
 	int64_t send_budget = 0;
@@ -303,6 +305,8 @@ struct Job {
 	bool has_observer = false;
 	godot::Vector3 obs_pos;
 	int64_t obs_owner = -1;
+	// The observer's DotNetIdentity.interest_aim (unit, or zero for none).
+	godot::Vector3 obs_aim;
 	int64_t cap_count = 0;
 	// Out.
 	std::vector<std::vector<uint8_t>> payloads;

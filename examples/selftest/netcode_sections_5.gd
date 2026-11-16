@@ -598,6 +598,8 @@ func _threads_scenario(
 		distance.far_every = 3
 		distance.far_distance = 6.0
 		distance.far_tiers = 2
+		# And an aim cone: each peer's own looks a different way (set where they spawn).
+		distance.aim_cone_deg = 40.0
 		host.config.peer_send_budget = 4
 	var rich := variant == "cache" or variant == "grid" or variant == "coded"
 	if rich:
@@ -643,6 +645,8 @@ func _threads_scenario(
 		spawned.interest_linger_sec = 1.0e6 if rich else 0.0
 		# Two always-relevant entities: the pinned path under a cache hit.
 		spawned.always_relevant = rich and i >= PEERS and i < PEERS + 2
+		if variant == "thin" and i < PEERS:
+			spawned.interest_aim = Vector3(cos(float(i)), 0.0, sin(float(i)))
 		behaviours.append(spawned.behaviours[0] as Counted)
 
 	var states: Array = []
