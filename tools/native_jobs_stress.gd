@@ -32,7 +32,7 @@ func _ready() -> void:
 		core.call(&"set_interest", {})
 		core.call(&"begin_snapshot", empty, PackedInt64Array([r + 1, r * 8, 1200, 0, workers, 1]))
 		for p in peers:
-			core.call(&"submit_peer", empty, PackedInt64Array([p + 2, 0, 0, 0, 1200, 0, 0, 0]), {}, {})
+			core.call(&"submit_peer", empty, PackedInt64Array([p + 2, 0, 0, 0, 1200, 0, 0, 0, 0]), {}, {})
 		var out: Array = core.call(&"finish_snapshot")
 		if out.size() != peers:
 			bad += 1

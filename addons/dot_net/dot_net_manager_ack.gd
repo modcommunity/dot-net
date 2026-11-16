@@ -62,6 +62,7 @@ func receive_ack(peer_id: int, tick: int) -> DotResult:
 
 	if tick > int(_acks.get(peer_id, 0)):
 		_acks[peer_id] = tick
+	_note_acked(peer_id, tick)
 
 	return DotResult.success(int(_acks[peer_id]))
 

@@ -164,6 +164,7 @@ func stop() -> void:
 	_peers.clear()
 	_input_buffers.clear()
 	_acks.clear()
+	_acked_rings.clear()
 	_ack_wired.clear()
 	_peer_added_tick.clear()
 	_starved_ticks.clear()
@@ -201,6 +202,7 @@ func add_peer(peer_id: int) -> void:
 	_peers.append(peer_id)
 	_input_buffers[peer_id] = DotNetInput.Buffer.new(config.input_history_ticks)
 	_acks[peer_id] = 0
+	_acked_rings.erase(peer_id)
 	_ack_wired[peer_id] = false
 	_peer_added_tick[peer_id] = _last_snapshot_tick
 	_starved_ticks[peer_id] = 0
@@ -223,6 +225,7 @@ func remove_peer(peer_id: int) -> Array[DotNetIdentity]:
 	_peers.erase(peer_id)
 	_input_buffers.erase(peer_id)
 	_acks.erase(peer_id)
+	_acked_rings.erase(peer_id)
 	_ack_wired.erase(peer_id)
 	_peer_added_tick.erase(peer_id)
 	_starved_ticks.erase(peer_id)

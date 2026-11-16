@@ -286,6 +286,8 @@ struct Job {
 	Peer *peer = nullptr;
 	std::vector<IdRec *> relevant;
 	int64_t acked_tick = 0;
+	// DotNetManager.acked_ring: tick t acked when acked_ring[t % size] == t; empty = none.
+	std::vector<int64_t> acked_ring;
 	bool strict = false;
 	bool compact = false;
 	bool send_lead = false;
@@ -401,7 +403,8 @@ public:
 	/// [param params]: tick, now_ms, mtu, oldest pending tick, workers, Authority.SHARED's value.
 	void begin_snapshot(const Array &identities, const PackedInt64Array &params);
 	/// Queues one peer's build. [param info]: peer_id, acked_tick, strict, compact, remaining bytes,
-	/// send_lead, lead.x, lead.y. The budget dictionaries are the peer's own and are written by the build.
+	/// send_lead, lead.x, lead.y, then the acked ring (ABI 4): its size n and n ticks
+	/// (DotNetManager.acked_ring). The budget dictionaries are the peer's own and are written by the build.
 	void submit_peer(const Array &relevant, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks);
 	/// Native interest (off unless [param cfg] has on = true): DotNetInterestDistance's relevance, thinning,
 	/// scores, entity cap and the budget's accumulator order, run by the build itself. Call before begin_snapshot.
@@ -411,7 +414,8 @@ public:
 	/// Marks every peer's cached relevance as old (what a test does to DotNetInterest._cache's at_ms).
 	void expire_interest();
 	/// submit_peer for a peer whose candidates the library works out: [param observer] is its entity or null,
-	/// [param info] as submit_peer's plus a load flag. The budget lives in the library between snapshots:
+	/// [param info] as submit_peer's with a load flag
+	/// at index 8 and the acked ring after it. The budget lives in the library between snapshots:
 	/// with load = 1 it is read from the two dictionaries first; with 0 the library's copy is newer than them
 	/// and they are not touched (export_budget writes them back).
 	void submit_peer_interest(const Variant &observer, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks);

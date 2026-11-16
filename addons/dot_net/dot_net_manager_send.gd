@@ -237,6 +237,7 @@ func _send_snapshots_native(
 				and messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
 			job.compact = messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
 			job.acked_tick = int(_acks.get(peer_id, 0))
+			job.acked_ring = acked_ring(peer_id)
 			job.strict = bool(_ack_wired.get(peer_id, false))
 			job.remaining_bytes = budget.remaining(peer_id)
 			# Not for_peer: the core keeps this budget between snapshots (see the submit below).
@@ -284,6 +285,7 @@ func _send_snapshots_native(
 				and messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_INPUT_LEAD)
 			job.compact = messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
 			job.acked_tick = int(_acks.get(peer_id, 0))
+			job.acked_ring = acked_ring(peer_id)
 			job.strict = bool(_ack_wired.get(peer_id, false))
 			job.remaining_bytes = budget.remaining(peer_id)
 			job.peer_budget = budget.for_peer(peer_id)
@@ -306,9 +308,11 @@ func _send_snapshots_native(
 				budget.for_peer(job.peer_id)
 			peer_budget._native = core
 			info.append(1 if fresh else 0)
+			_append_ring(info, job.acked_ring)
 			core.submit_peer_interest(job.observer, info,
 				peer_budget.accumulators, peer_budget.starved_ticks)
 		else:
+			_append_ring(info, job.acked_ring)
 			core.submit_peer(job.ordered, info,
 				job.peer_budget.accumulators, job.peer_budget.starved_ticks)
 	var started := Time.get_ticks_usec()
@@ -468,3 +472,9 @@ func _build_chunk(jobs: Array[SnapshotJob], chunk: int, chunks: int, tick: int) 
 		build.cap_count = job.cap_count
 		out.append(build)
 	return out
+
+
+## The acked ring in native submit info (ABI 4): its size, then its ticks.
+static func _append_ring(info: PackedInt64Array, ring: PackedInt64Array) -> void:
+	info.append(ring.size())
+	info.append_array(ring)

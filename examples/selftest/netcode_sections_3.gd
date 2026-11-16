@@ -40,12 +40,13 @@ func _test_acked_baselines() -> void:
 	var limited := _acked_rate_limit()
 	var lonely := _acked_lost_property()
 	var untracked := _acked_untracked()
+	var thinned := _acked_thinned()
 	_check("peer 7 has a record", not shared.peer_view_state(7).is_empty())
 	shared.forget_peer(7)
 	_check("and it is gone once the peer is", shared.peer_view_state(7).is_empty())
 	_check("without disturbing peer 8", not shared.peer_view_state(8).is_empty())
 
-	for entity in [first, limited, lonely, untracked]:
+	for entity in [first, limited, lonely, untracked, thinned]:
 		_out_of_tree(entity)
 
 
@@ -97,6 +98,41 @@ func _acked_lost_property() -> DotNetIdentity:
 	)
 	_check("and nothing that did arrive is re-sent", owed_again.size() == 1)
 	return lonely
+
+
+## Far rings: an entity left out of snapshots 110..130 is synced only when it is collected again,
+## by when the newest ack is 130. Its sends at 100 and 110 were acked on their own ticks, so the
+## acked ring promotes them; only the newest ack would have read them as lost and resent both.
+func _acked_thinned() -> DotNetIdentity:
+	var thinned := _make_entity(&"player", 0)
+	add_child(thinned.get_parent())
+	var far := thinned.behaviours[0] as Movement
+	far._bind(DotNetConfig.new())
+	far.sync_peer_acks(7, 1, true)
+
+	var ring := PackedInt64Array()
+	ring.resize(64)
+	ring.fill(-1)
+	far.write_state(DotNetWriter.new(), far.collect_dirty(7, true), 7, 100)
+	ring[100 % 64] = 100
+	far.health = 42
+	far.write_state(DotNetWriter.new(), far.collect_dirty(7, false), 7, 110)
+	far.position = Vector3(9, 0, 0)
+	far.write_state(DotNetWriter.new(), far.collect_dirty(7, false), 7, 115)
+	for acked in [110, 120, 130]:
+		ring[acked % 64] = acked
+	# 115 was not acked; its slot holds 179 (a stale wrap), and only an exact match promotes.
+	ring[179 % 64] = 179
+	far.sync_peer_acks(7, 130, true, ring)
+
+	var owed := []
+	for declaration in far.collect_dirty(7, false):
+		owed.append(declaration.property)
+	_check(
+		"a thinned entity's acked sends are promoted, only the unacked one is owed (%s)" % str(owed),
+		owed == [&"position"]
+	)
+	return thinned
 
 
 func _acked_rate_limit() -> DotNetIdentity:

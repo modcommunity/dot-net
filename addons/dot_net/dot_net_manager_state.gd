@@ -174,6 +174,12 @@ var _ph_begin_usec: int = 0
 ## peer_id -> newest snapshot tick they have acknowledged, on the server.
 var _acks: Dictionary = {}
 
+## peer_id -> every snapshot tick it has acknowledged lately, on the server: a PackedInt64Array
+## holding tick t at t % size (-1 empty), sized from the ack window ([method _acked_ring_size]).
+## Lets a view synced only now (its entity thinned out of the snapshots between) promote a send
+## whose own tick was acked instead of resending it. See [method DotNetManager.acked_ring].
+var _acked_rings: Dictionary = {}
+
 ## peer_id -> whether that peer has ever acknowledged anything. Acknowledgements are optional (the
 ## host owns the client-to-server path), so until one arrives an unconfirmed snapshot is assumed
 ## delivered once it ages out of the window. See [DotNetBehaviour.PeerView].
@@ -292,3 +298,29 @@ func _delayed_send(peer_id: int, payload: PackedByteArray, delivery: DotNetMessa
 	latency.hold(func() -> void:
 		if _send_fn.is_valid():
 			_send_fn.call(peer_id, payload, delivery))
+
+
+## The ticks [param peer_id] has acknowledged lately: tick t sits at [code]t % size()[/code], an
+## empty slot is -1, and an empty array means none recorded. Server side. Every view sync reads it
+## ([method DotNetBehaviour.sync_peer_acks]) so that a send is promoted when its own snapshot was
+## acked, not only when it is the newest ack: a view is synced only when its entity is collected.
+func acked_ring(peer_id: int) -> PackedInt64Array:
+	var ring: Variant = _acked_rings.get(peer_id)
+	return ring if ring != null else PackedInt64Array()
+
+
+## Twice the ack window in ticks: every pending send is younger than the window when it is
+## synced, so its slot cannot have been reused by a newer ack. Follows the config live.
+func _acked_ring_size() -> int:
+	return 2 * config.ack_window_snapshots * config.ticks_per_snapshot()
+
+
+func _note_acked(peer_id: int, tick: int) -> void:
+	var size := _acked_ring_size()
+	var ring: PackedInt64Array = _acked_rings.get(peer_id, PackedInt64Array())
+	if ring.size() != size:
+		ring = PackedInt64Array()
+		ring.resize(size)
+		ring.fill(-1)
+	ring[tick % size] = tick
+	_acked_rings[peer_id] = ring

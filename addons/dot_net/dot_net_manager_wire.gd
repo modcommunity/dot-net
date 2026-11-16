@@ -12,6 +12,8 @@ class SnapshotJob extends RefCounted:
 	var send_lead: bool = false
 	var compact: bool = false
 	var acked_tick: int = 0
+	## [method DotNetManager.acked_ring] for this peer, copied before the fork.
+	var acked_ring: PackedInt64Array = PackedInt64Array()
 	var strict: bool = false
 	var oldest_pending: int = 0
 	var remaining_bytes: int = 0
@@ -89,6 +91,7 @@ func _send_to_peer(
 	var unchanged_header_bits := 0
 
 	var acked_tick := int(_acks.get(peer_id, 0))
+	var ring := acked_ring(peer_id)
 	var strict := bool(_ack_wired.get(peer_id, false))
 	# Anything sent longer ago than this is resolved one way or the other, so a peer
 	# that stops acknowledging costs a bounded window rather than a growing record.
@@ -107,7 +110,7 @@ func _send_to_peer(
 			# a property whose only send was lost is dirty again and goes out here:
 			# sync_peer_acks, trim_pending and collect_dirty, as one call.
 			dirties.append(behaviour.collect_for_peer(
-				peer_id, acked_tick, strict, oldest_pending, predicted_by_peer))
+				peer_id, acked_tick, strict, oldest_pending, predicted_by_peer, ring))
 
 		if compact:
 			var anything := false
@@ -283,6 +286,7 @@ func _freeze_job(peer_id: int, tick: int) -> SnapshotJob:
 	job.compact = messages.peer_supports(peer_id, DotNetMessageRegistry.FEATURE_UNCHANGED_RUNS)
 
 	job.acked_tick = int(_acks.get(peer_id, 0))
+	job.acked_ring = acked_ring(peer_id)
 	job.strict = bool(_ack_wired.get(peer_id, false))
 	# Anything sent longer ago than this is resolved one way or the other, so a peer
 	# that stops acknowledging costs a bounded window rather than a growing record.
@@ -330,6 +334,7 @@ func _build_peer(
 	var unchanged_header_bits := 0
 
 	var acked_tick := job.acked_tick
+	var ring := job.acked_ring
 	var strict := job.strict
 	var oldest_pending := job.oldest_pending
 
@@ -361,7 +366,7 @@ func _build_peer(
 			# a property whose only send was lost is dirty again and goes out here:
 			# sync_peer_acks, trim_pending and collect_dirty, as one call.
 			dirties.append(behaviour.collect_for_view(
-				view, peer_id, acked_tick, strict, oldest_pending, predicted_by_peer, cache))
+				view, peer_id, acked_tick, strict, oldest_pending, predicted_by_peer, cache, ring))
 
 		if compact:
 			var anything := false

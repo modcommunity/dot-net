@@ -201,7 +201,8 @@ func collect_for_peer(
 	acked_tick: int,
 	strict: bool,
 	oldest_tick: int,
-	until_acked: bool
+	until_acked: bool,
+	acked_ring: PackedInt64Array = PackedInt64Array()
 ) -> Array[DotNetVar]:
 	var view: PeerView = _views.get(peer_id)
 	if view == null:
@@ -209,7 +210,7 @@ func collect_for_peer(
 	if strict:
 		view.strict = true
 	if acked_tick > view.last_ack:
-		_sync_view(view, acked_tick)
+		_sync_view(view, acked_tick, acked_ring)
 	if not view.pending.is_empty() and int(view.pending[0]["tick"]) < oldest_tick:
 		_trim_view(view, oldest_tick)
 	return _collect_dirty(view, peer_id, false, until_acked)
@@ -796,12 +797,13 @@ func collect_for_view(
 	strict: bool,
 	oldest_tick: int,
 	until_acked: bool,
-	cache: EncodeCache
+	cache: EncodeCache,
+	acked_ring: PackedInt64Array = PackedInt64Array()
 ) -> Array[DotNetVar]:
 	if strict:
 		view.strict = true
 	if acked_tick > view.last_ack:
-		_sync_view(view, acked_tick)
+		_sync_view(view, acked_tick, acked_ring)
 	if not view.pending.is_empty() and int(view.pending[0]["tick"]) < oldest_tick:
 		_trim_view(view, oldest_tick)
 	return _collect_dirty_cached(view, peer_id, false, until_acked, cache)

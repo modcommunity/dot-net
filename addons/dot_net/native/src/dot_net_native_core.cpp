@@ -301,8 +301,23 @@ void rebuild_believed(View &v) {
 	}
 }
 
-// DotNetBehaviour._sync_view.
-void sync_view(View &v, int64_t acked_tick) {
+// The acked ring in submit info: its size at [at], then that many ticks to the end. False when
+// the size does not match what follows.
+bool read_ring(std::vector<int64_t> &ring, const PackedInt64Array &info, int64_t at) {
+	const int64_t n = info[at];
+	if (n < 0 || info.size() != at + 1 + n) {
+		return false;
+	}
+	ring.resize(size_t(n));
+	for (int64_t i = 0; i < n; i++) {
+		ring[size_t(i)] = info[at + 1 + i];
+	}
+	return true;
+}
+
+// DotNetBehaviour._sync_view. A send older than the newest ack is promoted when its own tick
+// is in acked_ring (exact match, so a reused slot never promotes).
+void sync_view(View &v, int64_t acked_tick, const std::vector<int64_t> &acked_ring) {
 	v.last_ack = acked_tick;
 	if (v.pending.empty()) {
 		return;
@@ -315,7 +330,9 @@ void sync_view(View &v, int64_t acked_tick) {
 			break;
 		}
 		resolved++;
-		if (e.tick == acked_tick || !v.strict) {
+		const size_t ring_size = acked_ring.size();
+		if (e.tick == acked_tick || !v.strict
+				|| (ring_size > 0 && e.tick >= 0 && acked_ring[size_t(e.tick) % ring_size] == e.tick)) {
 			merge(v.acked, v.acked_has, e.mask, *e.reads);
 		} else {
 			dropped = true;
@@ -436,7 +453,7 @@ DotNetNativeCore::~DotNetNativeCore() {
 }
 
 int64_t DotNetNativeCore::abi_version() {
-	return 3;
+	return 4;
 }
 
 void DotNetNativeCore::_set_workers(int workers) {
@@ -831,7 +848,7 @@ void DotNetNativeCore::_queue(std::unique_ptr<Job> job) {
 
 void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks) {
 	ERR_FAIL_COND_MSG(!_open, "DotNetNativeCore.submit_peer outside begin_snapshot/finish_snapshot.");
-	ERR_FAIL_COND(info.size() < 8);
+	ERR_FAIL_COND_MSG(info.size() < 9, "DotNetNativeCore.submit_peer: info needs the acked ring size (ABI 4).");
 	auto job = std::make_unique<Job>();
 	job->peer = _peer_for(info[0]);
 	job->acked_tick = info[1];
@@ -841,6 +858,7 @@ void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array
 	job->send_lead = info[5] != 0;
 	job->lead_x = info[6];
 	job->lead_y = info[7];
+	ERR_FAIL_COND_MSG(!read_ring(job->acked_ring, info, 8), "DotNetNativeCore.submit_peer: the acked ring's size does not match info.");
 	job->accumulators = accumulators;
 	job->starved_ticks = starved_ticks;
 	job->relevant.reserve(relevant.size());
@@ -860,7 +878,7 @@ void DotNetNativeCore::submit_peer(const Array &relevant, const PackedInt64Array
 void DotNetNativeCore::submit_peer_interest(const Variant &observer, const PackedInt64Array &info, const Dictionary &accumulators, const Dictionary &starved_ticks) {
 	ERR_FAIL_COND_MSG(!_open, "DotNetNativeCore.submit_peer_interest outside begin_snapshot/finish_snapshot.");
 	ERR_FAIL_COND_MSG(!_icfg.on, "DotNetNativeCore.submit_peer_interest without set_interest.");
-	ERR_FAIL_COND_MSG(info.size() < 9, "DotNetNativeCore.submit_peer_interest: info needs the budget load flag (ABI 3).");
+	ERR_FAIL_COND_MSG(info.size() < 10, "DotNetNativeCore.submit_peer_interest: info needs the budget load flag and acked ring size (ABI 4).");
 	auto job = std::make_unique<Job>();
 	job->peer = _peer_for(info[0]);
 	job->acked_tick = info[1];
@@ -870,6 +888,7 @@ void DotNetNativeCore::submit_peer_interest(const Variant &observer, const Packe
 	job->send_lead = info[5] != 0;
 	job->lead_x = info[6];
 	job->lead_y = info[7];
+	ERR_FAIL_COND_MSG(!read_ring(job->acked_ring, info, 9), "DotNetNativeCore.submit_peer_interest: the acked ring's size does not match info.");
 	BudgetStore &store = job->peer->budget;
 	if (info[8] != 0) {
 		if (!_load_budget(store, accumulators, starved_ticks)) {
@@ -1461,7 +1480,7 @@ void DotNetNativeCore::_run_job(Job *job) {
 				v->strict = true;
 			}
 			if (job->acked_tick > v->last_ack) {
-				sync_view(*v, job->acked_tick);
+				sync_view(*v, job->acked_tick, job->acked_ring);
 			}
 			if (!v->pending.empty() && v->pending.front().tick < _oldest_pending) {
 				trim_view(*v, _oldest_pending);
