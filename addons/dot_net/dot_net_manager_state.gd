@@ -9,7 +9,8 @@ const SERVICE := &"dot_net_manager"
 
 ## The most parts one snapshot is cut into, and the reason the part trailer is four bits a
 ## field. Entities that would need a seventeenth wait for the next snapshot.
-const MAX_SNAPSHOT_PARTS := 16
+## Defined on [DotNetConfig] so the config does not name this class (the two parsers would hold each other).
+const MAX_SNAPSHOT_PARTS := DotNetConfig.MAX_SNAPSHOT_PARTS
 
 ## A split snapshot's trailer: the part's index and the part count less one, four bits each.
 const SNAPSHOT_PART_TRAILER_BITS := 8

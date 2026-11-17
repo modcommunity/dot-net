@@ -2,6 +2,10 @@
 class_name DotNetConfig
 extends DotConfig
 
+## The most parts one snapshot can be cut into: the part trailer is four bits a field. Read it as
+## [constant DotNetManager.MAX_SNAPSHOT_PARTS]; it lives here so this file does not name the manager.
+const MAX_SNAPSHOT_PARTS := 16
+
 ## Everything configurable about netcode. Layered like every [DotConfig]: exported defaults, then a
 ## JSON file, then [code]DOT_NET_*[/code] environment variables, then [code]--net-*[/code] arguments.
 
@@ -394,7 +398,7 @@ func describe_budget() -> PackedStringArray:
 
 ## [member max_snapshot_parts] as a count: 0 is the wire's [constant DotNetManager.MAX_SNAPSHOT_PARTS].
 func snapshot_part_cap() -> int:
-	return DotNetManager.MAX_SNAPSHOT_PARTS if max_snapshot_parts <= 0 else mini(max_snapshot_parts, DotNetManager.MAX_SNAPSHOT_PARTS)
+	return MAX_SNAPSHOT_PARTS if max_snapshot_parts <= 0 else mini(max_snapshot_parts, MAX_SNAPSHOT_PARTS)
 
 
 ## The most entities one snapshot may name: the tighter of [member max_entities_per_snapshot] and

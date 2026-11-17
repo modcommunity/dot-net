@@ -76,7 +76,7 @@ func read_bits(bits: int) -> int:
 		var bit_offset := _bit_pos & 7
 		var take := mini(8 - bit_offset, remaining)
 
-		var chunk := (_bytes[byte_index] >> bit_offset) & DotNetWriter._mask(take)
+		var chunk := (_bytes[byte_index] >> bit_offset) & _mask(take)
 		result |= chunk << written
 
 		written += take
@@ -141,7 +141,7 @@ func read_float_range(min_value: float, max_value: float, bits: int) -> float:
 		return min_value
 
 	var quantised := read_bits(bits)
-	var normalised := float(quantised) / float(DotNetWriter._mask(bits))
+	var normalised := float(quantised) / float(_mask(bits))
 	return min_value + normalised * (max_value - min_value)
 
 
@@ -153,7 +153,7 @@ func read_float_step(
 	return read_float_range(
 		min_value,
 		max_value,
-		DotNetWriter.bits_for_step(min_value, max_value, step)
+		_bits_for_step(min_value, max_value, step)
 	)
 
 
@@ -205,7 +205,7 @@ func read_vector3_step(
 	max_value: float,
 	step: float
 ) -> Vector3:
-	var bits := DotNetWriter.bits_for_step(min_value, max_value, step)
+	var bits := _bits_for_step(min_value, max_value, step)
 	return read_vector3_range(min_value, max_value, bits)
 
 
@@ -352,3 +352,21 @@ func reset() -> void:
 ## The single check a message decoder makes before trusting anything it read.
 func ok() -> bool:
 	return not exhausted
+
+
+# The same as [method DotNetWriter._mask] and [method DotNetWriter.bits_for_step]. Kept here so this
+# file does not name DotNetWriter, which names this one back (the two parsers would never be freed).
+static func _mask(bits: int) -> int:
+	if bits >= 64:
+		return -1
+	return (1 << bits) - 1
+
+
+static func _bits_for_step(min_value: float, max_value: float, step: float) -> int:
+	if step <= 0.0 or max_value <= min_value:
+		return 32
+	var steps := int(ceilf((max_value - min_value) / step)) + 1
+	var bits := 1
+	while (1 << bits) < steps and bits < 63:
+		bits += 1
+	return clampi(bits, 1, 32)

@@ -58,7 +58,8 @@ static func spec_row(declaration: DotNetVar, slot: int) -> PackedFloat64Array:
 ## [method DotNetBehaviour._encode] for [param behaviour] in its codec: the same [code][bytes, end bit, recorded, rate-limited properties][/code],
 ## or empty for the script to encode (a value only the script writes, or a snapshot worker: workers can encode one behaviour for two peers
 ## at once, and a codec has one scratch buffer).
-static func encode(behaviour: DotNetBehaviour, declarations: Array[DotNetVar], pad: int) -> Array:
+static func encode(behaviour: Node, declarations: Array[DotNetVar], pad: int) -> Array:
+	# behaviour is a DotNetBehaviour, typed as Node (here and in read_state) so this file and the behaviour do not keep each other's parsers alive.
 	if OS.get_thread_caller_id() != OS.get_main_thread_id():
 		return []
 	var recorded := {}
@@ -91,9 +92,9 @@ static func encode(behaviour: DotNetBehaviour, declarations: Array[DotNetVar], p
 ## change handlers, errors and reader position. A declaration only the script reads stops the
 ## codec; the script reads that value and the codec carries on after it.
 static func read_state(
-	behaviour: DotNetBehaviour, reader: DotNetReader, tick: int, rewind: bool
+	behaviour: Node, reader: DotNetReader, tick: int, rewind: bool
 ) -> DotResult:
-	var net_vars := behaviour.net_vars
+	var net_vars: Array[DotNetVar] = behaviour.net_vars
 	var codec: Object = behaviour._sim_codec
 	# Per call: a change handler may read another behaviour's state.
 	var out: Array = []
