@@ -112,7 +112,7 @@ How it stays the same answer:
 
 `netcode_demo`'s `[snapshot threads]` section runs a scripted ten-peer game (distance interest that changes with motion, an owner per peer, lossy acks, a starving budget, parts at a small MTU, half the peers on the old wire format) inline, on four workers and on two with `DotParallel.verify` on, and compares every payload and every `PeerView` and budget after each tick byte for byte; it checks that a pooled build which ignores its peer's acks is caught. A build writes in place, so it is not a pure task and `DotParallel.verify` never re-runs it (the section checks that too): the comparison with the inline path is the proof instead. A view made before the fork that nothing was ever written into reads the same as no view (`PeerView.is_fresh`): the pooled path makes one for every entity and peer, the inline path only those it collects into.
 
-**What it costs: threads off is back to what it was; threads on is not worth turning on yet.** g2gfast `tools/load_probe surf_mesa 32 64` with `LOAD_ACKS=1`, dev02 (6 cores, shared with two other suites), snapshot ms per tick, three runs each:
+**What it costs: threads off is back to what it was; threads on is not worth turning on yet.** Airdrift `tools/load_probe surf_mesa 32 64` with `LOAD_ACKS=1`, dev02 (6 cores, shared with two other suites), snapshot ms per tick, three runs each:
 
 | | 32 players | 64 players |
 | --- | --- | --- |

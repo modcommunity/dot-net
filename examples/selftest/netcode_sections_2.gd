@@ -546,7 +546,7 @@ func _test_buffer_growth() -> void:
 func _check_two_slips(physics: float) -> void:
 	# 1b. Two slips the same way close together. The first is still being taken up when the
 	# second lands, so the slip briefly passes 1; clamped there, the remainder was lost and
-	# that frame moved half a tick less than its time (g2gfast's `headless_feel` caught it).
+	# that frame moved half a tick less than its time (Airdrift's `headless_feel` caught it).
 	var twice := DotNetClock.new(64, false)
 	var timeline: Array[float] = []
 	for i in range(40):
