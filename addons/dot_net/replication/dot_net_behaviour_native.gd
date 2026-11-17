@@ -9,7 +9,8 @@ var _native_encoded: Dictionary = {}
 
 
 ## This behaviour's declarations for the native core: [code][properties, declarations,
-## net_vars.size()][/code], one PackedFloat64Array per declaration in [method DotNetVar.write]'s terms.
+## net_vars.size(), direct reads][/code], one PackedFloat64Array per declaration in [method DotNetVar.write]'s
+## terms; the last says whether the core may read the values itself ([method _native_direct_reads]).
 func _native_spec() -> Array:
 	_native_props = []
 	var slot_of := {}
@@ -19,7 +20,43 @@ func _native_spec() -> Array:
 			slot_of[declaration.property] = _native_props.size()
 			_native_props.append(declaration.property)
 		decls.append(DotNetSimCodec.spec_row(declaration, slot_of[declaration.property]))
-	return [_native_props, decls, net_vars.size()]
+	return [_native_props, decls, net_vars.size(), _native_direct_reads()]
+
+
+## What [method DotNetBehaviour._native_values] calls; a script that overrides any of them is read through it.
+const _NATIVE_READ_HOOKS: Array[StringName] = [&"_net_read_property", &"_native_values", &"estimated_bits"]
+## Script -> whether [method _native_direct_reads] holds for it, worked out once per script.
+static var _direct_reads_by_script: Dictionary = {}
+
+
+## Whether the native core may read this behaviour's values without calling [method DotNetBehaviour._native_values]
+## ([member DotNetConfig.native_reads]): only when every script from this one down to [DotNetBehaviour] is GDScript
+## and none overrides a read hook. [method Script.get_script_method_list] lists a method once per script in the
+## chain that defines it, so an override shows as one more than [DotNetBehaviour]'s own.
+func _native_direct_reads() -> bool:
+	var script := get_script() as Script
+	if script == null:
+		return false
+	if _direct_reads_by_script.has(script):
+		return _direct_reads_by_script[script]
+	var base := script
+	var ok := true
+	while base != null and base.get_global_name() != &"DotNetBehaviour":
+		ok = ok and base is GDScript
+		base = base.get_base_script()
+	ok = ok and base != null and _native_hook_counts(script) == _native_hook_counts(base)
+	_direct_reads_by_script[script] = ok
+	return ok
+
+
+static func _native_hook_counts(script: Script) -> Array[int]:
+	var counts: Array[int] = []
+	counts.resize(_NATIVE_READ_HOOKS.size())
+	for method: Dictionary in script.get_script_method_list():
+		var at := _NATIVE_READ_HOOKS.find(StringName(method["name"]))
+		if at >= 0:
+			counts[at] += 1
+	return counts
 
 
 ## Off only to measure (and to test) what the two shortcuts in [method _native_encode] save.

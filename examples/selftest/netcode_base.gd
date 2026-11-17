@@ -194,6 +194,15 @@ class Coded extends Rich:
 		return out
 
 
+## A [Counted] whose `_net_read_property` computes what it sends: the native core must read it
+## through GDScript ([member DotNetConfig.native_reads] reads a plain one itself).
+class Computed extends Counted:
+	func _net_read_property(property: StringName) -> Variant:
+		if property == &"health":
+			return (health * 7 + 3) % 256
+		return super(property)
+
+
 ## A [Movement] that, on one tick and from inside its `_net_simulate`, spawns the first entity
 ## a peer owns: that peer's observer is registered after the tick's identity list was read.
 class SpawnsFirst extends Movement:
@@ -550,13 +559,13 @@ var _reorder_rng := RandomNumberGenerator.new()
 var _reorder_held_change := false
 
 
-func _build_counted(_context: Dictionary) -> Node:
+func _build_counted(_context: Dictionary, computed: bool = false) -> Node:
 	var identity := _make_entity(&"counted", 0)
 	var body := identity.get_parent()
 	var old := identity.behaviours[0]
 	body.remove_child(old)
 	old.free()
-	var counted := Counted.new()
+	var counted: Counted = Computed.new() if computed else Counted.new()
 	counted.name = "Movement"
 	body.add_child(counted)
 	identity.behaviours = [counted]

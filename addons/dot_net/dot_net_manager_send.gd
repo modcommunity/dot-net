@@ -217,7 +217,7 @@ func _send_snapshots_native(
 	var begin_at := Time.get_ticks_usec()
 	core.begin_snapshot(identities, PackedInt64Array([
 		tick, int(context["now_ms"]), config.mtu, oldest_pending, workers,
-		DotNetIdentity.Authority.SHARED,
+		DotNetIdentity.Authority.SHARED, config.native_reads,
 	]))
 	_ph_begin_usec += Time.get_ticks_usec() - begin_at
 	var jobs: Array[SnapshotJob] = []

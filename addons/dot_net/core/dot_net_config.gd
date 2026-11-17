@@ -51,6 +51,14 @@ const MAX_SNAPSHOT_PARTS := 16
 ## Environment [code]GS_NET_NATIVE_INTEREST=0[/code] or [code]--net-native-interest=false[/code] turns it off.
 @export var native_interest: bool = true
 
+## How the native core reads each behaviour's values when a snapshot opens: [code]1[/code] reads the
+## properties in the library (no GDScript call per behaviour), [code]0[/code] calls
+## [code]DotNetBehaviour._native_values[/code] for each as before (the fallback), [code]2[/code] does both
+## and compares: a difference is counted ([code]read_mismatches[/code] in [code]describe()[/code]), logged
+## once, and GDScript's values are sent. The same bytes either way. Environment [code]DOT_NET_NATIVE_READS[/code],
+## command line [code]--net-native-reads[/code].
+@export_range(0, 2) var native_reads: int = 1
+
 ## Encode and decode snapshot states in dot-sim's native codec ([DotNetSimCodec]) when dot-sim is loaded: same bytes and values, cheaper;
 ## the GDScript codec otherwise and always on the web. Covers what [member native] does not (a client's decode, a server without dot-net's
 ## library). [code]GS_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code] turns it off.
@@ -267,6 +275,13 @@ func validate() -> DotResult:
 			DotError.CODE_INVALID,
 			"max_snapshot_parts must be 0 (the wire's 16) or 1..16; the part trailer is four bits a field.",
 			str(max_snapshot_parts)
+		)
+
+	if native_reads < 0 or native_reads > 2:
+		return DotResult.fail(
+			DotError.CODE_INVALID,
+			"native_reads must be 0 (GDScript's _native_values), 1 (read in the library) or 2 (both, compared).",
+			str(native_reads)
 		)
 
 	if snapshot_workers < -1:

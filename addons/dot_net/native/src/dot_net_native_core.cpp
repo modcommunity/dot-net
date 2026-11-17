@@ -2,6 +2,7 @@
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/char_string.hpp>
 #include <godot_cpp/variant/packed_float64_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
@@ -519,6 +520,7 @@ void DotNetNativeCore::_adopt(BehRec *rec, Object *behaviour) {
 	rec->decls.clear();
 	rec->props.clear();
 	rec->decl_count = -1;
+	rec->direct = spec.size() >= 4 && bool(spec[3]);
 	if (spec.size() >= 3) {
 		Array props = spec[0];
 		Array decls = spec[1];
@@ -540,12 +542,100 @@ void DotNetNativeCore::_adopt(BehRec *rec, Object *behaviour) {
 	behaviour->set("_native_core", this);
 }
 
-void DotNetNativeCore::_read(BehRec *rec, Object *behaviour) {
-	Array values = behaviour->call("_native_values");
+// DotNetBehaviour._native_values without the GDScript call, for a behaviour whose scripts override none of
+// its hooks (rec->direct): each property as get() reads it, estimated_bits for the owner and anyone else (asked
+// again only when the declarations or the owner change; GDScript keeps them by declaration count too),
+// and the declaration count, or -1 once a core let go of the behaviour.
+Array DotNetNativeCore::_direct_values(BehRec *rec, Object *behaviour, int64_t owner) {
+	static const StringName native_core_name("_native_core");
+	static const StringName net_vars_name("net_vars");
+	static const StringName estimated_bits_name("estimated_bits");
+	size_t n = rec->props.size();
+	Array out;
+	out.resize(int64_t(n) + 3);
+	for (size_t s = 0; s < n; s++) {
+		out[int64_t(s)] = behaviour->get(rec->props[s]);
+	}
+	Variant held = behaviour->get(native_core_name);
+	int64_t count = -1;
+	if (held.get_type() == Variant::OBJECT && (Object *)held != nullptr) {
+		Array net_vars = behaviour->get(net_vars_name);
+		count = net_vars.size();
+	}
+	if (rec->est_count != count || rec->est_for_owner != owner) {
+		rec->est_count = count;
+		rec->est_for_owner = owner;
+		rec->est_owner = behaviour->call(estimated_bits_name, owner);
+		rec->est_other = behaviour->call(estimated_bits_name, owner + 1);
+	}
+	out[int64_t(n)] = rec->est_owner;
+	out[int64_t(n) + 1] = rec->est_other;
+	out[int64_t(n) + 2] = count;
+	return out;
+}
+
+void DotNetNativeCore::_mismatch(const char *what, Object *obj) {
+	_read_mismatches++;
+	if (!_mismatch_logged) {
+		_mismatch_logged = true;
+		UtilityFunctions::push_error(String("DotNetNativeCore: direct ") + what + " differs from GDScript's for " +
+				obj->get_class() + " (native_reads verify; GDScript's sent)");
+	}
+}
+
+static bool same_values(const Array &a, const Array &b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (int64_t i = 0; i < a.size(); i++) {
+		if (!a[i].hash_compare(b[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+Array DotNetNativeCore::_values(BehRec *rec, Object *behaviour, int64_t owner) {
+	if (_read_mode == 0 || !rec->direct) {
+		return behaviour->call("_native_values");
+	}
+	Array direct = _direct_values(rec, behaviour, owner);
+	if (_read_mode == 1) {
+		return direct;
+	}
+	Array scripted = behaviour->call("_native_values");
+	if (!same_values(direct, scripted)) {
+		_mismatch("values", behaviour);
+		return scripted;
+	}
+	return direct;
+}
+
+// DotNetIdentity.world_position, the frozen position read directly (the snapshot freezes them all first).
+Vector3 DotNetNativeCore::_position_of(Object *identity) {
+	static const StringName frozen_name("_position_frozen");
+	static const StringName frozen_position_name("_frozen_position");
+	static const StringName world_position_name("world_position");
+	if (_read_mode == 0 || !bool(identity->get(frozen_name))) {
+		return identity->call(world_position_name);
+	}
+	Vector3 pos = identity->get(frozen_position_name);
+	if (_read_mode == 2) {
+		Vector3 scripted = identity->call(world_position_name);
+		if (!Variant(pos).hash_compare(Variant(scripted))) {
+			_mismatch("position", identity);
+			return scripted;
+		}
+	}
+	return pos;
+}
+
+void DotNetNativeCore::_read(BehRec *rec, Object *behaviour, int64_t owner) {
+	Array values = _values(rec, behaviour, owner);
 	size_t n = rec->props.size();
 	if (values.size() != int64_t(n) + 3 || int64_t(values[n + 2]) != rec->decl_count) {
 		_adopt(rec, behaviour);
-		values = behaviour->call("_native_values");
+		values = _values(rec, behaviour, owner);
 		n = rec->props.size();
 		if (values.size() != int64_t(n) + 3) {
 			values.resize(n + 3);
@@ -597,7 +687,7 @@ void DotNetNativeCore::_read(BehRec *rec, Object *behaviour) {
 	}
 }
 
-BehRec *DotNetNativeCore::_behaviour_for(Object *behaviour, uint64_t id) {
+BehRec *DotNetNativeCore::_behaviour_for(Object *behaviour, uint64_t id, int64_t owner) {
 	auto it = _behaviours.find(id);
 	BehRec *rec;
 	if (it == _behaviours.end()) {
@@ -619,7 +709,7 @@ BehRec *DotNetNativeCore::_behaviour_for(Object *behaviour, uint64_t id) {
 	}
 	if (rec->seen != _serial) {
 		rec->seen = _serial;
-		_read(rec, behaviour);
+		_read(rec, behaviour, owner);
 	}
 	return rec;
 }
@@ -651,7 +741,7 @@ IdRec *DotNetNativeCore::_identity_for(const Variant &identity) {
 		rec->priority = double(obj->get("priority"));
 		rec->always = bool(obj->get("always_relevant"));
 		rec->linger_sec = double(obj->get("interest_linger_sec"));
-		rec->pos = Vector3(obj->call("world_position"));
+		rec->pos = _position_of(obj);
 		rec->cluster = _icfg.vis ? _icfg.vis->cluster_of(rec->pos) : -1;
 		PackedStringArray tags = obj->get("interest_tags");
 		rec->radius = _icfg.radius;
@@ -688,7 +778,7 @@ IdRec *DotNetNativeCore::_identity_for(const Variant &identity) {
 		if (b == nullptr) {
 			continue;
 		}
-		BehRec *br = _behaviour_for(b, b->get_instance_id());
+		BehRec *br = _behaviour_for(b, b->get_instance_id(), rec->owner);
 		br->owner = rec->owner;
 		rec->behaviours.push_back(br);
 	}
@@ -751,6 +841,13 @@ void DotNetNativeCore::begin_snapshot(const Array &identities, const PackedInt64
 	_oldest_pending = params.size() > 3 ? params[3] : 0;
 	int workers = params.size() > 4 ? int(params[4]) : 0;
 	_authority_shared = params.size() > 5 ? params[5] : 1;
+	int64_t read_mode = params.size() > 6 ? params[6] : 1;
+	if (read_mode < 0 || read_mode > 2) {
+		// DotNetConfig.validate refuses this; a direct caller hears it every snapshot rather than a guess.
+		UtilityFunctions::push_error("DotNetNativeCore: read mode ", read_mode, " is not 0, 1 or 2; GDScript reads used");
+		read_mode = 0;
+	}
+	_read_mode = int(read_mode);
 	_all.clear();
 	_by_net.clear();
 	for (int64_t i = 0; i < identities.size(); i++) {
@@ -1791,6 +1888,8 @@ Dictionary DotNetNativeCore::describe() {
 	out["build_usec"] = _last_build_usec;
 	out["wait_usec"] = _last_wait_usec;
 	out["gdscript_encodes"] = _custom_reads;
+	out["read_mode"] = _read_mode;
+	out["read_mismatches"] = _read_mismatches;
 	out["unknown_relevant"] = _unknown_relevant;
 	out["interest"] = _icfg.on;
 	return out;

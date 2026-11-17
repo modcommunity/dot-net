@@ -89,6 +89,11 @@ struct BehRec {
 	int64_t est_owner = 0;
 	int64_t est_other = 0;
 	int64_t owner = 0;
+	// Direct reads: the decl count and owner est_owner/est_other were asked for (-2: never).
+	int64_t est_count = -2;
+	int64_t est_for_owner = 0;
+	// _native_spec's fourth entry: no script overrides a read hook, so the core reads the values itself.
+	bool direct = false;
 };
 
 struct IdRec {
@@ -372,12 +377,22 @@ class DotNetNativeCore : public RefCounted {
 	int64_t _snapshots = 0;
 	int64_t _custom_reads = 0;
 	int64_t _unknown_relevant = 0;
+	// How a behaviour's values are read (begin_snapshot params[6], DotNetConfig.native_reads):
+	// 0 calls GDScript's _native_values per behaviour, 1 reads the properties directly, 2 does both and
+	// compares (a mismatch counts, logs once and sends GDScript's values).
+	int _read_mode = 1;
+	int64_t _read_mismatches = 0;
+	bool _mismatch_logged = false;
 
-	dotnet::BehRec *_behaviour_for(Object *behaviour, uint64_t id);
+	dotnet::BehRec *_behaviour_for(Object *behaviour, uint64_t id, int64_t owner);
 	dotnet::IdRec *_identity_for(const Variant &identity);
 	dotnet::IdRec *_known_identity(const Variant &identity) const;
 	void _adopt(dotnet::BehRec *rec, Object *behaviour);
-	void _read(dotnet::BehRec *rec, Object *behaviour);
+	void _read(dotnet::BehRec *rec, Object *behaviour, int64_t owner);
+	Array _direct_values(dotnet::BehRec *rec, Object *behaviour, int64_t owner);
+	Array _values(dotnet::BehRec *rec, Object *behaviour, int64_t owner);
+	godot::Vector3 _position_of(Object *identity);
+	void _mismatch(const char *what, Object *obj);
 	void _drop_behaviour(dotnet::BehRec *rec);
 	void _sweep();
 	void _set_workers(int workers);

@@ -573,6 +573,10 @@ func _normal_view(view: Dictionary) -> Dictionary:
 	return {} if empty else out
 
 
+## [member DotNetConfig.native_reads] for the next [method _threads_scenario] runs; -1 keeps the default.
+var _scenario_native_reads := -1
+
+
 ## One run of [method _test_snapshot_threads]'s game; everything it sent and kept, as bytes.
 func _threads_scenario(
 	label: String, workers: int, skew: bool, variant: String = "", native: bool = false,
@@ -586,6 +590,8 @@ func _threads_scenario(
 	host.config.snapshot_workers = workers
 	host.config.native = native and variant != "toggle"
 	host.config.native_interest = native_interest
+	if _scenario_native_reads >= 0:
+		host.config.native_reads = _scenario_native_reads
 	# 1500 B per window of ten ticks (the window is scripted below): well under what the
 	# entities in view want, so the accumulator decides who waits.
 	host.config.per_client_budget = 1500
@@ -625,6 +631,7 @@ func _threads_scenario(
 			peers_fed[peer_id] = true
 	host.start()
 	var factory := (func(c: Dictionary) -> Node: return _build_rich(c, true)) if variant == "coded" \
+		else (func(c: Dictionary) -> Node: return _build_counted(c, true)) if variant == "computed" \
 		else (_build_rich if rich else _build_counted)
 	host.spawner.register_factory(&"counted", factory)
 
@@ -750,6 +757,8 @@ func _threads_scenario(
 		"snapshots": TICKS, "cache_hits": 0, "normal_states": normal_states,
 		"native_note": host._native_note,
 		"interest_native": host._native != null and bool(host._native.call(&"describe").get("interest", false)),
+		"read_mode": int(host._native.call(&"describe").get("read_mode", -1)) if host._native != null else -1,
+		"read_mismatches": int(host._native.call(&"describe").get("read_mismatches", 0)) if host._native != null else 0,
 	}
 	if rich:
 		# Hits that happened: a cache entry older than the first tick's can only be a hit.

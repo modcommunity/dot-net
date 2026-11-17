@@ -284,6 +284,34 @@ func _test_native() -> void:
 					and _first_difference(serial["payloads"], other["payloads"]) == ""
 					and _first_difference(serial["normal_states"], other["normal_states"]) == "")
 
+	# Reads in the library (DotNetConfig.native_reads): 1 reads each behaviour's values and its
+	# identity's frozen position without a GDScript call per behaviour, 0 is the GDScript
+	# fallback, 2 does both and counts every difference. All three send the same bytes.
+	# "computed" overrides _net_read_property, so the library reads it through GDScript in every mode.
+	var direct: Array[bool] = []
+	for probe: DotNetBehaviour in [Computed.new(), Counted.new(), Coded.new()]:
+		direct.append(probe._native_direct_reads())
+		probe.free()
+	_check("native reads: a behaviour overriding a read hook is read through GDScript, a plain one directly %s" % [direct],
+		direct == ([false, true, true] as Array[bool]))
+	for variant: String in ["", "coded", "computed"]:
+		var serial: Dictionary = _threads_scenario("NativeReads" + variant + "Off", 0, false, variant)
+		var name := variant if variant != "" else "base"
+		for reads: int in [0, 1, 2]:
+			for workers: int in [0, 3]:
+				_scenario_native_reads = reads
+				var other: Dictionary = _threads_scenario(
+					"NativeReads%s%d%d" % [variant, reads, workers], workers, false, variant, true)
+				_scenario_native_reads = -1
+				_check("native reads %d %s, %d workers: the same payloads %s and views %s as GDScript, %d mismatches" % [
+						reads, name, workers, _first_difference(serial["payloads"], other["payloads"]),
+						_first_difference(serial["normal_states"], other["normal_states"]), other["read_mismatches"]],
+					(serial["payloads"] as Array).size() > 100
+						and (not loaded or int(other["read_mode"]) == reads)
+						and int(other["read_mismatches"]) == 0
+						and _first_difference(serial["payloads"], other["payloads"]) == ""
+						and _first_difference(serial["normal_states"], other["normal_states"]) == "")
+
 	# Interest in the library too (DotNetConfig.native_interest): the same entities chosen, ranked and
 	# thinned for every peer (a payload carries exactly the chosen entities, in order), the same budgets.
 	# "held" reads the budgets every tenth tick only, so the library keeps them across ticks between.
