@@ -7,7 +7,7 @@ extends Node
 const CHANNEL := "net.behaviour"
 
 ## The identity this belongs to. Set when the identity collects behaviours.
-var identity: DotNetIdentity = null
+var identity: Node = null
 
 ## Declared properties, in registration order.
 var net_vars: Array[DotNetVar] = []

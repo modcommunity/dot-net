@@ -82,7 +82,7 @@ func begin_snapshot_reads(now_ms: int = -1, for_workers: bool = false) -> void:
 		for declaration in net_vars:
 			if not _snapshot_reads.has(declaration.property):
 				_snapshot_reads[declaration.property] = _net_read_property(declaration.property)
-		var owner := identity.owner_peer_id
+		var owner: int = identity.owner_peer_id
 		# Any peer id that is not the owner's stands for every one that is not.
 		var _owner_bits := estimated_bits(owner)
 		var _other_bits := estimated_bits(owner + 1)
@@ -222,7 +222,7 @@ func _collect_dirty(
 	force: bool,
 	until_acked: bool
 ) -> Array[DotNetVar]:
-	var owner := identity.owner_peer_id
+	var owner: int = identity.owner_peer_id
 
 	# A peer in step shares its answer with every other peer in step from the same snapshot:
 	# when this peer's record is exactly the reads of snapshot K (`synced_serial`), what it is
@@ -326,7 +326,7 @@ func _dirty_since(since: int, peer_id: int) -> Variant:
 	var then: Dictionary = _reads_by_serial.get(since, {})
 	if then.is_empty() and not net_vars.is_empty():
 		return null
-	var owner := identity.owner_peer_id
+	var owner: int = identity.owner_peer_id
 	var out: Array[DotNetVar] = []
 	for declaration in net_vars:
 		match declaration.audience:
@@ -735,7 +735,7 @@ func estimated_bits(peer_id: int) -> int:
 	# Asked once per entity per peer per snapshot, and its answer depends only on
 	# whether the peer is the owner (see [method DotNetVar.visible_to]) -- so two
 	# numbers, worked out once and again only if the declarations change.
-	var is_owner := peer_id == identity.owner_peer_id
+	var is_owner: bool = peer_id == identity.owner_peer_id
 	if _estimate_for != net_vars.size():
 		_estimate_owner = -1
 		_estimate_other = -1
@@ -817,7 +817,7 @@ func _collect_dirty_cached(
 	until_acked: bool,
 	cache: EncodeCache
 ) -> Array[DotNetVar]:
-	var owner := identity.owner_peer_id
+	var owner: int = identity.owner_peer_id
 
 	# A peer in step shares its answer with every other peer in step from the same snapshot:
 	# see the inline copy of this in [method collect_for_peer].
@@ -1034,7 +1034,7 @@ func _native_values() -> Array:
 	var out: Array = []
 	for property in _native_props:
 		out.append(_net_read_property(property))
-	var owner := identity.owner_peer_id
+	var owner: int = identity.owner_peer_id
 	out.append(estimated_bits(owner))
 	out.append(estimated_bits(owner + 1))
 	# -1 once a core let go of this behaviour (unregistered): the core adopts it again, views reset.
