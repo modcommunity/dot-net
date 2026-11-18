@@ -31,6 +31,8 @@ constexpr int LEAD_FIELD_BITS = 12;
 constexpr int LEAD_BITS = 2 * LEAD_FIELD_BITS;
 constexpr int AUD_OWNER = 1;
 constexpr int AUD_OBSERVERS = 2;
+// Degrees to radians. Not M_PI: MSVC only declares it under _USE_MATH_DEFINES, so the Windows build broke on it.
+constexpr double DEG_TO_RAD = 3.14159265358979323846 / 180.0;
 
 enum EncKind : uint8_t {
 	E_NATIVE,
@@ -1035,7 +1037,7 @@ void DotNetNativeCore::set_interest(const Dictionary &cfg) {
 		c.far_coherent = bool(cfg.get("far_coherent", false));
 		c.far_tiers = int64_t(cfg.get("far_tiers", 1));
 		const double cone = double(cfg.get("aim_cone_deg", 0.0));
-		c.aim_cos = cone > 0.0 ? std::cos(cone * M_PI / 180.0) : 1.0;
+		c.aim_cos = cone > 0.0 ? std::cos(cone * DEG_TO_RAD) : 1.0;
 		c.ticks_per_snapshot = std::max<int64_t>(1, int64_t(cfg.get("ticks_per_snapshot", 1)));
 		c.cap = int64_t(cfg.get("cap", 0));
 		c.send_budget = int64_t(cfg.get("send_budget", 0));
