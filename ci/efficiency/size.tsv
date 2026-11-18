@@ -1,5 +1,5 @@
 # size
 # Baselines only shrink: scripts/<gate> --update lowers or drops entries and refuses to add.
 addons/dot_net/replication/dot_net_behaviour.gd	1042
-examples/selftest/netcode_sections_3.gd::_standing_still_run	84
-examples/selftest/netcode_sections_6.gd::_first_visit	99
+examples/selftest/netcode_acked_baselines_and_sharing.gd::_standing_still_run	84
+examples/selftest/netcode_snapshot_threads_and_inputs.gd::_first_visit	99
