@@ -1,4 +1,4 @@
-extends "netcode_sections_3.gd"
+extends "netcode_acked_baselines_and_sharing.gd"
 
 ## The remote-bump runs of netcode_demo.gd: a server and a client in one process, snapshots delivered or lost.
 

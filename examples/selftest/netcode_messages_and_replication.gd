@@ -1,6 +1,6 @@
 extends "netcode_tests.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 1 of 7.
+## Sections of netcode_demo.gd.
 
 
 

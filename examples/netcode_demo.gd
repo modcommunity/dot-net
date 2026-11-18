@@ -1,4 +1,4 @@
-extends "selftest/netcode_sections_9.gd"
+extends "selftest/netcode_unchanged_and_lossy_lead.gd"
 
 ## Runs a server and a client in one process over a loopback that can delay, reorder and drop packets, and checks the netcode works.
 ##

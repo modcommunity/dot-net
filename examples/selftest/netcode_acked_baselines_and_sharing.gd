@@ -1,6 +1,6 @@
-extends "netcode_sections_2.gd"
+extends "netcode_render_delay_and_prediction.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 3 of 7.
+## Sections of netcode_demo.gd.
 
 
 

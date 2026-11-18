@@ -1,6 +1,6 @@
-extends "netcode_sections_6.gd"
+extends "netcode_snapshot_threads_and_inputs.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 7 of 7.
+## Sections of netcode_demo.gd.
 
 
 ## A stall before any median, and a stall inside a live lead history.

@@ -1,6 +1,6 @@
-extends "netcode_sections_1.gd"
+extends "netcode_messages_and_replication.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 2 of 7.
+## Sections of netcode_demo.gd.
 
 
 ## The interpolation buffer is a count of SNAPSHOTS and a render time is a TICK; subtracting one

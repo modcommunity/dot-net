@@ -1,6 +1,6 @@
-extends "netcode_sections_4.gd"
+extends "netcode_reconcile_and_snapshot_stagger.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 5 of 9.
+## Sections of netcode_demo.gd.
 
 
 ## A snapshot bigger than [member DotNetConfig.mtu] goes out in parts, each applying alone:

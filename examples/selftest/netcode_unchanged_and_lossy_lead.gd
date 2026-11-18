@@ -1,6 +1,6 @@
-extends "netcode_sections_8.gd"
+extends "netcode_latency_and_interpolation.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 9 of 9.
+## Sections of netcode_demo.gd.
 
 
 ## Three managers over a lossless pipe and the entities they share, for [method _test_unchanged_entities].

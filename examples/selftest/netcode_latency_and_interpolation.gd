@@ -1,4 +1,4 @@
-extends "netcode_sections_7.gd"
+extends "netcode_stalls_and_integration.gd"
 
 
 ## A client's artificial latency pair: a server and a client over a hand-pumped link.

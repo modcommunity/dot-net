@@ -1,6 +1,6 @@
 extends "netcode_remote_bump_checks.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 4 of 7.
+## Sections of netcode_demo.gd.
 
 
 func _test_remote_bumps() -> void:

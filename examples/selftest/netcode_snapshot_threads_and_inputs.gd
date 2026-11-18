@@ -1,6 +1,6 @@
-extends "netcode_sections_5.gd"
+extends "netcode_snapshot_parts.gd"
 
-## Sections of netcode_demo.gd, moved unchanged; part 6 of 7.
+## Sections of netcode_demo.gd.
 
 
 func _test_snapshot_threads() -> void:
