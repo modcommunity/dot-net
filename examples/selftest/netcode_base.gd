@@ -26,6 +26,9 @@ class Movement extends DotNetBehaviour:
 	var predicts: bool = true
 	var _sim_position: Vector3 = Vector3.ZERO
 	var _sim_velocity: Vector3 = Vector3.ZERO
+	## Ticks simulated with [member DotNetBehaviour.net_replaying] set, and without.
+	var replayed_ticks: int = 0
+	var fresh_ticks: int = 0
 
 	func _net_predicts() -> bool:
 		return predicts
@@ -44,6 +47,10 @@ class Movement extends DotNetBehaviour:
 	## Deterministic given the same input and starting state — the property the
 	## whole prediction model depends on.
 	func _net_simulate(_tick: int, delta: float) -> void:
+		if net_replaying:
+			replayed_ticks += 1
+		else:
+			fresh_ticks += 1
 		if keeps_own_state:
 			if current_input != null:
 				_sim_velocity.x = current_input.move.x * 10.0

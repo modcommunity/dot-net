@@ -9,6 +9,12 @@ const CHANNEL := "net.behaviour"
 ## The identity this belongs to. Set when the identity collects behaviours.
 var identity: Node = null
 
+## True only while [DotNetPredictor] replays an unacknowledged tick through [method _net_simulate] after a rewind;
+## false for the first, fresh prediction of a tick. A game that draws from its simulation (a muzzle flash, a re-equip)
+## skips the drawing on a replay. Comparing the tick with the newest one simulated cannot tell them apart after the
+## clock snaps backwards: every fresh tick until the clock passes the old lead looks like a replay.
+var net_replaying: bool = false
+
 ## Declared properties, in registration order.
 var net_vars: Array[DotNetVar] = []
 

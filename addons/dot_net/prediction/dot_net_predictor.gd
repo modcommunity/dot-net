@@ -234,7 +234,9 @@ func reconcile(
 					behaviour.call("_net_apply_input", input, replay_tick)
 
 		for behaviour in identity.behaviours:
+			behaviour.net_replaying = true
 			behaviour._net_simulate(replay_tick, tick_delta)
+			behaviour.net_replaying = false
 		# The replay is the prediction now; what the first pass remembered is not.
 		_remember(identity, replay_tick)
 

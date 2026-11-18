@@ -283,6 +283,10 @@ func _test_skip_matching_replays(own_state: bool) -> void:
 		worst_apart = maxf(worst_apart, final_apart)
 
 	_skip_checks(host, guests, moving, before, worst_apart, final_apart, overruled, TICKS, LEAD)
+	if not own_state:
+		# A replays every snapshot: those ticks are marked, its own fresh predictions are not, and the mark is down after.
+		_check("a replayed tick is marked net_replaying, a fresh one is not (%d replayed, %d fresh)" % [moving[0].replayed_ticks, moving[0].fresh_ticks],
+			moving[0].replayed_ticks > 0 and moving[0].fresh_ticks == TICKS and not moving[0].net_replaying)
 	_free_managers([host] + guests)
 
 
