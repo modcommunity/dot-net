@@ -1,4 +1,4 @@
-[![Net - GameSpice addon](docs/banner.png)](https://moddingcommunity.com/a/210-dot-net)
+[![Net - GameSpice addon](docs/banner.png)](https://moddingcommunity.com/a/18-gs-net)
 
 Multiplayer netcode for Godot 4. It keeps clocks in step, packs data tightly, copies game state from the server to clients, smooths what remote players do, predicts your own movement, checks hits fairly despite lag, and sends each player only what they need. It needs only [dot-core](https://github.com/gamespice-platform/core), so you can use it with [dot-server](https://github.com/gamespice-platform/server), Godot's own multiplayer, or your own transport. Part of TMC's open source [**GameSpice**](https://gamespice.net) collection (MIT licence).
 
