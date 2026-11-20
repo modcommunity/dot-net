@@ -229,7 +229,7 @@ func _test_dropped_time_live() -> void:
 	_check("and the clock keeps up with the wall clock through it (%d ticks for %.0f)" % [int(remote_ran.x), remote_ran.y],
 		remote_ran.x >= remote_ran.y - 6.0)
 	# Armed: following the engine beside a server (v0.1.8), 318 ms credited and 59 ticks run, the
-	# stall ahead of a server that never ran it (dot-server-deploy's lookatme_client).
+	# stall ahead of a server that never ran it (GameSpice Server Deploy's lookatme_client).
 	_check("with a server's clock in this process, which stalled too, nothing is credited (%d ms)" % int(listen.lost_seconds() * 1000.0),
 		server_seen and listen.lost_seconds() == 0.0)
 	_check("a clock advanced by hand credits nothing (%d ms)" % int(by_hand.lost_seconds() * 1000.0),

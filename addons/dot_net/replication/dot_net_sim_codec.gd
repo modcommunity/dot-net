@@ -1,6 +1,6 @@
 class_name DotNetSimCodec
 extends RefCounted
-## dot-sim's native snapshot codec ([code]DotSimSnapshotCodec[/code]): [method DotNetBehaviour._encode] and [method DotNetBehaviour.read_state] in Rust,
+## GameSpice Sim's native snapshot codec ([code]DotSimSnapshotCodec[/code]): [method DotNetBehaviour._encode] and [method DotNetBehaviour.read_state] in Rust,
 ## bit for bit [DotNetVar]'s bytes and values. Optional: without dot-sim, with [member DotNetConfig.sim_codec] off or [member enabled] false the
 ## GDScript codec runs, and a value the native one cannot reproduce (custom codec, string, wrong type) still goes through the script. docs/native.md.
 
@@ -19,8 +19,8 @@ const SCRIPT := 5
 static var enabled := true
 
 
-## Whether the native codec can run in this process at all: the class exists only once dot-sim's
-## library has loaded, on the web too (a dlink export with its side module, dot-sim docs/web.md).
+## Whether the native codec can run in this process at all: the class exists only once GameSpice Sim's
+## library has loaded, on the web too (a dlink export with its side module, GameSpice Sim docs/web.md).
 static func available() -> bool:
 	return enabled and ClassDB.class_exists(CLASS)
 
@@ -43,7 +43,7 @@ static func create(net_vars: Array[DotNetVar], config: DotNetConfig) -> Object:
 	return codec
 
 
-## One declaration in [method DotNetVar.write]'s terms: the row dot-net's own native core
+## One declaration in [method DotNetVar.write]'s terms: the row GameSpice Net's own native core
 ## reads too ([method DotNetBehaviour._native_spec]), [param slot] its property's slot there.
 static func spec_row(declaration: DotNetVar, slot: int) -> PackedFloat64Array:
 	return PackedFloat64Array([

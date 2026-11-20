@@ -11,7 +11,7 @@
 
 ## Two builds on one wire
 
-**A server and a client built from different dot-* sources can play, as long as neither lacks something the other REQUIRES.**
+**A server and a client built from different gs-* sources can play, as long as neither lacks something the other REQUIRES.**
 
 - **Wire ids are derived from the type's name** (`DotNetMessageRegistry.wire_id_for`: the first 32 bits of its SHA-256). Assigning ids by sorting the registered names made two processes agree only while they registered exactly the same set; one added type renumbered every type after it.
 - **Every message body is framed with its length in bits**: `id (32) | varint bit length | align | body`. A receiver without the type skips exactly that message and carries on, mid-batch included; a receiver with an older version reads what it knows and skips the rest. Bits, not bytes, because a body ending mid-byte is padded with zeroes that look exactly like a one-bit field set to false; `DotNetReader.limit_bits` bounds the body reader so `has_more()` means "the sender wrote nothing further".
@@ -22,7 +22,7 @@
 The table is still exchanged, for what only it can do. `DotNetManager` sends `messages.schema_payload()` through `send_fn` as RELIABLE (a server in `add_peer`, a client in `start()`, and `announce_schema(peer)` for a host whose route was not up yet), and the receiver's `decode` adopts it (reserved id 0).
 
 - A type registered `required` (the default: a game's own event and request types are the game) that the peer does not know refuses the pair with a sentence ("This server's game needs a newer game client.") on `peer_schema_refused`; nothing that peer sends is decoded after it.
-- **dot-net cannot drop a peer, because it owns no socket, so the host must.** dot-game's `DotGameNetcode` kicks with `error.message`; a game building its own manager connects the signal itself.
+- **GameSpice Net cannot drop a peer, because it owns no socket, so the host must.** GameSpice Game's `DotGameNetcode` kicks with `error.message`; a game building its own manager connects the signal itself.
 - An optional type the peer lacks is skipped and costs nothing. Two names whose derived ids collide are refused at registration, or at adoption when only the peer has one of them.
 - `schema_hash()` covers **only the required names**: what must match, printed as twelve characters, so a peer with one extra optional type does not read as incompatible.
 
@@ -34,7 +34,7 @@ Derived ids no longer protect you from a careless change, so: **append fields, n
 
 Godot's ENet sends `TRANSFER_MODE_UNRELIABLE` **unsequenced**: through a real lossy link the unreliable packets arrive out of order (most of them behind a newer one), while reliable ones arrive exactly once and in order. Over WebSocket "unreliable" is reliable and in order, so a bug of this kind shows only on a native client over UDP.
 
-**Nothing sent unreliable may assume order.** Snapshots are superseded by tick in `receive_snapshot`; the input buffer is sorted by tick; dot-voice's jitter buffer orders by sequence; dot-server's heartbeat and ping echo a value. dot-server's scoreboard was the exception (the client kept whatever payload arrived last) and carries a `seq` that the client checks. A new unreliable message needs a tick or a sequence, or must be a value whose latest copy is always right.
+**Nothing sent unreliable may assume order.** Snapshots are superseded by tick in `receive_snapshot`; the input buffer is sorted by tick; GameSpice Voice's jitter buffer orders by sequence; GameSpice Server's heartbeat and ping echo a value. GameSpice Server's scoreboard was the exception (the client kept whatever payload arrived last) and carries a `seq` that the client checks. A new unreliable message needs a tick or a sequence, or must be a value whose latest copy is always right.
 
 ## Snapshot parts
 
@@ -46,7 +46,7 @@ Godot's ENet sends `TRANSFER_MODE_UNRELIABLE` **unsequenced**: through a real lo
 - **Entities that would need a seventeenth part wait**, as the budget makes them wait (`note_starved`), and the accumulator puts them first next time.
 - **The client acknowledges a tick only once every part of it has been applied**, so the acknowledgement stays four bytes, which every game's input packet has as a fixed prefix (`ACK_BYTES`). A tick with a part missing is never acknowledged; the next complete tick's acknowledgement resolves it as lost and the server re-sends what it carried, including what the parts that did arrive carried. That redundancy only follows a loss. A per-part acknowledgement would avoid it and change every game's bridge.
 - **Superseding is by the newest tick any part of which has been read**, not the newest acknowledged: a part of an older tick arriving after a part of a newer one is dropped, because entities are not in the same part every tick (the order is the priority accumulator's) and it may carry an entity the newer part already moved. Only the first part of a tick feeds the clock, the arrival time and `DotNetStats.note_snapshot`; `snapshot_applied` fires once per part.
-- **Mixed versions**: a client from before parts reads the first part to arrive, drops the others as repeats of its tick, and acknowledges the tick, which the server takes as all of it; the entities in the dropped parts stay stale until they change again. A client must not run an older dot-net than its server.
+- **Mixed versions**: a client from before parts reads the first part to arrive, drops the others as repeats of its tick, and acknowledges the tick, which the server takes as all of it; the entities in the dropped parts stay stale until they change again. A client must not run an older GameSpice Net than its server.
 - `largest_part_bytes` and `snapshots_split` on the server's manager say how often it happens; `describe_lines()` prints both. One entity too big for `mtu` on its own is sent oversized and logged once as a WARN.
 
 ## Unchanged entities

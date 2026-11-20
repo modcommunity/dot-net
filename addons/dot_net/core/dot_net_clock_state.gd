@@ -103,7 +103,7 @@ var _jitter_ms: float = 0.0
 var _synced: bool = false
 
 ## Whether the clock has ever been anchored with a real round-trip measurement. The first sample
-## often precedes any measurement (dot-net owns no transport), so the next one that carries one
+## often precedes any measurement (GameSpice Net owns no transport), so the next one that carries one
 ## is adopted outright, once, rather than smoothed toward over seconds of discarded input.
 var _synced_with_rtt: bool = false
 var _snap_count: int = 0

@@ -1,7 +1,7 @@
 class_name DotNetProfileLink
 extends RefCounted
 
-## Carries dot-core's [DotProfileRuntime] over a [DotNetManager]: requests up, rows down. Opt-in:
+## Carries GameSpice Core's [DotProfileRuntime] over a [DotNetManager]: requests up, rows down. Opt-in:
 ## [code]DotNetProfileLink.attach(manager, runtime)[/code] before the manager starts (message types
 ## seal on first use); then [method peer_joined] per peer, [method submit] a request, [member actor_of].
 
@@ -31,7 +31,7 @@ static func wire_bound(setting: int) -> int:
 signal reply(ok: bool, text: String)
 
 ## [code](peer_id: int) -> Variant[/code]: who a peer is to the permission check (a uid for
-## dot-server's admins). Unset, the actor is the peer id.
+## GameSpice Server's admins). Unset, the actor is the peer id.
 var actor_of: Callable = Callable()
 ## The actor for a request made on the server itself (its console).
 var local_actor: Variant = "server"

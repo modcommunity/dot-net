@@ -290,7 +290,7 @@ class Pacer extends DotNetBehaviour:
 ## simulation where a client predicts a bump against something it does not predict.
 ## [member obstacle_at] is the bot's position per tick (`Vector3.INF` for nothing).
 class Bumper extends DotNetBehaviour:
-	## Two capsule radii, 0.35 m each, as dot-player-controller's standing hull.
+	## Two capsule radii, 0.35 m each, as GameSpice Player Controller's standing hull.
 	const APART := 0.7
 	const WALK := 3.0
 
@@ -495,7 +495,7 @@ class ObserverVars extends DotNetBehaviour:
 		replicate(&"wobble", DotNetVar.Type.UINT).bits(8)
 
 
-## A strategy defined entirely outside dot-net.
+## A strategy defined entirely outside GameSpice Net.
 class TagInterest extends DotNetInterest:
 	func _init() -> void:
 		strategy_name = "objectives-only"

@@ -30,7 +30,7 @@ var _read_now: Dictionary = {}
 var _views: Dictionary = {}
 
 var _registered: bool = false
-## dot-sim's snapshot codec for this behaviour ([DotNetSimCodec]), or null for the GDScript one.
+## GameSpice Sim's snapshot codec for this behaviour ([DotNetSimCodec]), or null for the GDScript one.
 var _sim_codec: Object = null
 var _config: DotNetConfig = null
 

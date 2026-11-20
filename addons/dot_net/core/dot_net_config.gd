@@ -59,8 +59,8 @@ const MAX_SNAPSHOT_PARTS := 16
 ## command line [code]--net-native-reads[/code].
 @export_range(0, 2) var native_reads: int = 1
 
-## Encode and decode snapshot states in dot-sim's native codec ([DotNetSimCodec]) when dot-sim is loaded: same bytes and values, cheaper;
-## the GDScript codec otherwise and always on the web. Covers what [member native] does not (a client's decode, a server without dot-net's
+## Encode and decode snapshot states in GameSpice Sim's native codec ([DotNetSimCodec]) when GameSpice Sim is loaded: same bytes and values, cheaper;
+## the GDScript codec otherwise and always on the web. Covers what [member native] does not (a client's decode, a server without GameSpice Net's
 ## library). [code]GS_NET_SIM_CODEC=0[/code] or [code]--net-sim-codec=false[/code] turns it off.
 @export var sim_codec: bool = true
 

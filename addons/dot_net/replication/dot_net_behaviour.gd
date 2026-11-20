@@ -138,7 +138,7 @@ func replicate(property: StringName, type: DotNetVar.Type) -> DotNetVar:
 
 ## Declares a property with a custom codec.
 ##
-## Shorthand for [code]replicate(name, CUSTOM).codec(w, r)[/code], the path for any type dot-net does not know.
+## Shorthand for [code]replicate(name, CUSTOM).codec(w, r)[/code], the path for any type GameSpice Net does not know.
 func replicate_custom(
 	property: StringName,
 	writer_fn: Callable,

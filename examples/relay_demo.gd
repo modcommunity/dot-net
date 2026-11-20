@@ -200,7 +200,7 @@ func _section_enet() -> void:
 		_sections_finished += 1
 		return
 
-	# Reached through ClassDB, as dot-core's transport does: a script that names the class
+	# Reached through ClassDB, as GameSpice Core's transport does: a script that names the class
 	# does not compile on the web template.
 	var server_peer: Object = ClassDB.instantiate("ENetMultiplayerPeer")
 	var err: int = server_peer.call("create_server", 0, 4)
@@ -255,7 +255,7 @@ func _section_enet() -> void:
 const THROTTLE_PORT := 27393
 
 ## [b]A steady path, a reliable burst and long frames: ENet's own throttle drops what the game sends
-## unreliably, at the sender.[/b] dot-core's DotTransportENet turns its deceleration to 0 (see its
+## unreliably, at the sender.[/b] GameSpice Core's DotTransportENet turns its deceleration to 0 (see its
 ## `packet_throttle_deceleration` for the mechanism); the stock pair beside it is the control.
 func _section_throttle() -> void:
 	_sections_started += 1

@@ -126,7 +126,7 @@ var _lost: Array[bool] = []
 var _last_late_tick: int = -1
 var _late_fed: bool = false
 
-## dot-sim's native twin of the tracks and of [method apply]'s draw, or null: see
+## GameSpice Sim's native twin of the tracks and of [method apply]'s draw, or null: see
 ## [member DotNetConfig.sim_interp]. The GDScript tracks are kept as well, for
 ## [method value_at], [method bracket_at] and lag compensation.
 const NATIVE_CLASS := &"DotSimInterpolator"
@@ -153,7 +153,7 @@ func _init(p_config: DotNetConfig) -> void:
 			_native.set_settled_skip(true)
 
 
-## Whether [method apply] draws in dot-sim's library.
+## Whether [method apply] draws in GameSpice Sim's library.
 func is_native() -> bool:
 	return _native != null
 

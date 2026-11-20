@@ -1,6 +1,6 @@
 [![Net - GameSpice addon](docs/banner.png)](https://moddingcommunity.com/a/18-gs-net)
 
-Multiplayer netcode for Godot 4. It keeps clocks in step, packs data tightly, copies game state from the server to clients, smooths what remote players do, predicts your own movement, checks hits fairly despite lag, and sends each player only what they need. It needs only [dot-core](https://github.com/gamespice-platform/core), so you can use it with [dot-server](https://github.com/gamespice-platform/server), Godot's own multiplayer, or your own transport. Part of TMC's open source [**GameSpice**](https://gamespice.net) collection (MIT licence).
+Multiplayer netcode for Godot 4. It keeps clocks in step, packs data tightly, copies game state from the server to clients, smooths what remote players do, predicts your own movement, checks hits fairly despite lag, and sends each player only what they need. It needs only [GameSpice Core](https://github.com/gamespice-platform/core), so you can use it with [GameSpice Server](https://github.com/gamespice-platform/server), Godot's own multiplayer, or your own transport. Part of TMC's open source [**GameSpice**](https://gamespice.net) collection (MIT licence).
 
 > Built with Claude Code. Every addon has a headless test suite and the suites pass, but little of this has met real players yet. Please report rough edges.
 
@@ -96,7 +96,7 @@ You should not need a fork. Subclass `DotNetBehaviour` for components, `DotNetIn
 
 - `_net_simulate` must give the same result on every machine, or reconciliation will not converge. That rules out Godot's physics for anything needing exact agreement. See [docs/prediction.md](docs/prediction.md#determinism-is-a-requirement-not-an-aspiration).
 - A snapshot is split into at most 16 parts (a fixed constant in the code, not a setting). What does not fit waits for a later tick.
-- Rollback netcode, matchmaking and voice are not part of dot-net.
+- Rollback netcode, matchmaking and voice are not part of GameSpice Net.
 
 ## More documentation
 

@@ -1,6 +1,6 @@
 class_name DotNetNative
 extends RefCounted
-## Loads dot-net's optional native snapshot library and makes a [code]DotNetNativeCore[/code] for
+## Loads GameSpice Net's optional native snapshot library and makes a [code]DotNetNativeCore[/code] for
 ## a server's [DotNetManager] when [member DotNetConfig.native] asks for one. Never required: on
 ## any failure the GDScript path runs and the reason is logged once. See docs/native.md.
 

@@ -178,7 +178,7 @@ func on_change(handler: Callable) -> DotNetVar:
 	return self
 
 
-## Makes this a [constant Type.PACKED_FLOAT32] of [param count] floats. dot-sim's snapshot codec
+## Makes this a [constant Type.PACKED_FLOAT32] of [param count] floats. GameSpice Sim's snapshot codec
 ## writes and reads it natively; byte for byte the script's, which is the fallback.
 func of_length(count: int) -> DotNetVar:
 	if count < 0:

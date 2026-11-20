@@ -1,4 +1,4 @@
-# dot-net docs
+# GameSpice Net docs
 
 The reasoning behind the netcode, one subject per file. [CLAUDE.md](../CLAUDE.md) has the short rules; these say why.
 

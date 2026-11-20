@@ -298,7 +298,7 @@ func step(delta: float) -> void:
 
 ## Server side, read during a tick's simulate: whether this [method server_tick] ends by recording history and sending a snapshot (always
 ## true when snapshots are staggered). A behaviour whose networked values only matter when sent can skip writing them on ticks this is
-## false: dot-net reads them only when it records and sends.
+## false: GameSpice Net reads them only when it records and sends.
 func snapshot_due() -> bool:
 	var period := config.ticks_per_snapshot()
 	if config.stagger_snapshots and period > 1:

@@ -1,10 +1,10 @@
-# dot-net
+# GameSpice Net
 
 Multiplayer netcode for Godot 4: tick synchronisation, a bit-packed wire format, declarative state replication, snapshot interpolation, client-side prediction with server reconciliation, lag-compensated rewind, and pluggable interest management.
 
-**The distributable is `addons/dot_net/`.** It requires [dot-core](../dot-core) and does not depend on dot-server: a game can use dot-net over Godot's raw multiplayer, over dot-core's transports, or over anything else that moves bytes. It owns no socket and no client-to-server channel.
+**The distributable is `addons/dot_net/`.** It requires [GameSpice Core](../dot-core) and does not depend on dot-server: a game can use dot-net over Godot's raw multiplayer, over dot-core's transports, or over anything else that moves bytes. It owns no socket and no client-to-server channel.
 
-Also requires **dot-profile** (`DotProfileSet`, `DotProfile`, `DotProfileRuntime`, split from dot-core): link `addons/dot_profile` next to `addons/dot_core`.
+Also requires **GameSpice Profile** (`DotProfileSet`, `DotProfile`, `DotProfileRuntime`, split from GameSpice Core): link `addons/dot_profile` next to `addons/dot_core`.
 
 ```bash
 ln -s ../../dot-core/addons/dot_core addons/dot_core
@@ -38,14 +38,14 @@ Read the family [CLAUDE.md](../../CLAUDE.md) first; this file is only what is sp
 | `addons/dot_net/lagcomp/` | `DotNetHistory`: rewind the world to what the shooter saw |
 | `addons/dot_net/interest/` | base, all, distance, grid |
 | `addons/dot_net/bandwidth/`, `stats/` | per-peer budget with a starvation-bounded accumulator; `DotNetStats` |
-| `addons/dot_net/profile/` | `DotNetProfileLink`: opt-in carrier for dot-core's `DotProfileRuntime` (admin requests up, rows down, late-joiner snapshot); `attach` before start is the only switch |
+| `addons/dot_net/profile/` | `DotNetProfileLink`: opt-in carrier for GameSpice Core's `DotProfileRuntime` (admin requests up, rows down, late-joiner snapshot); `attach` before start is the only switch |
 | `addons/dot_net/testing/dot_net_udp_relay.gd` | a lossy UDP relay for tests. No `class_name`: preload by path |
 | `examples/` | `netcode_demo`, `diagnostics_demo`, `loss_demo`, `relay_demo`, `transport_fit_selftest`; `netcode_demo`'s sections live in `examples/selftest/` as a chain of scripts (`netcode_base` < `netcode_tests` < `netcode_messages_and_replication` to `netcode_unchanged_and_lossy_lead`), each extending the one before, so a helper sits in the file of its first caller or above |
 
 ## Running and testing
 
 - The family's two steps ([family CLAUDE.md](../../CLAUDE.md#validating-anything)), then all five scenes (`profile_link_demo.tscn`: the profile link, server plus three clients): `netcode_demo.tscn` (everything, including a two-manager integration run under loss), `diagnostics_demo.tscn` (`DotNetStats`, `DotNetSnapshot`), `loss_demo.tscn` (a server and two clients over a seeded link that loses, repeats, delays and reorders snapshots and acks, and a stream model; convergence, no regression, parts, counters; `-- --seed=N` runs one seed), `relay_demo.tscn` (the relay, a real ENet pair, and ENet's packet throttle). [testing](docs/testing.md)
-- **A dot-net change is not done until the games' `headless_net` suites agree**, and game-fatal-contact's `headless_lossy` for anything about loss or timing: most bugs here were found there, by a second peer, a real socket or a real round trip that this repo's suites lacked.
+- **A GameSpice Net change is not done until the games' `headless_net` suites agree**, and game-fatal-contact's `headless_lossy` for anything about loss or timing: most bugs here were found there, by a second peer, a real socket or a real round trip that this repo's suites lacked.
 - **A client whose frame can stall wants `reconcile_once_per_frame`** (a browser build has one thread): reconcile per snapshot replays the whole input lead for each queued snapshot. A game's own `client_tick` that bypasses `DotNetManager.client_tick` predicts through `predict_tick(tick, input)` (API 10), which flushes first; simulating the predicted behaviours by hand leaves `skip_matching_replays` nothing to match and `perf_counters` no predict time. It predicts on the input as the server decodes it (`DotNetInput.round_trip`). A behaviour that simulates nothing right now (a dead player) answers `_net_predicts()` false, or every snapshot replays the whole lead for nothing. [prediction](docs/prediction.md#reconciliation)
 - The integration test runs both managers in one process, which is why there are no autoloads and why `DotNetManager.service_scope` exists.
 
@@ -118,7 +118,7 @@ Short forms; the reasoning is in the linked file.
 
 - Bits are LSB-first; positions clamp, angles wrap. Changing either is a protocol break. [wire](docs/wire.md#format)
 - Message ids are derived from the name. **Append fields, never reorder, retype, re-width or remove one**; read a late-added field only `if reader.has_more()`. Anything else is a new type with a new name. [wire](docs/wire.md#changing-a-message)
-- A required type the peer lacks raises `peer_schema_refused`; **the host must drop the peer** (dot-net owns no socket). [wire](docs/wire.md#the-schema-exchange)
+- A required type the peer lacks raises `peer_schema_refused`; **the host must drop the peer** (GameSpice Net owns no socket). [wire](docs/wire.md#the-schema-exchange)
 - Godot's ENet sends UNRELIABLE as unsequenced: nothing sent unreliable may assume order. [wire](docs/wire.md#unreliable-means-unordered)
 - A snapshot over `config.mtu` goes out in parts, each applying alone; a client acks a tick only when every part is in, and a part of an older tick than one already read is superseded. [wire](docs/wire.md#snapshot-parts)
 - An entity with nothing dirty is listed by id in the part's tail, not written, only to a client whose schema says `FEATURE_UNCHANGED_RUNS`; the client applies it as an empty body, so `_net_state_applied` still fires per snapshot. A snapshot goes out every snapshot tick, even empty. [wire](docs/wire.md#unchanged-entities)

@@ -56,8 +56,8 @@ signal entity_spawned(identity: DotNetIdentity)
 signal entity_despawned(net_id: int)
 
 ## A peer's message schema cannot work with this one: a type one end REQUIRES that the other lacks.
-## [param error] is CODE_VERSION with a readable sentence. dot-net owns no connection and cannot drop
-## the peer, so the host (dot-game's [code]DotGameNetcode[/code]) kicks with [code]error.message[/code].
+## [param error] is CODE_VERSION with a readable sentence. GameSpice Net owns no connection and cannot drop
+## the peer, so the host (GameSpice Game's [code]DotGameNetcode[/code]) kicks with [code]error.message[/code].
 signal peer_schema_refused(peer_id: int, error: DotError)
 
 @export_group("Role")

@@ -27,7 +27,7 @@ When a snapshot is confirmed lost its entry leaves `pending` without reaching `a
 
 "Confirmed lost" means older than the newest ack and not acked itself. A view is synced only when its entity is collected, so the manager keeps each peer's acked ticks in a ring (`DotNetManager.acked_ring`, twice the ack window, tick t at t % size) and a send whose own snapshot was acked is promoted however many acks went by. Without it an entity that interest thinned out (far rings) came back with every send since the last sync read as lost and resent: dm_atrium's far_every 2 cost more bytes than no thinning at all.
 
-**Acks are optional and the host carries them.** dot-net owns no client-to-server channel (it does not carry inputs either), so `encode_ack()` hands you four bytes to put inside the input packet you already send, and `receive_ack_payload()` takes them on the server. Without acks an unconfirmed send is assumed delivered once it ages out of `ack_window_snapshots`, which is a bounded blind re-send.
+**Acks are optional and the host carries them.** GameSpice Net owns no client-to-server channel (it does not carry inputs either), so `encode_ack()` hands you four bytes to put inside the input packet you already send, and `receive_ack_payload()` takes them on the server. Without acks an unconfirmed send is assumed delivered once it ages out of `ack_window_snapshots`, which is a bounded blind re-send.
 
 **A client acks only on the fully-applied path.** `receive_snapshot` abandons the rest of a packet when it meets an entity it has not been told to spawn (it cannot skip a variable-length body without the declarations), and acking that would strand every entity after it. A client acks one tick, the newest applied in full; a late snapshot is ignored by tick as superseded.
 
@@ -99,7 +99,7 @@ What is left after that is the game half of the tick, not the network.
 
 ## Snapshots on worker threads
 
-`DotNetConfig.snapshot_workers` (default 0, off; -1 is the processor count less one, at most eight; environment `GS_NET_SNAPSHOT_WORKERS`, command line `--net-snapshot-workers`) builds each peer's snapshot on dot-core's `DotParallel`, a fork/join on the engine's worker pool that returns inside the tick. Most of a big server's snapshot time is per peer and independent, so it divides by the workers; everything else in the tick stays on the main thread.
+`DotNetConfig.snapshot_workers` (default 0, off; -1 is the processor count less one, at most eight; environment `GS_NET_SNAPSHOT_WORKERS`, command line `--net-snapshot-workers`) builds each peer's snapshot on GameSpice Core's `DotParallel`, a fork/join on the engine's worker pool that returns inside the tick. Most of a big server's snapshot time is per peer and independent, so it divides by the workers; everything else in the tick stays on the main thread.
 
 How it stays the same answer:
 

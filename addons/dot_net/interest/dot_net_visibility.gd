@@ -187,8 +187,8 @@ static func bake_bsp(
 	return out
 
 
-## [method bake_bsp] from a [code]DotMapBspMesh[/code] (duck-typed: dot-net does not depend on
-## dot-map) whose manifest has a [code]vis[/code] record. Null when it has none.
+## [method bake_bsp] from a [code]DotMapBspMesh[/code] (duck-typed: GameSpice Net does not depend on
+## GameSpice Map) whose manifest has a [code]vis[/code] record. Null when it has none.
 static func from_dot_map_mesh(mesh: Object, map_bounds: AABB = AABB()) -> DotNetVisibility:
 	var info: Dictionary = (mesh.get("manifest") as Dictionary).get("vis", {})
 	if int(info.get("clusters", 0)) <= 0:
