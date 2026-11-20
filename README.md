@@ -1,6 +1,6 @@
 [![dot-net - GameSpice addon](docs/banner.png)](https://moddingcommunity.com/a/210-dot-net)
 
-Multiplayer netcode for Godot 4. It keeps clocks in step, packs data tightly, copies game state from the server to clients, smooths what remote players do, predicts your own movement, checks hits fairly despite lag, and sends each player only what they need. It needs only [dot-core](https://github.com/gamespice-platform/core), so you can use it with [dot-server](https://github.com/gamespice-platform/server), Godot's own multiplayer, or your own transport. Part of TMC's open source **Gamespice** collection (MIT licence).
+Multiplayer netcode for Godot 4. It keeps clocks in step, packs data tightly, copies game state from the server to clients, smooths what remote players do, predicts your own movement, checks hits fairly despite lag, and sends each player only what they need. It needs only [dot-core](https://github.com/gamespice-platform/core), so you can use it with [dot-server](https://github.com/gamespice-platform/server), Godot's own multiplayer, or your own transport. Part of TMC's open source [**GameSpice**](https://gamespice.net) collection (MIT licence).
 
 > Built with Claude Code. Every addon has a headless test suite and the suites pass, but little of this has met real players yet. Please report rough edges.
 
@@ -59,7 +59,7 @@ Change tracking, quantising, who gets what, rate limiting, interpolation and pre
 
 ## Settings
 
-`DotNetConfig` is layered like every Gamespice config (defaults, JSON, `DOT_NET_*` environment, command line). The most useful ones:
+`DotNetConfig` is layered like every GameSpice config (defaults, JSON, `DOT_NET_*` environment, command line). The most useful ones:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
