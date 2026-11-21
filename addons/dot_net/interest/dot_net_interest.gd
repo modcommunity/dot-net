@@ -478,8 +478,27 @@ static func _find(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 func index_snapshot(all: Array[DotNetIdentity]) -> void:
 	_indexed = all
 	_by_id = {}
+	_packed_ok = false
+	if all.is_empty():
+		_pk_pos = PackedVector3Array()
+		_pk_owner = PackedInt32Array()
+		_pk_flags = PackedByteArray()
+		return
+	var n := all.size()
+	_pk_pos.resize(n)
+	_pk_owner.resize(n)
+	_pk_flags.resize(n)
+	var frozen := true
+	var i := 0
 	for identity in all:
 		_by_id[identity.net_id] = identity
+		frozen = frozen and identity._position_frozen
+		_pk_pos[i] = identity._frozen_position
+		_pk_owner[i] = identity.owner_peer_id
+		_pk_flags[i] = (1 if identity.always_relevant else 0) | (2 if not identity.interest_tags.is_empty() else 0)
+		i += 1
+	# Only a frozen world is one instant: unfrozen, a position read now may differ from this copy.
+	_packed_ok = frozen and use_packed
 
 
 func _find_in(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
@@ -489,6 +508,17 @@ func _find_in(all: Array[DotNetIdentity], net_id: int) -> DotNetIdentity:
 
 
 var _indexed: Array[DotNetIdentity] = []
+
+## Switch for the packed per-snapshot copies below (A/B benches and parity checks turn it off).
+static var use_packed: bool = true
+
+## [member _indexed]'s frozen positions, owners and flags (bit 0 always_relevant, bit 1 has interest_tags),
+## by index, built once per snapshot by [method index_snapshot] when every identity is frozen. Written
+## only there, so a worker may read them. [member _packed_ok] says they are usable.
+var _pk_pos: PackedVector3Array = PackedVector3Array()
+var _pk_owner: PackedInt32Array = PackedInt32Array()
+var _pk_flags: PackedByteArray = PackedByteArray()
+var _packed_ok: bool = false
 var _by_id: Dictionary = {}
 
 

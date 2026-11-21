@@ -127,6 +127,28 @@ func _evaluate_into(
 	if _visibility_on():
 		_evaluate_visible_into(out, here, owner, all)
 		return
+	if _packed_ok and is_same(all, _indexed):
+		# The same decisions from the packed copies: no object read per entity unless it has tags.
+		var pos := _pk_pos
+		var owners := _pk_owner
+		var flags := _pk_flags
+		for i in all.size():
+			var f := flags[i]
+			if f & 1 or owners[i] == owner:
+				out.append(all[i])
+			elif f & 2 == 0:
+				if here.distance_squared_to(pos[i]) <= limit_squared:
+					out.append(all[i])
+			else:
+				var identity := all[i]
+				var limit := radius
+				for tag in identity.interest_tags:
+					if radius_by_tag.has(tag):
+						limit = float(radius_by_tag[tag])
+						break
+				if here.distance_squared_to(pos[i]) <= limit * limit:
+					out.append(identity)
+		return
 	for identity in all:
 		if identity.always_relevant or identity.owner_peer_id == owner:
 			out.append(identity)
