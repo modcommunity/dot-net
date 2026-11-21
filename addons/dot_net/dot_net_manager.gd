@@ -149,6 +149,7 @@ func announce_schema(peer_id: int) -> bool:
 	var payload := messages.schema_payload()
 	send_fn.call(peer_id, payload, DotNetMessage.Delivery.RELIABLE)
 	stats.note_sent(payload.size(), 1)
+	DotNetCostProbe.note(&"schema", DotNetCostProbe.OUT, payload.size())
 	return true
 
 
@@ -588,6 +589,7 @@ func send(message: DotNetMessage, peer_id: int = 0) -> DotResult:
 	var payload := writer.to_bytes()
 	send_fn.call(peer_id, payload, messages.delivery_of(message.type_name()))
 	stats.note_sent(payload.size(), 1)
+	DotNetCostProbe.note(message.type_name(), DotNetCostProbe.OUT, payload.size())
 
 	return DotResult.success(payload.size())
 
@@ -638,8 +640,10 @@ func _receive_now(payload: PackedByteArray, from_peer_id: int) -> DotResult:
 	# end does not have, or anything from a peer whose schema was refused. Not an error --
 	# a peer one build ahead sends exactly this, and must be able to.
 	if decoded.value == null:
+		DotNetCostProbe.note(&"schema", DotNetCostProbe.IN, payload.size())
 		return DotResult.success(false)
 
+	DotNetCostProbe.note(decoded.value.type_name(), DotNetCostProbe.IN, payload.size())
 	messages.dispatch(decoded.value)
 	return DotResult.success(true)
 

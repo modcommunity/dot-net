@@ -11,6 +11,7 @@ func _receive_snapshot(payload: PackedByteArray) -> DotResult:
 		)
 
 	stats.note_received(payload.size())
+	DotNetCostProbe.note(&"snapshot", DotNetCostProbe.IN, payload.size())
 
 	var reader := DotNetReader.new(payload)
 

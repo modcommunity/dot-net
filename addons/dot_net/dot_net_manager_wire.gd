@@ -256,6 +256,7 @@ func _send_to_peer(
 		largest_part_bytes = maxi(largest_part_bytes, payload.size())
 		budget.note_packet(peer_id, payload.size())
 		stats.note_sent(payload.size(), count + (unchanged.size() if index == tail_part else 0))
+		DotNetCostProbe.note(&"snapshot", DotNetCostProbe.OUT, payload.size())
 
 	return true
 
@@ -551,6 +552,7 @@ func _apply_build(build: SnapshotBuild, context: Dictionary) -> void:
 		largest_part_bytes = maxi(largest_part_bytes, payload.size())
 		budget.note_packet(peer_id, payload.size())
 		stats.note_sent(payload.size(), build.entity_counts[index])
+		DotNetCostProbe.note(&"snapshot", DotNetCostProbe.OUT, payload.size())
 
 
 ## [param ids] (in the order they were served) as runs of consecutive ids, sorted:

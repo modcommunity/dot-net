@@ -383,6 +383,7 @@ func _apply_native_result(job: SnapshotJob, r: Array, core_interest: bool, conte
 		largest_part_bytes = maxi(largest_part_bytes, payload.size())
 		budget.note_packet(peer_id, payload.size())
 		stats.note_sent(payload.size(), counts[index])
+		DotNetCostProbe.note(&"snapshot", DotNetCostProbe.OUT, payload.size())
 
 
 ## Snapshots for every peer on this phase, built on [param workers] threads and sent from here in
