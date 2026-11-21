@@ -22,6 +22,13 @@ extends DotNetInterest
 var _cells: Dictionary = {}
 var _indexed_count: int = 0
 
+## Uses the native cell index (dot-sim's DotSimInterestGrid, same candidates in the same order) when true. Off by default: it is main-thread only, so the grid stops being thread-safe while it runs, and it measured 1.2-1.3x on prepare plus queries.
+## It is only used when the extension carries it; a web export never does and runs the script index.
+@export var native: bool = false
+
+var _index: RefCounted = null
+var _slots: Array = []
+
 
 func _init() -> void:
 	strategy_name = "grid"
@@ -31,6 +38,21 @@ func _init() -> void:
 func _prepare(all: Array[DotNetIdentity], _context: Dictionary) -> void:
 	_cells.clear()
 	_indexed_count = 0
+	_slots.clear()
+
+	if _native_wanted():
+		if _index == null:
+			_index = ClassDB.instantiate(&"DotSimInterestGrid") as RefCounted
+		var positions := PackedVector3Array()
+		for identity in all:
+			if identity.always_relevant:
+				continue
+			_slots.append(identity)
+			positions.append(identity.world_position())
+		_index.call(&"build", positions, cell_size, ignore_vertical)
+		_indexed_count = _slots.size()
+		return
+	_index = null
 
 	for identity in all:
 		if identity.always_relevant:
@@ -53,10 +75,22 @@ func _candidates(
 	all: Array[DotNetIdentity],
 	_context: Dictionary
 ) -> Variant:
-	if observer == null or _cells.is_empty():
+	if observer == null:
+		return null
+	var centre := observer.world_position()
+	if _index != null:
+		if _slots.is_empty():
+			return null
+		var out_native: Array = []
+		for slot: int in _index.call(&"query", centre, radius):
+			out_native.append(_slots[slot])
+		for identity in all:
+			if identity.always_relevant:
+				out_native.append(identity)
+		return out_native
+	if _cells.is_empty():
 		return null
 
-	var centre := observer.world_position()
 	var reach := int(ceilf(radius / maxf(1.0, cell_size)))
 
 	# Untyped: a worker may build it (DotNetInterest.relevance says why).
@@ -129,16 +163,22 @@ static func _key(x: int, y: int, z: int) -> int:
 	return ((x & 0x1FFFFF) << 42) | ((y & 0x1FFFFF) << 21) | (z & 0x1FFFFF)
 
 
+func _native_wanted() -> bool:
+	return native and ClassDB.class_exists(&"DotSimInterestGrid")
+
+
 func describe() -> Dictionary:
 	var d := super.describe()
 	d["cell_size"] = cell_size
 	d["radius"] = radius
-	d["cells"] = _cells.size()
+	d["cells"] = _cells.size() if _index == null else int(_index.call(&"cell_count"))
+	d["native"] = _index != null
 	d["indexed"] = _indexed_count
 	return d
 
 
 ## Thread-safe as itself, not as a subclass: see [method DotNetInterest.is_thread_safe].
+## Not while the native index is in use: an extension object is only touched from the main thread.
 ## Reads only frozen positions, the identities' fields and its own exports, and [member _cells], built on the main thread by [method _prepare].
 func is_thread_safe() -> bool:
-	return (get_script() as Script).get_global_name() == &"DotNetInterestGrid"
+	return _index == null and (get_script() as Script).get_global_name() == &"DotNetInterestGrid"
